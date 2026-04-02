@@ -1,6 +1,7 @@
 """
 Database models for the PhotoBox API.
 """
+import uuid
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import (
@@ -35,6 +36,13 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     """User in the system."""
+
+    # Enforced choices to prevent billing database errors
+    class SubscriptionTier(models.TextChoices):
+        FREE = 'FREE', 'Free Tier'
+        PRO = 'PRO', 'Professional'
+        AGENCY = 'AGENCY', 'Agency'
+
     email = models.EmailField(max_length=255, unique=True)
     name = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
@@ -42,8 +50,16 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     # --- PHOTOBOX SAAS FIELDS ---
     stripe_customer_id = models.CharField(max_length=255, blank=True)
-    subscription_tier = models.CharField(max_length=50, default='free')
+    subscription_tier = models.CharField(
+        max_length=20,
+        choices=SubscriptionTier.choices,
+        default=SubscriptionTier.FREE
+    )
     storage_limit_gb = models.IntegerField(default=5)
+
+    # Audit trails
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     objects = UserManager()
 
@@ -52,16 +68,25 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 class Workspace(models.Model):
     """Workspace object for isolating photographer environments."""
+
+    # UUID prevents users from guessing workspace URLs (e.g., workspace/1)
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
     )
     business_name = models.CharField(max_length=255)
-    custom_domain = models.CharField(max_length=255, blank=True)
+
+    # null=True and unique=True prevents database crashes if two users leave this blank
+    custom_domain = models.CharField(max_length=255, blank=True, null=True, unique=True)
+
+    # Audit trails
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.business_name
-
 
 
 

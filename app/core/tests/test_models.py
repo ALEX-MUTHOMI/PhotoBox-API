@@ -7,9 +7,9 @@ from django.contrib.auth import get_user_model
 from core import models
 
 
-def create_user(email='photographer@example.com', password='testpass123'):
+def create_user(email='photographer@example.com', password='testpass123', **extra_fields):
     """Create and return a new user."""
-    return get_user_model().objects.create_user(email, password)
+    return get_user_model().objects.create_user(email, password, **extra_fields)
 
 
 class ModelTests(TestCase):
@@ -54,15 +54,15 @@ class ModelTests(TestCase):
         self.assertTrue(user.is_superuser)
         self.assertTrue(user.is_staff)
 
-    # --- NEW PHOTOBOX SAAS TESTS BELOW ---
+    # --- PHOTOBOX SAAS TESTS BELOW ---
 
     def test_user_has_saas_fields(self):
         """Test that our custom user model initializes with SaaS billing/storage fields."""
         user = create_user()
 
-        # Photographers should start on a free tier with a 5GB limit
+        # Photographers should start on a FREE tier with a 5GB limit
         self.assertEqual(user.stripe_customer_id, '')
-        self.assertEqual(user.subscription_tier, 'free')
+        self.assertEqual(user.subscription_tier, 'FREE')
         self.assertEqual(user.storage_limit_gb, 5)
 
     def test_create_workspace(self):
@@ -76,3 +76,5 @@ class ModelTests(TestCase):
 
         self.assertEqual(str(workspace), workspace.business_name)
         self.assertEqual(workspace.user, user)
+        # Verify the UUID was generated automatically
+        self.assertTrue(hasattr(workspace, 'id'))

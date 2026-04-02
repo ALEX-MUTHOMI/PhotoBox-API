@@ -1,5 +1,5 @@
 """
-Tests for the Django admin modifications.
+Tests for the Django admin .
 """
 from django.test import TestCase
 from django.contrib.auth import get_user_model
@@ -33,7 +33,7 @@ class AdminSiteTests(TestCase):
         self.assertContains(res, self.user.email)
 
         # --- PHOTOBOX SAAS TEST ---
-        # Verifies the default 'free' tier shows up on the admin list
+        # Verifies the default 'FREE' tier shows up on the admin list
         self.assertContains(res, self.user.subscription_tier)
 
     def test_edit_user_page(self):

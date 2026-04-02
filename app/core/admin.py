@@ -10,10 +10,15 @@ from core import models
 
 class UserAdmin(BaseUserAdmin):
     """Define the admin pages for users."""
-    ordering = ['id']
-    list_display = ['email', 'name', 'subscription_tier']
 
-    # This controls the "Edit User" page layout
+    # SAAS UPGRADE: Search and filter tools for customer support
+    search_fields = ['email', 'name', 'stripe_customer_id']
+    list_filter = ['subscription_tier', 'is_active', 'is_staff']
+
+    # Order by email since we use UUIDs now
+    ordering = ['email']
+    list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb']
+
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
         (_('Personal Info'), {'fields': ('name',)}),
@@ -36,9 +41,10 @@ class UserAdmin(BaseUserAdmin):
         ),
         (_('Important dates'), {'fields': ('last_login',)}),
     )
-    readonly_fields = ['last_login']
 
-    # This controls the "Create User" page layout
+    # SAAS UPGRADE: Lock the Stripe ID so admins cannot accidentally break billing
+    readonly_fields = ['last_login', 'stripe_customer_id']
+
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
@@ -57,20 +63,16 @@ class UserAdmin(BaseUserAdmin):
     )
 
 
-# Register only PhotoBox models, drop all legacy course models
+class WorkspaceAdmin(admin.ModelAdmin):
+    """Define the admin pages for photographer workspaces."""
+    list_display = ['business_name', 'user', 'custom_domain', 'created_at']
+    search_fields = ['business_name', 'custom_domain', 'user__email']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['-created_at']
+
+
 admin.site.register(models.User, UserAdmin)
-admin.site.register(models.Workspace)
-
-
-
-
-
-
-
-
-
-
-
+admin.site.register(models.Workspace, WorkspaceAdmin)
 
 
 
