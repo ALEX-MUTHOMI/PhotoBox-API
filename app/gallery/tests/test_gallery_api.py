@@ -92,3 +92,24 @@ class PrivateGalleryApiTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(len(res.data), 1) # Should only see OUR gallery, not the rival's
         self.assertEqual(res.data[0]['title'], 'Our Gallery')
+
+    def test_create_gallery_successful(self):
+        """Test creating a new gallery through the API."""
+        payload = {
+            'title': 'Summer Wedding 2026',
+            'slug': 'summer-wedding-2026',
+            'is_public': True
+        }
+        res = self.client.post(GALLERIES_URL, payload)
+
+        # 1. Assert the API responded with 201 Created
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        # 2. Assert the data actually exists in the database
+        gallery = Gallery.objects.get(id=res.data['id'])
+        self.assertEqual(gallery.title, payload['title'])
+        self.assertEqual(gallery.slug, payload['slug'])
+        self.assertTrue(gallery.is_public)
+
+        # 3. SECURITY GUARDRAIL: Assert the backend secretly assigned the correct workspace
+        self.assertEqual(gallery.workspace, self.workspace)

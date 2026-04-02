@@ -1,27 +1,31 @@
 """
-Views for the gallery APIs.
+Views for the Gallery API.
 """
 from rest_framework import viewsets
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
 
-from core.models import Gallery
+from core.models import Gallery, Workspace
 from gallery import serializers
 
 
 class GalleryViewSet(viewsets.ModelViewSet):
-    """View for managing gallery APIs."""
+    """Viewset for managing gallery resources."""
     serializer_class = serializers.GallerySerializer
     queryset = Gallery.objects.all()
 
-    # SECURITY GUARDRAILS: Must be logged in with a valid token
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        """Retrieve galleries strictly for the authenticated user's workspace."""
-        # This is the Tenant Isolation lock. It navigates the relationships:
-        # Gallery -> Workspace -> User
+        """Retrieve galleries limited to the authenticated user's workspace."""
+        # Enforce strict tenant isolation at the query level.
         return self.queryset.filter(
             workspace__user=self.request.user
         ).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        """Create a new gallery associated with the user's workspace."""
+        # Auto-inject the tenant context to prevent client-side manipulation.
+        workspace = Workspace.objects.get(user=self.request.user)
+        serializer.save(workspace=workspace)
