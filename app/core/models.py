@@ -1,8 +1,10 @@
 """
 Database models for the PhotoBox API.
 """
+import os
 import uuid
 from django.conf import settings
+
 from django.db import models
 from django.contrib.auth.models import (
     AbstractBaseUser,
@@ -88,9 +90,70 @@ class Workspace(models.Model):
     def __str__(self):
         return self.business_name
 
+class Gallery(models.Model):
+    """Gallery object for grouping a photographer's images."""
+
+    # UUID for secure, unguessable sharing links
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Linked to Workspace (Tenant Isolation)
+    workspace = models.ForeignKey(
+        'Workspace',
+        on_delete=models.CASCADE,
+        related_name='galleries'
+    )
+
+    # Core Data
+    title = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=255, unique=True)
+
+    # SaaS Features: Password protection and visibility toggles
+    is_public = models.BooleanField(default=False)
+    client_password = models.CharField(max_length=128, blank=True)
+
+    # Audit Trails
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.title
+
+def workspace_image_file_path(instance, filename):
+    """
+    Generate file path for new image.
+    Isolates files by Workspace UUID to prevent tenant data collisions.
+    """
+    ext = os.path.splitext(filename)[1]
+    filename = f'{uuid.uuid4()}{ext}'
+
+    # Creates a folder structure like: uploads/workspace/<workspace_uuid>/<random_uuid>.jpg
+    return os.path.join('uploads', 'workspace', str(instance.gallery.workspace.id), filename)
 
 
+class Image(models.Model):
+    """Image object belonging to a gallery."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
+    # Locked to the Gallery
+    gallery = models.ForeignKey(
+        Gallery,
+        on_delete=models.CASCADE,
+        related_name='images'
+    )
+
+    title = models.CharField(max_length=255, blank=True)
+    image = models.ImageField(upload_to=workspace_image_file_path)
+
+    # SaaS UI Feature: Photographers need to drag-and-drop reorder their photos
+    order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Automatically sort images by the custom order, then by newest first
+        ordering = ['order', '-created_at']
+
+    def __str__(self):
+        return self.title if self.title else str(self.id)
 
 
 

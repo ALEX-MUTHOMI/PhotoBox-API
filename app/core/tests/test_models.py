@@ -78,3 +78,49 @@ class ModelTests(TestCase):
         self.assertEqual(workspace.user, user)
         # Verify the UUID was generated automatically
         self.assertTrue(hasattr(workspace, 'id'))
+
+
+    def test_create_gallery(self):
+        """Test creating a gallery linked to a workspace is successful."""
+        # 1. Create the user
+        user = create_user()
+
+        # 2. Create their workspace
+        workspace = models.Workspace.objects.create(
+            user=user,
+            business_name='Apex Photography',
+            custom_domain='gallery.apexphotography.com'
+        )
+
+        # 3. Create the gallery inside that workspace
+        gallery = models.Gallery.objects.create(
+            workspace=workspace,
+            title='Wedding Summer 2026',
+            slug='wedding-summer-2026',
+            is_public=False
+        )
+
+        # 4. Verify the database locked everything together correctly
+        self.assertEqual(str(gallery), gallery.title)
+        self.assertEqual(gallery.workspace, workspace)
+        self.assertTrue(hasattr(gallery, 'id')) # Verify UUID is working
+
+    def test_create_image(self):
+        """Test creating an image linked to a gallery is successful."""
+        user = create_user()
+        workspace = models.Workspace.objects.create(
+            user=user, business_name='Apex Photo'
+        )
+        gallery = models.Gallery.objects.create(
+            workspace=workspace, title='Wedding Summer 2026', slug='wedding-summer-2026'
+        )
+
+        # Create an image record linked to the gallery
+        image = models.Image.objects.create(
+            gallery=gallery,
+            title='Bride Portrait'
+        )
+
+        self.assertEqual(str(image), image.title)
+        self.assertEqual(image.gallery, gallery)
+        self.assertTrue(hasattr(image, 'id'))

@@ -71,6 +71,8 @@ class WorkspaceAdmin(admin.ModelAdmin):
     ordering = ['-created_at']
 
 
+
+
 admin.site.register(models.User, UserAdmin)
 admin.site.register(models.Workspace, WorkspaceAdmin)
 
