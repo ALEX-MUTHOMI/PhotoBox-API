@@ -14,14 +14,14 @@ class AdminSiteTests(TestCase):
         """Create user and client."""
         self.client = Client()
         self.admin_user = get_user_model().objects.create_superuser(
-            email='admin@example.com',
+            email='admin@photobox.com',
             password='testpass123',
         )
         self.client.force_login(self.admin_user)
         self.user = get_user_model().objects.create_user(
-            email='user@example.com',
+            email='photographer@example.com',
             password='testpass123',
-            name='Test User'
+            name='Test Photographer'
         )
 
     def test_users_lists(self):
@@ -31,6 +31,10 @@ class AdminSiteTests(TestCase):
 
         self.assertContains(res, self.user.name)
         self.assertContains(res, self.user.email)
+
+        # --- PHOTOBOX SAAS TEST ---
+        # Verifies the default 'free' tier shows up on the admin list
+        self.assertContains(res, self.user.subscription_tier)
 
     def test_edit_user_page(self):
         """Test the edit user page works."""
