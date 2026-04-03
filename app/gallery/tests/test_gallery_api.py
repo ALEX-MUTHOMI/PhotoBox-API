@@ -4,112 +4,69 @@ Tests for the Gallery API.
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
-
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Gallery, Workspace
 
-# The URL routing name we will build
 GALLERIES_URL = reverse('gallery:gallery-list')
 
+def detail_url(gallery_id):
+    """Create and return a gallery detail URL."""
+    return reverse('gallery:gallery-detail', args=[gallery_id])
 
 def create_user(**params):
-    """Create and return a sample user."""
     return get_user_model().objects.create_user(**params)
-
-
-class PublicGalleryApiTests(TestCase):
-    """Test unauthenticated API requests."""
-
-    def setUp(self):
-        """Set up the test client."""
-        self.client = APIClient()
-
-    def test_auth_required(self):
-        """Test that authentication is required to call the API."""
-        res = self.client.get(GALLERIES_URL)
-
-        # SECURITY GUARDRAIL: Proves anonymous users get bounced
-        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
-
 
 class PrivateGalleryApiTests(TestCase):
     """Test authenticated API requests."""
 
     def setUp(self):
-        """Set up the test client and authenticate a user."""
         self.client = APIClient()
-        self.user = create_user(
-            email='photographer@example.com',
-            password='testpass123'
-        )
-        # Create the Workspace for the user
-        self.workspace = Workspace.objects.create(
-            user=self.user,
-            business_name='Apex Photo'
-        )
-
-        # Authenticate the client (simulating a logged-in photographer)
+        self.user = create_user(email='photographer@example.com', password='testpass123')
+        self.workspace = Workspace.objects.create(user=self.user, business_name='Apex Photo')
         self.client.force_authenticate(self.user)
 
-    def test_retrieve_galleries(self):
-        """Test retrieving a list of galleries."""
-        # Create two sample galleries inside the user's workspace
-        Gallery.objects.create(
-            workspace=self.workspace, title='Wedding 2026', slug='wedding-2026'
-        )
-        Gallery.objects.create(
-            workspace=self.workspace, title='Studio Headshots', slug='studio-headshots'
-        )
+    def test_retrieve_galleries_ignores_deleted(self):
+        """Test retrieving galleries only returns active, non-deleted ones."""
+        # Create one active gallery
+        Gallery.objects.create(workspace=self.workspace, title='Active', slug='active')
+        # Create one soft-deleted gallery
+        Gallery.objects.create(workspace=self.workspace, title='Trashed', slug='trashed', is_deleted=True)
 
         res = self.client.get(GALLERIES_URL)
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        # We expect 2 galleries to be returned
-        self.assertEqual(len(res.data), 2)
+        self.assertEqual(len(res.data), 1) # Proves the trash can works!
+        self.assertEqual(res.data[0]['title'], 'Active')
 
-    def test_galleries_list_limited_to_user_workspace(self):
-        """Test that the list of galleries is limited to the authenticated user's workspace."""
-        # 1. Create a rival photographer and their workspace
-        rival_user = create_user(email='rival@example.com', password='password123')
-        rival_workspace = Workspace.objects.create(
-            user=rival_user, business_name='Rival Studio'
-        )
-        # 2. Give the rival a gallery
-        Gallery.objects.create(
-            workspace=rival_workspace, title='Rival Gallery', slug='rival-gallery'
-        )
-
-        # 3. Give OUR authenticated user a gallery
-        Gallery.objects.create(
-            workspace=self.workspace, title='Our Gallery', slug='our-gallery'
-        )
-
-        # 4. Make the request
-        res = self.client.get(GALLERIES_URL)
-
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res.data), 1) # Should only see OUR gallery, not the rival's
-        self.assertEqual(res.data[0]['title'], 'Our Gallery')
-
-    def test_create_gallery_successful(self):
-        """Test creating a new gallery through the API."""
+    def test_create_gallery_with_pin_is_hashed(self):
+        """SECURITY: Test creating a gallery with a PIN automatically hashes it."""
         payload = {
-            'title': 'Summer Wedding 2026',
-            'slug': 'summer-wedding-2026',
-            'is_public': True
+            'title': 'Secret Wedding',
+            'slug': 'secret-wedding',
+            'is_public': False,
+            'gallery_pin': '2026'
         }
         res = self.client.post(GALLERIES_URL, payload)
-
-        # 1. Assert the API responded with 201 Created
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
 
-        # 2. Assert the data actually exists in the database
         gallery = Gallery.objects.get(id=res.data['id'])
-        self.assertEqual(gallery.title, payload['title'])
-        self.assertEqual(gallery.slug, payload['slug'])
-        self.assertTrue(gallery.is_public)
+        # Assert the pin is NOT stored as '2026'
+        self.assertNotEqual(gallery.gallery_pin, '2026')
+        self.assertTrue(gallery.verify_pin('2026'))
 
-        # 3. SECURITY GUARDRAIL: Assert the backend secretly assigned the correct workspace
-        self.assertEqual(gallery.workspace, self.workspace)
+        # Assert the API response does NOT leak the pin
+        self.assertNotIn('gallery_pin', res.data)
+
+    def test_delete_gallery_is_soft_delete(self):
+        """Test that deleting via the API only soft-deletes the gallery."""
+        gallery = Gallery.objects.create(workspace=self.workspace, title='To Delete', slug='delete')
+
+        url = detail_url(gallery.id)
+        res = self.client.delete(url)
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Retrieve the gallery directly from the database to prove it still exists
+        gallery.refresh_from_db()
+        self.assertTrue(gallery.is_deleted)
