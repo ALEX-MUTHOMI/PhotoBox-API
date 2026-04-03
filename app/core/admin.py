@@ -10,12 +10,8 @@ from core import models
 
 class UserAdmin(BaseUserAdmin):
     """Define the admin pages for users."""
-
-    # SAAS UPGRADE: Search and filter tools for customer support
     search_fields = ['email', 'name', 'stripe_customer_id']
     list_filter = ['subscription_tier', 'is_active', 'is_staff']
-
-    # Order by email since we use UUIDs now
     ordering = ['email']
     list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb']
 
@@ -42,7 +38,6 @@ class UserAdmin(BaseUserAdmin):
         (_('Important dates'), {'fields': ('last_login',)}),
     )
 
-    # SAAS UPGRADE: Lock the Stripe ID so admins cannot accidentally break billing
     readonly_fields = ['last_login', 'stripe_customer_id']
 
     add_fieldsets = (
@@ -63,72 +58,54 @@ class UserAdmin(BaseUserAdmin):
     )
 
 
+# --- SAAS RESOURCE ADMINS ---
+
+class GalleryInline(admin.TabularInline):
+    """Allows admins to see Galleries directly inside the Workspace page."""
+    model = models.Gallery
+    extra = 0
+    fields = ['title', 'is_public', 'allow_downloads', 'is_deleted', 'created_at']
+    readonly_fields = ['created_at']
+
+
 class WorkspaceAdmin(admin.ModelAdmin):
     """Define the admin pages for photographer workspaces."""
-    list_display = ['business_name', 'user', 'custom_domain', 'created_at']
+    list_display = ['business_name', 'user', 'custom_domain', 'is_deleted', 'created_at']
     search_fields = ['business_name', 'custom_domain', 'user__email']
+    list_filter = ['is_deleted']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['-created_at']
+    inlines = [GalleryInline] # Injects the galleries into the workspace view
 
 
+class ImageInline(admin.TabularInline):
+    """Allows admins to see Images directly inside the Gallery page."""
+    model = models.Image
+    extra = 0
+    fields = ['title', 'order', 'is_deleted', 'created_at']
+    readonly_fields = ['created_at']
 
 
+class GalleryAdmin(admin.ModelAdmin):
+    """Define the admin pages for client galleries."""
+    list_display = ['title', 'workspace', 'is_public', 'allow_downloads', 'is_deleted']
+    search_fields = ['title', 'slug', 'workspace__business_name']
+    list_filter = ['is_deleted', 'is_public', 'allow_downloads']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    inlines = [ImageInline] # Injects the images into the gallery view
+
+
+class ImageAdmin(admin.ModelAdmin):
+    """Define the admin pages for individual images."""
+    list_display = ['id', 'title', 'gallery', 'order', 'is_deleted']
+    search_fields = ['title', 'gallery__title']
+    list_filter = ['is_deleted']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['gallery', 'order']
+
+
+# Register the models to the admin site
 admin.site.register(models.User, UserAdmin)
 admin.site.register(models.Workspace, WorkspaceAdmin)
-
-
-
-
-
-
-
-# """
-# Django admin customization.
-# """
-# from django.contrib import admin
-# from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-# from django.utils.translation import gettext_lazy as _
-
-# from core import models
-
-
-# class UserAdmin(BaseUserAdmin):
-#     """Define the admin pages for users."""
-#     ordering = ['id']
-#     list_display = ['email', 'name']
-#     fieldsets = (
-#         (None, {'fields': ('email', 'password')}),
-#         (_('Personal Info'), {'fields': ('name',)}),
-#         (
-#             _('Permissions'),
-#             {
-#                 'fields': (
-#                     'is_active',
-#                     'is_staff',
-#                     'is_superuser',
-#                 )
-#             }
-#         ),
-#         (_('Important dates'), {'fields': ('last_login',)}),
-#     )
-#     readonly_fields = ['last_login']
-#     add_fieldsets = (
-#         (None, {
-#             'classes': ('wide',),
-#             'fields': (
-#                 'email',
-#                 'password1',
-#                 'password2',
-#                 'name',
-#                 'is_active',
-#                 'is_staff',
-#                 'is_superuser',
-#             ),
-#         }),
-#     )
-
-
-# admin.site.register(models.User, UserAdmin)
-# admin.site.register(models.Recipe)
-# admin.site.register(models.Tag)
-# admin.site.register(models.Ingredient)
+admin.site.register(models.Gallery, GalleryAdmin)
+admin.site.register(models.Image, ImageAdmin)

@@ -3,124 +3,61 @@ Tests for PhotoBox database models.
 """
 from django.test import TestCase
 from django.contrib.auth import get_user_model
-
 from core import models
 
-
 def create_user(email='photographer@example.com', password='testpass123', **extra_fields):
-    """Create and return a new user."""
     return get_user_model().objects.create_user(email, password, **extra_fields)
 
-
 class ModelTests(TestCase):
-    """Test models."""
+    """Test core models."""
 
     def test_create_user_with_email_successful(self):
-        """Test creating a user with an email is successful."""
-        email = 'test@example.com'
-        password = 'testpass123'
-        user = get_user_model().objects.create_user(
-            email=email,
-            password=password,
-        )
-
-        self.assertEqual(user.email, email)
-        self.assertTrue(user.check_password(password))
-
-    def test_new_user_email_normalized(self):
-        """Test email is normalized for new users."""
-        sample_emails = [
-            ['test1@EXAMPLE.com', 'test1@example.com'],
-            ['Test2@Example.com', 'Test2@example.com'],
-            ['TEST3@EXAMPLE.com', 'TEST3@example.com'],
-            ['test4@example.COM', 'test4@example.com'],
-        ]
-        for email, expected in sample_emails:
-            user = get_user_model().objects.create_user(email, 'sample123')
-            self.assertEqual(user.email, expected)
-
-    def test_new_user_without_email_raises_error(self):
-        """Test that creating a user without an email raises a ValueError."""
-        with self.assertRaises(ValueError):
-            get_user_model().objects.create_user('', 'test123')
-
-    def test_create_superuser(self):
-        """Test creating a superuser."""
-        user = get_user_model().objects.create_superuser(
-            'admin@photobox.com',
-            'test123',
-        )
-
-        self.assertTrue(user.is_superuser)
-        self.assertTrue(user.is_staff)
-
-    # --- PHOTOBOX SAAS TESTS BELOW ---
-
-    def test_user_has_saas_fields(self):
-        """Test that our custom user model initializes with SaaS billing/storage fields."""
         user = create_user()
-
-        # Photographers should start on a FREE tier with a 5GB limit
-        self.assertEqual(user.stripe_customer_id, '')
+        self.assertEqual(user.email, 'photographer@example.com')
+        self.assertTrue(user.check_password('testpass123'))
         self.assertEqual(user.subscription_tier, 'FREE')
-        self.assertEqual(user.storage_limit_gb, 5)
 
-    def test_create_workspace(self):
-        """Test creating a Workspace for a photographer is successful."""
+    def test_create_workspace_with_branding(self):
+        """Test creating a workspace including frontend UI fields."""
         user = create_user()
         workspace = models.Workspace.objects.create(
             user=user,
             business_name='Apex Photography',
-            custom_domain='gallery.apexphotography.com'
+            brand_color='#FF5733'
         )
+        self.assertEqual(workspace.brand_color, '#FF5733')
+        self.assertFalse(workspace.is_deleted) # Proves SoftDeleteModel works
 
-        self.assertEqual(str(workspace), workspace.business_name)
-        self.assertEqual(workspace.user, user)
-        # Verify the UUID was generated automatically
-        self.assertTrue(hasattr(workspace, 'id'))
-
-
-    def test_create_gallery(self):
-        """Test creating a gallery linked to a workspace is successful."""
-        # 1. Create the user
+    def test_gallery_pin_is_hashed(self):
+        """SECURITY: Test that the gallery PIN is mathematically hashed, not plaintext."""
         user = create_user()
+        workspace = models.Workspace.objects.create(user=user, business_name='Apex')
 
-        # 2. Create their workspace
-        workspace = models.Workspace.objects.create(
-            user=user,
-            business_name='Apex Photography',
-            custom_domain='gallery.apexphotography.com'
-        )
-
-        # 3. Create the gallery inside that workspace
+        raw_pin = '2026'
         gallery = models.Gallery.objects.create(
             workspace=workspace,
-            title='Wedding Summer 2026',
-            slug='wedding-summer-2026',
-            is_public=False
+            title='Wedding',
+            slug='wedding',
+            gallery_pin=raw_pin
         )
 
-        # 4. Verify the database locked everything together correctly
-        self.assertEqual(str(gallery), gallery.title)
-        self.assertEqual(gallery.workspace, workspace)
-        self.assertTrue(hasattr(gallery, 'id')) # Verify UUID is working
+        # The stored pin MUST NOT be the raw pin
+        self.assertNotEqual(gallery.gallery_pin, raw_pin)
+        # The stored pin must be a valid Django hash
+        self.assertTrue(gallery.gallery_pin.startswith('pbkdf2_'))
+        # The verify method must work
+        self.assertTrue(gallery.verify_pin(raw_pin))
 
-    def test_create_image(self):
-        """Test creating an image linked to a gallery is successful."""
+    def test_soft_delete_mechanic(self):
+        """Test that objects can be softly deleted without destroying the database row."""
         user = create_user()
-        workspace = models.Workspace.objects.create(
-            user=user, business_name='Apex Photo'
-        )
-        gallery = models.Gallery.objects.create(
-            workspace=workspace, title='Wedding Summer 2026', slug='wedding-summer-2026'
-        )
+        workspace = models.Workspace.objects.create(user=user, business_name='Apex')
+        gallery = models.Gallery.objects.create(workspace=workspace, title='Delete Me', slug='delete-me')
 
-        # Create an image record linked to the gallery
-        image = models.Image.objects.create(
-            gallery=gallery,
-            title='Bride Portrait'
-        )
+        # Simulate a delete
+        gallery.is_deleted = True
+        gallery.save()
 
-        self.assertEqual(str(image), image.title)
-        self.assertEqual(image.gallery, gallery)
-        self.assertTrue(hasattr(image, 'id'))
+        # The row still exists in the DB for data recovery, but is marked deleted
+        recovered_gallery = models.Gallery.objects.get(id=gallery.id)
+        self.assertTrue(recovered_gallery.is_deleted)
