@@ -102,8 +102,9 @@ class Gallery(SoftDeleteModel):
     allow_downloads = models.BooleanField(default=False)
 
     def save(self, *args, **kwargs):
-        """SECURITY: Intercept the save process to hash the PIN if it exists and isn't already hashed."""
-        if self.gallery_pin and not self.gallery_pin.startswith('pbkdf2_'):
+        """SECURITY: Intercept the save process to hash the PIN if it isn't already hashed."""
+        # Agnostic check: protects against double-hashing for BOTH algorithms
+        if self.gallery_pin and not self.gallery_pin.startswith(('pbkdf2_', 'argon2')):
             self.gallery_pin = make_password(self.gallery_pin)
         super().save(*args, **kwargs)
 

@@ -2,7 +2,7 @@
 Views for the Gallery API.
 """
 from rest_framework import viewsets, parsers
-from rest_framework.authentication import TokenAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 
@@ -19,7 +19,7 @@ class GalleryViewSet(viewsets.ModelViewSet):
     serializer_class = serializers.GallerySerializer
     queryset = Gallery.objects.all()
 
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -54,7 +54,7 @@ class ImageViewSet(viewsets.ModelViewSet):
     serializer_class = serializers.ImageSerializer
     queryset = Image.objects.all()
 
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     # CRITICAL: Django must know how to parse binary multipart file uploads natively

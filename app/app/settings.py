@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/3.2/ref/settings/
 
 import os
 from pathlib import Path
+from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,9 +21,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY', 'changeme')
-
+# SECURITY: Pull key from environment, fallback to a 50+ char string for local testing
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY',
+    'django-insecure-photobox-local-dev-key-must-be-aK-least-50-chars-long-for-jwt!'
+)
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = bool(int(os.environ.get('DEBUG', 0)))
 
@@ -149,6 +152,18 @@ AUTH_USER_MODEL = 'core.User'
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+    # Catch Brute Force attacks
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle'
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '5/minute',  # Hackers guessing passwords get blocked fast
+        'user': '1000/day'   # Legitimate users have plenty of API calls
+    }
 }
 
 SPECTACULAR_SETTINGS = {
@@ -203,3 +218,31 @@ LOGGING = {
         }
     },
 }
+
+# ==========================================
+# JWT AUTHENTICATION SETTINGS
+# ==========================================
+SIMPLE_JWT = {
+    # The short-lived "Wristband" (Highly secure, expires fast if stolen)
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+
+    # The long-lived "ID Card" (Keeps the user logged in without typing their password)
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+
+    # Security: When they use a refresh token, give them a brand new one and kill the old one
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    # The HTTP Header format React will use (e.g., "Authorization: Bearer <token>")
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
+
+# ==========================================
+# ENTERPRISE SECURITY: PASSWORD HASHING
+# ==========================================
+PASSWORD_HASHERS = [
+    'django.contrib.auth.hashers.Argon2PasswordHasher', # The Gold Standard
+    'django.contrib.auth.hashers.PBKDF2PasswordHasher', # The Fallback for legacy
+    'django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher',
+    'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
+]

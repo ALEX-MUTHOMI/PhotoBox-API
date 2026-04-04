@@ -43,8 +43,8 @@ class ModelTests(TestCase):
 
         # The stored pin MUST NOT be the raw pin
         self.assertNotEqual(gallery.gallery_pin, raw_pin)
-        # The stored pin must be a valid Django hash
-        self.assertTrue(gallery.gallery_pin.startswith('pbkdf2_'))
+       # UPDATE THIS LINE: The test now expects Argon2 (or legacy pbkdf2)
+        self.assertTrue(gallery.gallery_pin.startswith(('pbkdf2_', 'argon2')))
         # The verify method must work
         self.assertTrue(gallery.verify_pin(raw_pin))
 
