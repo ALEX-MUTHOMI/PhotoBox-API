@@ -60,6 +60,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
+    # NEW: Legal compliance audit trail
+    accepted_terms = models.BooleanField(default=False)
+
     # Billing State
     stripe_customer_id = models.CharField(max_length=255, blank=True)
     subscription_tier = models.CharField(max_length=20, choices=SubscriptionTier.choices, default=SubscriptionTier.FREE)
@@ -114,12 +117,16 @@ class Gallery(SoftDeleteModel):
 
     def __str__(self):
         return self.title
-
 class Image(SoftDeleteModel):
     """Individual photo files."""
     gallery = models.ForeignKey(Gallery, on_delete=models.CASCADE, related_name='images')
     title = models.CharField(max_length=255, blank=True)
     image = models.ImageField(upload_to=workspace_image_file_path)
+
+    # INTEGRATED: The Storage Quota Tracker.
+    # BigIntegerField because 5GB is roughly 5,368,709,120 bytes
+    file_size_bytes = models.BigIntegerField(default=0)
+
     order = models.IntegerField(default=0)
 
     class Meta:

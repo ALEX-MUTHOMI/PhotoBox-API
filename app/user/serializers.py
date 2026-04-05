@@ -12,14 +12,23 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = get_user_model()
-        fields = ['email', 'password', 'old_password', 'name', 'subscription_tier', 'storage_limit_gb']
+        # INTEGRATED: Added accepted_terms to your existing fields
+        fields = ['email', 'password', 'old_password', 'name', 'subscription_tier', 'storage_limit_gb', 'accepted_terms']
 
         # THE VAULT: Hackers cannot upgrade their own billing
         read_only_fields = ['subscription_tier', 'storage_limit_gb']
 
         extra_kwargs = {
-            'password': {'write_only': True, 'min_length': 5}
+            'password': {'write_only': True, 'min_length': 5},
+            # INTEGRATED: Force the API to require this field
+            'accepted_terms': {'required': True}
         }
+
+    def validate_accepted_terms(self, value):
+        """SECURITY: Ensure the user actually checked the box."""
+        if not value:
+            raise serializers.ValidationError(" Accept the Terms of Service .")
+        return value
 
     def create(self, validated_data):
         """Create and return a user with encrypted password."""
