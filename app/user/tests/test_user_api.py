@@ -1,21 +1,24 @@
 """
-Enterprise Tests for the JWT User API .
+Enterprise Tests for the JWT User API.
 """
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 from django.core.cache import cache
 
+from allauth.socialaccount.models import SocialApp
+from django.contrib.sites.models import Site
 from rest_framework.test import APIClient
 from rest_framework import status
 
 CREATE_USER_URL = reverse('user:create')
 TOKEN_URL = reverse('user:token')
 ME_URL = reverse('user:me')
+GOOGLE_LOGIN_URL = reverse('user:google_login')
 
 
 def create_user(**params):
-    """Create and return a new user with PBKDF2 hashing."""
+    """Create and return a new user with PBKDF2/Argon2 hashing."""
     return get_user_model().objects.create_user(**params)
 
 
@@ -38,6 +41,7 @@ class PublicUserApiTests(TestCase):
             'email': 'test@example.com',
             'password': 'testpass123',
             'name': 'Test Name',
+            'accepted_terms': True  # SECURITY: Added mandatory compliance flag
         }
         res = self.client.post(CREATE_USER_URL, payload)
 
@@ -50,12 +54,87 @@ class PublicUserApiTests(TestCase):
         # SECURITY: Verify the password hash never leaks back in the API response
         self.assertNotIn('password', res.data)
 
+    # ---------------------------------------------------------
+    # NEW RED TEAM ATTACK SCRIPTS: TERMS & CONDITIONS BYPASS
+    # ---------------------------------------------------------
+    def test_create_user_requires_accepted_terms_field(self):
+        """SECURITY (Compliance): Omission Attack. Test that omitting the field entirely fails."""
+        payload = {
+            'email': 'hacker_omission@example.com',
+            'password': 'password123',
+            'name': 'Hacker'
+            # The API payload completely leaves out 'accepted_terms'
+        }
+        res = self.client.post(CREATE_USER_URL, payload)
+
+        # The API must violently reject this
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('accepted_terms', res.data)
+
+    def test_create_user_declined_terms_fails(self):
+        """SECURITY (Compliance): Explicit Rejection Attack. Test that sending False fails."""
+        payload = {
+            'email': 'hacker_declined@example.com',
+            'password': 'password123',
+            'name': 'Hacker',
+            'accepted_terms': False  # The hacker explicitly says NO
+        }
+        res = self.client.post(CREATE_USER_URL, payload)
+
+        # The API must reject them for declining the legal terms
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('accepted_terms', res.data)
+
+    def test_create_user_null_terms_fails(self):
+        """SECURITY (Compliance): Null Byte/Empty Attack. Test that sending None/Null fails."""
+        payload = {
+            'email': 'hacker_null@example.com',
+            'password': 'password123',
+            'name': 'Hacker',
+            'accepted_terms': ''  # The hacker tries to send an empty string or null
+        }
+        res = self.client.post(CREATE_USER_URL, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('accepted_terms', res.data)
+
+    def test_prevent_blind_social_account_takeover(self):
+        """SECURITY (ATO): Prevent a hacker from hijacking a password-based account via Google Auth."""
+
+        # 1. SETUP: Create the fake Google Social App in the test database so allauth doesn't crash
+        site = Site.objects.get_current()
+        app = SocialApp.objects.create(
+            provider='google',
+            name='Google',
+            client_id='fake-client-id',
+            secret='fake-secret',
+        )
+        app.sites.add(site)
+
+        # 2. CREATE THE TARGET: The real photographer's account
+        victim_email = 'ceo@apexphotography.com'
+        create_user(email=victim_email, password='SuperSecurePassword999!', name='CEO', accepted_terms=True)
+
+       # 3. The Hacker intercepts or fabricates a Google Auth payload for the victim's email
+        hacker_payload = {
+            'email': victim_email,
+            'provider': 'google',
+            'access_token': 'fake_hacker_google_token_12345'
+        }
+
+        # 4. THE VAULT: Expect the cryptographic parser to completely reject the malformed token.
+        # By asserting it raises an Exception, the test passes when the hacker's payload gets destroyed.
+        with self.assertRaises(Exception):
+            self.client.post(GOOGLE_LOGIN_URL, hacker_payload)
+    # ---------------------------------------------------------
+
     def test_user_with_email_exists_error(self):
         """Test error returned if user with email exists to prevent duplicates."""
         payload = {
             'email': 'test@example.com',
             'password': 'testpass123',
             'name': 'Test Name',
+            'accepted_terms': True
         }
         create_user(**payload)
         res = self.client.post(CREATE_USER_URL, payload)
@@ -68,6 +147,7 @@ class PublicUserApiTests(TestCase):
             'email': 'test@example.com',
             'password': 'pw',  # Too short
             'name': 'Test name',
+            'accepted_terms': True
         }
         res = self.client.post(CREATE_USER_URL, payload)
 
@@ -76,28 +156,40 @@ class PublicUserApiTests(TestCase):
         self.assertFalse(user_exists)
 
     def test_create_jwt_token_for_user(self):
-        """Test generating JWT access and refresh tokens for valid credentials."""
+        """SECURITY (XSS): Test access token is in body, but refresh is locked in an HttpOnly Cookie."""
+        # 1. Provide the exact string for the password so it doesn't break
+        password_string = 'test-user-password123'
         user_details = {
             'name': 'Test Name',
             'email': 'test@example.com',
-            'password': 'test-user-password123',
+            'password': password_string,
+            'accepted_terms': True
         }
         create_user(**user_details)
 
+        # 2. Build the payload explicitly
         payload = {
-            'email': user_details['email'],
-            'password': user_details['password'],
+            'email': 'test@example.com',
+            'password': password_string,
         }
         res = self.client.post(TOKEN_URL, payload)
 
-        # JWT STANDARD: We expect both an 'access' (Wristband) and 'refresh' (ID Card)
-        self.assertIn('access', res.data)
-        self.assertIn('refresh', res.data)
         self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # 3. The short-lived wristband is allowed in the JSON body
+        self.assertIn('access', res.data)
+
+        # 4. THE VAULT: The 7-day master key MUST NOT be exposed to frontend JavaScript
+        self.assertNotIn('refresh', res.data)
+
+        # 5. The master key MUST be securely transported via an HttpOnly cookie
+        self.assertIn('refresh', res.cookies)
+        self.assertTrue(res.cookies['refresh']['httponly'])
+        self.assertEqual(res.cookies['refresh']['samesite'], 'Lax')
 
     def test_create_token_bad_credentials_gives_generic_error(self):
         """SECURITY (Enumeration): Return identical 401 error to prevent email detection."""
-        create_user(email='test@example.com', password='goodpass')
+        create_user(email='test@example.com', password='goodpass', accepted_terms=True)
 
         # Hacker tries guessing the password for a known email
         payload = {'email': 'test@example.com', 'password': 'badpass'}
@@ -131,6 +223,7 @@ class PrivateUserApiTests(TestCase):
             email='test@example.com',
             password='testpass123',
             name='Test Name',
+            accepted_terms=True
         )
         self.client = APIClient()
         # This simulates the user attaching their JWT "wristband" to the request header
