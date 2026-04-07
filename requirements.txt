@@ -10,3 +10,9 @@ argon2-cffi>=23.1.0
 #Enterprise Identity Federation
 dj-rest-auth>=2.2.5,<2.3.0
 django-allauth>=0.54.0,<0.55.0
+
+boto3>=1.28.0
+django-storages>=1.13.2
+cloudinary>=1.36.0
+
+ 
