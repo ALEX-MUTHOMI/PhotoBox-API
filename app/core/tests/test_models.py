@@ -19,6 +19,7 @@ class ModelTests(TestCase):
         self.assertEqual(user.email, 'photographer@example.com')
         self.assertTrue(user.check_password('testpass123'))
         self.assertEqual(user.subscription_tier, 'FREE')
+        self.assertEqual(user.storage_limit_gb, 1) # VERIFIES BILLING ENGINE ALIGNMENT
 
     # =========================================================
     # NEW COMPLIANCE & SECURITY MODEL TESTS
@@ -85,17 +86,3 @@ class ModelTests(TestCase):
         # The row still exists in the DB for data recovery, but is marked deleted
         recovered_gallery = models.Gallery.objects.get(id=gallery.id)
         self.assertTrue(recovered_gallery.is_deleted)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
