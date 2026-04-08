@@ -66,7 +66,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Billing State
     stripe_customer_id = models.CharField(max_length=255, blank=True)
     subscription_tier = models.CharField(max_length=20, choices=SubscriptionTier.choices, default=SubscriptionTier.FREE)
-    storage_limit_gb = models.IntegerField(default=5)
+    storage_limit_gb = models.IntegerField(default=1) # SYNCED WITH BILLING ENGINE (1GB)
 
     objects = UserManager()
     USERNAME_FIELD = 'email'
@@ -117,6 +117,7 @@ class Gallery(SoftDeleteModel):
 
     def __str__(self):
         return self.title
+
 class Image(SoftDeleteModel):
     """Individual photo files."""
     gallery = models.ForeignKey(Gallery, on_delete=models.CASCADE, related_name='images')
@@ -124,7 +125,7 @@ class Image(SoftDeleteModel):
     image = models.ImageField(upload_to=workspace_image_file_path)
 
     # INTEGRATED: The Storage Quota Tracker.
-    # BigIntegerField because 5GB is roughly 5,368,709,120 bytes
+    # BigIntegerField because 1GB is exactly 1,073,741,824 bytes
     file_size_bytes = models.BigIntegerField(default=0)
 
     order = models.IntegerField(default=0)

@@ -24,6 +24,8 @@ urlpatterns = [
 
     # --- PHOTOBOX SAAS ROUTING ---
     path('api/gallery/', include('gallery.urls')),
+
+    path('api/billing/', include('billing.urls')),
 ]
 
 # This is CRITICAL for PhotoBox image uploads later

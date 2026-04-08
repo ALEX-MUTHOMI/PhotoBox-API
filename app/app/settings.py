@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'user',
     'gallery',
     'core',
+    'billing',
     # NEW: Identity Federation Armor
     'django.contrib.sites',
     'allauth',
