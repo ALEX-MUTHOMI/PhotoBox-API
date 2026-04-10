@@ -1,6 +1,7 @@
 """
 Views for the billing API.
 """
+
 import hmac
 import hashlib
 import json
@@ -11,8 +12,10 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
+
+
 from django.contrib.auth import get_user_model
-from .models import Subscription
+from .models import Subscription , ProcessedWebhook
 from .tasks import process_lemon_squeezy_webhook
 
 User = get_user_model()
