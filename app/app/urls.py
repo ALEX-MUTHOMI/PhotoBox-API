@@ -27,10 +27,14 @@ urlpatterns = [
 
     path('api/billing/', include('billing.urls')),
 ]
-
-# This is CRITICAL for PhotoBox image uploads later
 if settings.DEBUG:
+    # 1. Serve the Photobox Uploads
     urlpatterns += static(
         settings.MEDIA_URL,
-        document_root=settings.MEDIA_ROOT,
+        document_root=settings.MEDIA_ROOT
+    )
+    # 2. Serve the Admin CSS/JS (The Fix)
+    urlpatterns += static(
+        settings.STATIC_URL,
+        document_root=settings.STATIC_ROOT
     )

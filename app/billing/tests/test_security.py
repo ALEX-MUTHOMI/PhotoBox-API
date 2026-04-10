@@ -38,7 +38,7 @@ class WebhookSecurityTests(TransactionTestCase):
         response = self.client.post(self.webhook_url, data=self.raw_payload, content_type='application/json', **headers)
         self.assertEqual(response.status_code, 401)
 
-    @override_settings(LEMON_SQUEEZY_WEBHOOK_SECRET="super_secret_test_key_123")
+    @override_settings(LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY="super_secret_test_key_123")
     def test_accepts_valid_signature_constant_time(self):
         """LEMON SQUEEZY: Sends perfect signature. Server must use hmac.compare_digest."""
         valid_sig = self.generate_signature(self.secret, self.raw_payload)
@@ -58,11 +58,29 @@ class WebhookSecurityTests(TransactionTestCase):
         response = self.client.post(self.webhook_url, data=stale_payload, content_type='application/json', **headers)
         self.assertEqual(response.status_code, 401)
 
-    @override_settings(LEMON_SQUEEZY_WEBHOOK_SECRET="super_secret_test_key_123")
+    @override_settings(LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY="super_secret_test_key_123")
     def test_idempotency_double_billing_defense(self):
         """HACKER/GLITCH: Network glitch sends the EXACT same valid webhook twice."""
         valid_sig = self.generate_signature(self.secret, self.raw_payload)
         headers = {'HTTP_X_SIGNATURE': valid_sig, 'HTTP_X_EVENT_ID': 'evt_999'}
 
-        # Fire request 1 (Should process successfully)
-        resp1 = self.client.post(self.webhook_url, data=self
+        # Fire request 1 (Should process successfully and return 202 Accepted)
+        resp1 = self.client.post(self.webhook_url, data=self.raw_payload, content_type='application/json', **headers)
+        self.assertEqual(resp1.status_code, 202)
+
+        # Fire request 2 EXACTLY the same
+        # (Idempotency should block duplicate processing but still return 202 so Lemon Squeezy stops retrying)
+        resp2 = self.client.post(self.webhook_url, data=self.raw_payload, content_type='application/json', **headers)
+        self.assertEqual(resp2.status_code, 202)
+
+        # Verify the webhook was only logged ONCE in the database ledger
+        self.assertEqual(ProcessedWebhook.objects.filter(event_id='evt_999').count(), 1)
+
+    # @override_settings(LEMON_SQUEEZY_WEBHOOK_SECRET="super_secret_test_key_123")
+    # def test_idempotency_double_billing_defense(self):
+    #     """HACKER/GLITCH: Network glitch sends the EXACT same valid webhook twice."""
+    #     valid_sig = self.generate_signature(self.secret, self.raw_payload)
+    #     headers = {'HTTP_X_SIGNATURE': valid_sig, 'HTTP_X_EVENT_ID': 'evt_999'}
+
+    #     # Fire request 1 (Should process successfully)
+    #     resp1 = self.client.post(self.webhook_url, data=self)
