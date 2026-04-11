@@ -26,6 +26,9 @@ urlpatterns = [
     path('api/gallery/', include('gallery.urls')),
 
     path('api/billing/', include('billing.urls')),
+
+    # Add this inside the urlpatterns list in app/urls.py:
+    path('api/checkout/', include('checkout.urls')),
 ]
 if settings.DEBUG:
     # 1. Serve the Photobox Uploads
