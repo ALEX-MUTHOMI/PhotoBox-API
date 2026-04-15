@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'core',
     'billing',
     'checkout',
+    'ingestion',
     # NEW: Identity Federation Armor
     'django.contrib.sites',
     'allauth',
