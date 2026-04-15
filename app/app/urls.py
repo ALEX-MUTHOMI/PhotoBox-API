@@ -29,6 +29,11 @@ urlpatterns = [
 
     # Add this inside the urlpatterns list in app/urls.py:
     path('api/checkout/', include('checkout.urls')),
+
+    # --- EDA ROUTES ---
+    path('api/v1/ingestion/', include('ingestion.urls')),
+
+
 ]
 if settings.DEBUG:
     # 1. Serve the Photobox Uploads
