@@ -42,9 +42,12 @@ DEBUG = bool(int(os.environ.get('DEBUG', 0)))
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
 ALLOWED_HOSTS = [
-    host.strip() for host in os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if host.strip()
+    host.strip() for host in os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost,.ngrok.app,.ngrok-free.app').split(',') if host.strip()
 ]
 
+import sys
+if 'test' in sys.argv:
+    CELERY_TASK_ALWAYS_EAGER = True
 
 # Application definition
 
@@ -64,6 +67,7 @@ INSTALLED_APPS = [
     'billing',
     'checkout',
     'ingestion',
+    'webhooks',
     # NEW: Identity Federation Armor
     'django.contrib.sites',
     'allauth',
@@ -92,7 +96,7 @@ ROOT_URLCONF = 'app.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [os.path.join(BASE_DIR, 'templates')],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

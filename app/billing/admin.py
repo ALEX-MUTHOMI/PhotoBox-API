@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Subscription, ProcessedWebhook, BillingAuditLog, DeadLetterQueue
+from .models import Subscription, ProcessedWebhook, BillingAuditLog, DeadLetterQueue, RegistrationLog
 
 @admin.register(Subscription)
 class SubscriptionAdmin(admin.ModelAdmin):
@@ -30,3 +30,10 @@ class ProcessedWebhookAdmin(admin.ModelAdmin):
 class DeadLetterQueueAdmin(admin.ModelAdmin):
     list_display = ('event_id', 'error_message', 'created_at')
     readonly_fields = ('event_id', 'payload', 'error_message', 'created_at')
+
+@admin.register(RegistrationLog)
+class RegistrationLogAdmin(admin.ModelAdmin):
+    """Forensic Log exposing IP addresses and attempted registrations."""
+    list_display = ('email', 'ip_hash', 'created_at')
+    search_fields = ('email', 'ip_hash')
+    readonly_fields = ('email', 'ip_hash', 'user_agent', 'created_at')

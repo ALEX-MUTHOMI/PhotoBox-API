@@ -40,8 +40,9 @@ class CreateUserView(generics.CreateAPIView):
             return False
 
     def create(self, request, *args, **kwargs):
-        # 1. Extract IP (Falls back to REMOTE_ADDR if not using Cloudflare proxy)
-        raw_ip = request.META.get('HTTP_CF_CONNECTING_IP', request.META.get('REMOTE_ADDR'))
+        # 1. Extract IP (Strips comma-separated spoofed proxy blocks)
+        cf_ip = request.META.get('HTTP_CF_CONNECTING_IP', '')
+        raw_ip = cf_ip.split(',')[0].strip() if cf_ip else request.META.get('REMOTE_ADDR', '127.0.0.1')
         if not raw_ip:
             return Response({'error': 'Direct access blocked.'}, status=status.HTTP_403_FORBIDDEN)
 
