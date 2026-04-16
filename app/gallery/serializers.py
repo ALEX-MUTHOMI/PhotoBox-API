@@ -1,60 +1,124 @@
 """
-Serializers for the Gallery API View.
+Serializers for the Gallery API View (The Pixieset Standard).
 """
+import uuid
+import secrets
 from rest_framework import serializers
-from core.models import Gallery, Image
-
+from gallery.models import Event, Scene, Photo
 
 # ==========================================
-# 1. GALLERY MANAGEMENT
+# 1. PIXIESET STANDARD: EVENT (The Collection)
 # ==========================================
 
-class GallerySerializer(serializers.ModelSerializer):
-    """Serializer for managing client galleries."""
+class EventSerializer(serializers.ModelSerializer):
+    """Serializer for managing the primary Event (e.g., The Wedding)."""
+
+    # We expose 'gallery_pin' for the client to set a password, but we NEVER return it.
+    gallery_pin = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
-        model = Gallery
+        model = Event
         fields = [
-            'id', 'title', 'slug', 'is_public',
-            'allow_downloads', 'expires_at', 'gallery_pin',
-            'created_at', 'updated_at'
+            'id', 'title', 'event_type', 'event_date', 'cover_image_url', 
+            'slug', 'is_published', 'expires_at', 'gallery_pin', 'created_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
-        extra_kwargs = {
-            'gallery_pin': {'write_only': True, 'required': False}
-        }
+        read_only_fields = ['id', 'created_at', 'slug']
+
+    def create(self, validated_data):
+        """Intercept creation to safely hash the PIN and auto-generate the cryptographic slug."""
+        raw_pin = validated_data.pop('gallery_pin', None)
+        
+        # IDEMPOTENCY DEFENSE: Generate a highly random slug to prevent database collisions
+        # even if a user creates two events named "The Wedding".
+        # E.g., 'the-wedding-a4b8f9'
+        safe_title = validated_data.get('title', 'event').lower().replace(' ', '-')
+        crypto_suffix = secrets.token_hex(4)
+        validated_data['slug'] = f"{safe_title}-{crypto_suffix}"
+
+        event = super().create(validated_data)
+        
+        # Pass the raw PIN to the cryptographic hasher function in the Model
+        if raw_pin:
+            event.set_pin(raw_pin)
+            
+        return event
+
+    def update(self, instance, validated_data):
+        """Intercept updates to safely re-hash the PIN if it's being changed."""
+        raw_pin = validated_data.pop('gallery_pin', None)
+        
+        # SECURITY (Lateral Movement Shield): Violently rip out `workspace` if they try to PATCH it
+        validated_data.pop('workspace', None)
+
+        event = super().update(instance, validated_data)
+        
+        if raw_pin is not None:
+            # If they pass '', it clears the PIN. If they pass a string, it hashes it.
+            event.set_pin(raw_pin if raw_pin else None)
+            
+        return event
 
 
 # ==========================================
-# 2. IMAGE UPLOAD & HANDLING
+# 2. PIXIESET STANDARD: THE STAGE (Scenes / Tabs)
 # ==========================================
 
-class ImageSerializer(serializers.ModelSerializer):
-    """Serializer for uploading and managing image files."""
+class SceneSerializer(serializers.ModelSerializer):
+    """Serializer for managing sub-categories (e.g., Ceremony, Reception)."""
+    
+    class Meta:
+        model = Scene
+        fields = ['id', 'event', 'title', 'display_order']
+        read_only_fields = ['id']
+
+    def update(self, instance, validated_data):
+        """
+        SECURITY (Ghost Shield): 
+        Prevent a hacker from taking a Scene from Event A and maliciously 
+        moving it into a competitor's Event B via PATCH.
+        """
+        validated_data.pop('event', None)
+        return super().update(instance, validated_data)
+
+
+# ==========================================
+# 3. FAST LANE: SYNCHRONOUS ASSET HANDLER
+# ==========================================
+
+class PhotoFastLaneSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the Fast Lane. This handles one-off synchronous uploads natively in Django.
+    DO NOT use this for 5,000 Wedding RAWs. Use the Ingestion App (Heavy Lane) for that.
+    """
 
     # THE FIX: Tell DRF to stop doing basic pre-checks. Pass the raw file to our View.
-    image = serializers.FileField(required=True)
+    image_file = serializers.FileField(required=True)
+    r2_download_url = serializers.ReadOnlyField()
+    cloudinary_thumbnail_url = serializers.ReadOnlyField()
 
     class Meta:
-        model = Image
-
-        # INTEGRATED: Added file_size_bytes so React can build the Quota Progress Bar
-        fields = ['id', 'gallery', 'title', 'image', 'file_size_bytes', 'order', 'created_at']
+        model = Photo
+        fields = [
+            'id', 'scene', 'image_file', 'original_filename', 'file_size_bytes', 
+            'is_processed', 'blurhash', 'r2_download_url', 'cloudinary_thumbnail_url', 
+            'uploaded_at'
+        ]
 
         # THE VAULT: Hackers cannot manipulate their file size math to bypass billing.
-        read_only_fields = ['id', 'created_at', 'file_size_bytes']
+        read_only_fields = [
+            'id', 'uploaded_at', 'file_size_bytes', 'is_processed', 'blurhash',
+            'r2_download_url', 'cloudinary_thumbnail_url', 'original_filename'
+        ]
 
     def update(self, instance, validated_data):
         """
         SECURITY (Lateral Movement Shield):
-        Once an image is uploaded to a gallery, it is permanently welded to that gallery.
-        This prevents hackers from using a PATCH request to move an image into a
-        different tenant's workspace, bypassing the perform_create security shields.
+        Once an image is uploaded to a Scene, it belongs there.
+        Do not let it be reassigned to a different tenant via PATCH.
         """
-        # Violently rip the 'gallery' field out of the payload if they try to update it
-        validated_data.pop('gallery', None)
-
+        validated_data.pop('scene', None)
+        
         # Also prevent them from swapping the actual binary file via PATCH to bypass the Malware Shield
-        validated_data.pop('image', None)
+        validated_data.pop('image_file', None)
 
         return super().update(instance, validated_data)
