@@ -7,14 +7,13 @@ from rest_framework import viewsets, parsers, mixins
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.throttling import UserRateThrottle
-
 from rest_framework.response import Response
 from rest_framework import status
 
 from core.models import Workspace
 from gallery.models import Event, Scene, Photo
 from gallery import serializers
+from gallery.throttles import FastLaneUploadThrottle
 
 # Enterprise Image Inspection
 from PIL import Image as PILImage
@@ -60,12 +59,12 @@ class EventViewSet(viewsets.ModelViewSet):
 
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
-    
+
     # RATE LIMITING: Prevent Denial of Database Rows (No infinite bot creation)
-    throttle_classes = [UserRateThrottle]
+    throttle_classes = [FastLaneUploadThrottle]
 
     def get_queryset(self):
-        """Retrieve events limited to the authenticated user's workspace."""
+        """TENANT ISOLATION: Only retrieve Events owned by the authenticated user."""
         return self.queryset.filter(
             workspace__user=self.request.user
         ).order_by('-created_at')
@@ -78,6 +77,32 @@ class EventViewSet(viewsets.ModelViewSet):
             raise ValidationError("A workspace must be initialized before creating Events.")
 
         serializer.save(workspace=workspace)
+
+    def perform_update(self, serializer):
+        """
+        NOTIFICATION TRIGGER (Manual Publish):
+        Detect the is_published False → True transition and fire the gallery-ready
+        notification email as an async Celery task.
+
+        SECURITY:
+          - Only fires if the workspace owner is the one publishing.
+          - Cross-tenant check already enforced by get_queryset() —
+            a user cannot PATCH an event they cannot retrieve.
+          - Task is idempotent: repeated publishes re-send the notification
+            (photographer may want to resend to a client).
+        """
+        from gallery.notifications import send_gallery_ready_email
+
+        was_published = serializer.instance.is_published
+        event = serializer.save()
+
+        # Only fire the notification on the specific False → True transition
+        if not was_published and event.is_published and event.client_email:
+            send_gallery_ready_email.delay(str(event.id))
+            logger.info(
+                f"[PUBLISH] Gallery-ready email queued for Event {event.id} "
+                f"to {event.client_email}"
+            )
 
 
 # ==========================================
@@ -92,8 +117,8 @@ class SceneViewSet(viewsets.ModelViewSet):
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
-    # RATE LIMITING
-    throttle_classes = [UserRateThrottle]
+    # RATE LIMITING: Use global user throttle via FastLaneUploadThrottle scope
+    throttle_classes = [FastLaneUploadThrottle]
 
     def get_queryset(self):
         """Only fetch scenes from Events that belong to this user."""
@@ -137,7 +162,9 @@ class PhotoFastLaneViewSet(
     viewsets.GenericViewSet
 ):
     """
-    The Fast Lane HTTP Uploader. Restricts payload size and performs cryptographic Magic Byte checks.
+    The Fast Lane HTTP Uploader.
+    Restricts payload size, performs Pillow two-pass Magic Byte inspection,
+    and hands off all I/O work to a Celery worker immediately.
     """
     serializer_class = serializers.PhotoFastLaneSerializer
     queryset = Photo.objects.all()
@@ -145,19 +172,27 @@ class PhotoFastLaneViewSet(
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
+    # PHASE 4: 30 uploads per minute — independent bucket from the global 'user' throttle
+    throttle_classes = [FastLaneUploadThrottle]
+
     # DRF native Multipart parser for binary
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        """Only fetch Photos mapping back to this user's workspace."""
+        """
+        TENANT ISOLATION AUDIT (Phase 4):
+        The 4-join chain `scene__event__workspace__user` ensures a photo can only
+        be retrieved if the authenticated user owns the workspace that owns the event
+        that owns the scene that owns the photo. No shortcuts.
+        """
         queryset = self.queryset.filter(
             scene__event__workspace__user=self.request.user
         )
-        
+
         scene_id = self.request.query_params.get('scene')
         if scene_id:
             queryset = queryset.filter(scene_id=scene_id)
-            
+
         return queryset.order_by('-uploaded_at')
 
     def perform_create(self, serializer):
@@ -167,7 +202,7 @@ class PhotoFastLaneViewSet(
         The Django worker is freed in < 100ms regardless of file size.
         """
         # Import here to avoid circular import at module level
-        from gallery.tasks import upload_fast_lane_to_cloudinary
+        from gallery.tasks import process_fast_lane_asset
 
         scene = serializer.validated_data['scene']
 
@@ -189,12 +224,20 @@ class PhotoFastLaneViewSet(
             )
 
         # 3. MAGIC BYTE INSPECTOR (CPU-only, no network I/O)
-        # Reads the binary header to reject .exe/.zip files disguised as .jpg.
-        # img.verify() never decodes the full pixel data, so it stays lightweight.
+        # TWO-PASS PATTERN — required by Pillow's API contract:
+        #   Pass 1: img.verify() checks structural integrity but DESTROYS the image object.
+        #           After verify(), img.width/height/format return None/0 — unusable.
+        #   Pass 2: Reopen the file to safely inspect metadata (dimensions, format).
+        # Single-pass pattern (verify + metadata in one `with`) is a silent Pillow bug.
         try:
+            # PASS 1: Structural integrity — rejects corrupted files and disguised executables
+            image_file.seek(0)
+            probe = PILImage.open(image_file)
+            probe.verify()  # raises UnidentifiedImageError or Error on structural failure
+
+            # PASS 2: Metadata inspection — reopen because verify() destroys the object
             image_file.seek(0)
             with PILImage.open(image_file) as img:
-                img.verify()
                 if img.width * img.height > (10000 * 10000):
                     raise ValidationError("Decompression Bomb detected: image pixel count exceeds 100MP.")
                 if img.format not in ['JPEG', 'PNG', 'WEBP']:
@@ -243,12 +286,12 @@ class PhotoFastLaneViewSet(
 
         # 6. FIRE AND FORGET — hand off to Celery worker pool
         # The web worker is now FREE. The HTTP response will return in milliseconds.
-        # Cloudinary upload happens asynchronously in a background Celery process.
-        upload_fast_lane_to_cloudinary.delay(str(photo.id))
+        # R2 upload happens asynchronously in a background Celery process.
+        process_fast_lane_asset.delay(str(photo.id))
 
         logger.info(
             f"[FAST LANE] Photo {photo.id} accepted. "
-            f"Celery task dispatched. Worker freed immediately."
+            f"R2 Celery task dispatched. Worker freed immediately."
         )
 
     def create(self, request, *args, **kwargs):

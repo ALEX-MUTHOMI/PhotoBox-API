@@ -83,30 +83,6 @@ class GatewayIntegrationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
 
-    # def test_checkout_generation_injects_redirect_url(self, mock_post):
-    #     """THE VAULT: Proves a validated success_url is successfully forwarded to Lemon Squeezy."""
-    #     mock_post.return_value.status_code = 201
-    #     mock_post.return_value.json.return_value = {
-    #         "data": {"attributes": {"url": "https://photobox.lemonsqueezy.com/checkout/secure_123"}}
-    #     }
-
-    #     self.client.force_authenticate(user=self.user)
-    #     valid_url = "https://photobox.com/dashboard/success"
-
-    #     # Pass the success_url to the API
-    #     response = self.client.post(self.generate_url, {
-    #         "plan_id": self.plan.id,
-    #         "success_url": valid_url
-    #     })
-
-    #     sent_json = mock_post.call_args[1].get('json', {})
-    #     checkout_options = sent_json.get('data', {}).get('attributes', {}).get('checkout_options', {})
-
-    #     # Verify it was injected into the exact place Lemon Squeezy expects it
-    #     self.assertIn('redirect_url', checkout_options, "FATAL: redirect_url missing from LS payload!")
-    #     self.assertEqual(checkout_options['redirect_url'], valid_url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-
 
     # --- 2. CHAOS ENGINEERING: INFRASTRUCTURE FAILURES ---
 

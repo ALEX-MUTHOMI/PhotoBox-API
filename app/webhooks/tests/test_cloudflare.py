@@ -5,11 +5,13 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
 from django.conf import settings
+from django.test import override_settings
 from django.contrib.auth import get_user_model
 from gallery.models import Workspace, Event, Scene, MediaAsset
 
 User = get_user_model()
 
+@override_settings(CLOUDFLARE_WEBHOOK_SECRET='test-webhook-secret')
 class CloudflareWebhookSecurityTests(APITestCase):
     def setUp(self):
         # 1. Database Setup (The Anchor)
@@ -28,7 +30,7 @@ class CloudflareWebhookSecurityTests(APITestCase):
         )
 
         self.url = reverse('r2-webhook-ingress')
-        self.secret = getattr(settings, 'CLOUDFLARE_SECRET_ACCESS_KEY', 'test-secret-key').encode('utf-8')
+        self.secret = getattr(settings, 'CLOUDFLARE_WEBHOOK_SECRET', 'test-webhook-secret').encode('utf-8')
 
         self.valid_payload = {
             "r2_object_key": self.asset.r2_object_key,

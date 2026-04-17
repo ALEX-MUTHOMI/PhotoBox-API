@@ -4,7 +4,7 @@ Enterprise-Grade Tests for the Fast Lane Photo API.
 ARCHITECTURE CONTRACT BEING TESTED:
   - The web thread returns 202 Accepted immediately (< 100ms).
   - is_processed is False at upload time — the Celery task flips it later.
-  - All I/O (Cloudinary) happens in a background Celery worker, NEVER on the web thread.
+  - All I/O (R2 vault) happens in a background Celery worker, NEVER on the web thread.
   - The Celery task is dispatched once with the correct photo ID.
   - All perimeter security checks execute before any DB write.
 """
@@ -27,8 +27,9 @@ from gallery.models import Event, Scene, Photo
 FAST_LANE_URL = reverse('gallery:photo-list')
 
 # The exact Celery task path that the view fires. We patch it in every test that
-# hits the upload endpoint, so no real Celery broker or Cloudinary is needed.
-CELERY_TASK_PATH = 'gallery.tasks.upload_fast_lane_to_cloudinary'
+# hits the upload endpoint so no real Celery broker or R2 connection is needed.
+# RENAMED from upload_fast_lane_to_cloudinary → process_fast_lane_asset (Phase 1: Unified Vault)
+CELERY_TASK_PATH = 'gallery.tasks.process_fast_lane_asset'
 
 
 def create_user(**params):
@@ -313,18 +314,26 @@ class FastLaneApiTests(TestCase):
         SECURITY (Decompression Bomb / ZIP Bomb): An adversarial image that claims to be
         valid JPEG but expands to 100M+ pixels must be rejected by the pixel ceiling check.
 
-        We mock PILImage.open to simulate what a real decompression bomb would report to Pillow.
+        TWO-PASS PATTERN: The view calls PILImage.open twice:
+          - Call 1: probe.verify() — structural check (destroys the object)
+          - Call 2: with PILImage.open() as img — metadata check (width, height, format)
+        We mock both calls via side_effect.
         """
         with patch('gallery.views.PILImage.open') as mock_open:
+            # Call 1: the verify() probe — just needs to not raise
+            mock_probe = MagicMock()
+            mock_probe.verify = MagicMock()
+
+            # Call 2: the metadata reader — reports a bomb
             mock_img = MagicMock()
             mock_img.__enter__ = lambda s: mock_img
             mock_img.__exit__ = MagicMock(return_value=False)
-            mock_img.verify = MagicMock()
             mock_img.format = 'JPEG'
-            # Simulate an image claiming to be 20,000 x 10,001 pixels = 200M pixels > 100M limit
+            # 20,000 x 10,001 = 200,020,000 pixels — well over the 100MP limit
             mock_img.width = 20000
             mock_img.height = 10001
-            mock_open.return_value = mock_img
+
+            mock_open.side_effect = [mock_probe, mock_img]
 
             bomb_file = SimpleUploadedFile('bomb.jpg', b'\xff\xd8\xff' + b'0' * 100, content_type='image/jpeg')
             payload = {'scene': self.scene.id, 'image_file': bomb_file}
@@ -333,20 +342,26 @@ class FastLaneApiTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('Decompression Bomb', str(res.data))
 
+
     def test_disallowed_file_format_rejected(self):
         """
         SECURITY (Format Allowlist): Non-image binary formats (GIF, TIFF, BMP, SVG, etc.)
         that pass the magic byte check must still be rejected if not in [JPEG, PNG, WEBP].
         """
         with patch('gallery.views.PILImage.open') as mock_open:
+            # Call 1: verify() probe — passes cleanly
+            mock_probe = MagicMock()
+            mock_probe.verify = MagicMock()
+
+            # Call 2: metadata reader — reports GIF format (not in allowlist)
             mock_img = MagicMock()
             mock_img.__enter__ = lambda s: mock_img
             mock_img.__exit__ = MagicMock(return_value=False)
-            mock_img.verify = MagicMock()
-            mock_img.format = 'GIF'   # Valid image but not in the allowlist
+            mock_img.format = 'GIF'   # Valid image structure but not in [JPEG, PNG, WEBP]
             mock_img.width = 100
             mock_img.height = 100
-            mock_open.return_value = mock_img
+
+            mock_open.side_effect = [mock_probe, mock_img]
 
             gif_file = SimpleUploadedFile('animation.gif', b'GIF89a' + b'0' * 100, content_type='image/gif')
             payload = {'scene': self.scene.id, 'image_file': gif_file}
@@ -354,3 +369,4 @@ class FastLaneApiTests(TestCase):
 
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('Invalid Magic Bytes', str(res.data))
+

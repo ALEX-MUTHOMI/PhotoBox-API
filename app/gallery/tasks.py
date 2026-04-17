@@ -1,18 +1,23 @@
 """
-gallery/tasks.py — Async Processing Pipeline (Pillar 2)
+gallery/tasks.py — Async Processing Pipeline: The Unified Vault Pattern
 
-This is the CORRECT EDA implementation of the Fast Lane.
-The Django request thread does ZERO I/O-bound work.
-This Celery task runs in a background worker pool, completely
-off the web server, so it can never cause Worker Starvation or OOM.
+ARCHITECTURE CONTRACT:
+  The Django web thread does ZERO I/O-bound work.
+  All binary data flows: Browser → R2 directly (Heavy Lane)
+                      OR Django local disk → R2 via this Celery task (Fast Lane).
+
+  Cloudinary is demoted to a CDN Fetch Proxy. It receives NO SDK uploads.
+  The Photo.delivery_url property constructs the Cloudinary Fetch URL from the R2 key.
 """
 import logging
-import cloudinary
-import cloudinary.uploader
+from botocore.exceptions import BotoCoreError, ClientError
 from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F
+
+from gallery.storage import get_r2_client, infer_content_type
 
 logger = logging.getLogger(__name__)
 
@@ -20,111 +25,122 @@ logger = logging.getLogger(__name__)
 @shared_task(
     bind=True,
     max_retries=3,
-    default_retry_delay=30,    # 30 seconds between retries
-    autoretry_for=(Exception,), # Auto-retry on any transient Cloudinary failure
-    name='gallery.tasks.upload_fast_lane_to_cloudinary'
+    default_retry_delay=30,  # 30s between retries — gives R2 time to recover from transient errors
+    name='gallery.tasks.process_fast_lane_asset',
 )
-def upload_fast_lane_to_cloudinary(self, photo_id: str):
+def process_fast_lane_asset(self, photo_id: str):
     """
-    PILLAR 2: The Asynchronous CDN Handoff.
+    PILLAR 2: Unified Vault Asset Processor (Fast Lane).
 
-    Triggered by PhotoFastLaneViewSet.perform_create() immediately AFTER
-    the HTTP request has already returned a 202 Accepted to the photographer.
+    Called by PhotoFastLaneViewSet.perform_create() immediately AFTER the web thread
+    has returned 202 Accepted. The photographer's HTTP connection is already closed.
 
-    This task:
-    1. Fetches the Photo from the DB.
-    2. Uploads its raw local file to Cloudinary.
-    3. Saves the resulting signed CDN URL back to the Photo.
-    4. Marks the Photo as is_processed=True so the client can see it.
-    5. On permanent failures: marks FAILED and atomically refunds quota.
+    Execution contract:
+      1. Fetch Photo from DB (with select_related to avoid N+1).
+      2. Stream bytes from local Django storage → Cloudflare R2.
+      3. Persist the R2 object key to photo.r2_object_key.
+      4. Atomically flip is_processed=True + status='READY'.
+      5. On MaxRetriesExceededError: mark FAILED, atomically refund quota.
     """
-    # Import here to avoid circular imports at module level
     from gallery.models import Photo
     from core.models import Workspace
 
-    logger.info(f"[FAST LANE CELERY] Starting Cloudinary upload for photo: {photo_id}")
+    logger.info(f"[FAST LANE] Starting R2 vault for photo {photo_id}")
 
-    # Fetch with select_related to avoid N+1 DB queries
     try:
         photo = Photo.objects.select_related(
             'scene__event__workspace'
         ).get(id=photo_id)
     except Photo.DoesNotExist:
-        # The photo was deleted between request and task execution — safe to ignore
-        logger.warning(f"[FAST LANE CELERY] Photo {photo_id} does not exist. Skipping.")
+        # Deleted between accept and task execution — safe to discard
+        logger.warning(f"[FAST LANE] Photo {photo_id} does not exist. Task discarded.")
         return
 
-    # Guard: Already processed (e.g. task ran twice due to a retry race)
-    if photo.is_processed and photo.optimized_url:
-        logger.info(f"[FAST LANE CELERY] Photo {photo_id} already processed. Idempotent skip.")
+    # IDEMPOTENCY: Guard against duplicate executions (retry races, duplicate broker delivery)
+    if photo.is_processed and photo.r2_object_key:
+        logger.info(f"[FAST LANE] Photo {photo_id} already vaulted. Idempotent skip.")
         return
 
     workspace = photo.scene.event.workspace
+    bucket = settings.CLOUDFLARE_R2_BUCKET_NAME
 
-    # ----------------------------------------------------------------
-    # CLOUDINARY UPLOAD
-    # This is the ONLY place any I/O happens. It runs on a Celery worker,
-    # NOT on a Django web worker. The web server is completely free.
-    # ----------------------------------------------------------------
+    # Tenant-isolated R2 key — enforces storage separation at the object level
+    object_key = (
+        f"fast-lane/tenant_{workspace.id}/{photo_id}/{photo.original_filename}"
+    )
+
     try:
         if not photo.image_file:
-            raise ValueError("Photo has no image_file attached. Cannot upload to Cloudinary.")
-
-        upload_result = cloudinary.uploader.upload(
-            photo.image_file.path,
-            folder=f"photobox/{workspace.id}/fast-lane/",
-            resource_type="image",
-            # Cloudinary auto-converts to WebP for supported browsers
-            format="webp",
-            # Eager transformation: pre-generate a 800px thumbnail
-            eager=[{"width": 800, "crop": "limit", "quality": "auto:good"}],
-            eager_async=True,  # Even Cloudinary's processing is async
-        )
-
-        optimized_url = upload_result.get("secure_url")
-        public_id = upload_result.get("public_id")
-
-        if not optimized_url:
-            raise ValueError(f"Cloudinary returned no URL for photo {photo_id}.")
-
-        # Atomic DB update: mark processed and store the CDN URL
-        with transaction.atomic():
-            Photo.objects.filter(id=photo_id).update(
-                optimized_url=optimized_url,
-                is_processed=True,
-                r2_object_key=public_id,  # Reusing field to store Cloudinary public_id
+            raise ValueError(
+                f"Photo {photo_id} has no image_file on disk. Cannot stream to R2."
             )
 
-        logger.info(f"[FAST LANE CELERY] ✅ Photo {photo_id} processed. CDN: {optimized_url}")
+        r2 = get_r2_client()
 
-    except MaxRetriesExceededError:
-        # PERMANENT FAILURE: All retry attempts exhausted.
-        # autoretry_for raises MaxRetriesExceededError before we can check
-        # self.request.retries, so we catch it explicitly here.
-        # We MUST refund the quota so the photographer doesn't lose storage permanently.
-        logger.critical(
-            f"[FAST LANE CELERY] Permanent failure for {photo_id} after {self.max_retries} retries. "
-            f"Refunding {photo.file_size_bytes} bytes to workspace {workspace.id}."
+        # Stream local file bytes directly to R2.
+        # upload_fileobj uses multipart upload internally for large files.
+        # For Fast Lane (≤5MB), it is a single PUT — no overhead.
+        with open(photo.image_file.path, 'rb') as file_obj:
+            r2.upload_fileobj(
+                file_obj,
+                bucket,
+                object_key,
+                ExtraArgs={
+                    'ContentType': infer_content_type(photo.original_filename),
+                    # Storage-layer metadata for forensic audit and replay detection
+                    'Metadata': {
+                        'photo-id':         str(photo.id),
+                        'workspace-id':     str(workspace.id),
+                        'original-filename': photo.original_filename,
+                    },
+                },
+            )
+
+        # ATOMIC DB COMMIT: The photo is in the vault.
+        # optimized_url is set to None — delivery_url property derives from r2_object_key.
+        with transaction.atomic():
+            Photo.objects.filter(id=photo_id).update(
+                r2_object_key=object_key,
+                is_processed=True,
+                status='READY',
+                optimized_url=None,
+            )
+
+        logger.info(
+            f"[FAST LANE] ✅ Photo {photo_id} vaulted to R2. "
+            f"Key: {object_key}"
         )
 
+    except MaxRetriesExceededError:
+        # PERMANENT FAILURE: All 3 retries exhausted.
+        # We MUST refund the quota atomically or the photographer loses storage permanently.
+        logger.critical(
+            f"[FAST LANE] 🔴 Permanent failure for {photo_id} after {self.max_retries} retries. "
+            f"Refunding {photo.file_size_bytes} bytes to workspace {workspace.id}."
+        )
         with transaction.atomic():
-            # Mark the photo as failed so the UI can surface an actionable error state
             Photo.objects.filter(id=photo_id).update(
                 status='FAILED',
                 is_processed=False,
             )
-            # Atomically refund the quota to prevent "ghost storage" leaks
             Workspace.objects.filter(id=workspace.id).update(
                 storage_used_bytes=F('storage_used_bytes') - photo.file_size_bytes
             )
+        # Do NOT re-raise — permanently dead; Celery must not retry again.
 
-        # Do NOT re-raise — the task is permanently dead, Celery should not retry again.
+    except (BotoCoreError, ClientError) as exc:
+        # TRANSIENT FAILURE: R2 API error (503, throttle, network blip).
+        # autoretry_for is not used here to give explicit control over exception types.
+        logger.error(
+            f"[FAST LANE] ❌ R2 API error for {photo_id} "
+            f"(attempt {self.request.retries + 1}/{self.max_retries + 1}): {exc}"
+        )
+        raise self.retry(exc=exc)
 
     except Exception as exc:
-        # TRANSIENT FAILURE: Network blip, Cloudinary 503, etc.
-        # Let Celery's autoretry_for mechanism handle the retry schedule.
+        # TRANSIENT FAILURE: Unexpected error (disk read failure, etc.)
         logger.error(
-            f"[FAST LANE CELERY] ❌ Transient failure for {photo_id} "
+            f"[FAST LANE] ❌ Unexpected error for {photo_id} "
             f"(attempt {self.request.retries + 1}/{self.max_retries + 1}): {exc}"
         )
         raise self.retry(exc=exc)

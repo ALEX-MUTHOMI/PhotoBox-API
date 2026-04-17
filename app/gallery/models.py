@@ -1,6 +1,7 @@
 import uuid
+import hashlib
+import base64
 import logging
-import cloudinary.utils
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator
@@ -47,6 +48,17 @@ class Event(models.Model):
     _hashed_pin = models.CharField(max_length=128, blank=True, null=True, db_column='hashed_pin')
 
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # NOTIFICATION SYSTEM: Contact info for the photographer's client.
+    # Set manually by the photographer before publishing the gallery.
+    client_email = models.EmailField(
+        blank=True, null=True,
+        help_text="Client's email address. Gallery-ready notification is sent here on publish."
+    )
+    client_name = models.CharField(
+        max_length=255, blank=True, null=True,
+        help_text="Client's display name used in the notification email."
+    )
 
     class Meta:
         constraints = [
@@ -96,10 +108,12 @@ class Photo(models.Model):
     THE ASSET: Unified model supporting Legacy Uploads AND Event-Driven Direct-to-R2 Uploads.
     """
     STATUS_CHOICES = [
-        ('PENDING', 'Pending Upload'),
-        ('PROCESSING', 'Processing'),
-        ('READY', 'Ready'),
-        ('FAILED', 'Failed'),
+        ('PENDING',     'Pending Upload'),
+        ('PROCESSING',  'Processing'),
+        ('READY',       'Ready'),
+        ('FAILED',      'Failed'),
+        ('QUARANTINED', 'Quarantined — Size Mismatch'),  # File larger than declared; held for review
+        ('EXPIRED',     'Expired'),                      # Gallery TTL exceeded
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -122,6 +136,18 @@ class Photo(models.Model):
     blurhash = models.CharField(max_length=100, blank=True, null=True, help_text="Base64 LQIP string")
     exif_data = models.JSONField(default=dict, blank=True)
 
+    # --- PILLAR 3: DELIVERY LAYER (Zero-Layout-Shift Masonry Grid) ---
+    # Captured during Celery processing via Pillow or R2 metadata.
+    # Enables the React frontend to pre-allocate card space before the image loads.
+    width = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Image pixel width. Set by Celery worker post-upload."
+    )
+    height = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Image pixel height. Set by Celery worker post-upload."
+    )
+
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -132,43 +158,93 @@ class Photo(models.Model):
         ]
 
     @property
-    def r2_download_url(self):
-        """Direct vault access for ZIP generation. Supports both legacy and EDA files."""
-        if self.image_file:
-            return self.image_file.url
+    def delivery_url(self) -> str | None:
+        """
+        PHASE 3: Cloudinary Fetch Proxy URL.
+
+        Cloudinary acts as a transform + CDN cache layer ONLY.
+        It fetches the file from R2 on first request, transcodes to WebP,
+        applies quality optimisation, and caches at the edge.
+        No SDK upload ever occurs — Cloudinary never stores the original.
+
+        URL format:
+          https://res.cloudinary.com/{cloud_name}/image/fetch/q_auto,f_webp/{r2_public_url}
+
+        Falls back to optimized_url for legacy Cloudinary SDK-uploaded photos
+        (backward compatibility during migration).
+        """
+        cloud_name = getattr(settings, 'CLOUDINARY_CLOUD_NAME', '')
+        r2_domain = getattr(settings, 'CLOUDFLARE_R2_DOMAIN', '').rstrip('/')
+
+        if self.r2_object_key and cloud_name and r2_domain:
+            r2_public_url = f"https://{r2_domain}/{self.r2_object_key}"
+            return (
+                f"https://res.cloudinary.com/{cloud_name}"
+                f"/image/fetch/q_auto,f_webp/{r2_public_url}"
+            )
+
+        # Backward compat: old photos with Cloudinary SDK optimized_url still work
         if self.optimized_url:
             return self.optimized_url
+
         return None
 
     @property
+    def download_url(self) -> str | None:
+        """
+        PHASE 3: Presigned R2 GET URL for client download.
+
+        SECURITY — Presigned URL Exfiltration Defense:
+          Hard ceiling of 900 seconds (15 minutes) enforced in storage.py.
+          This property passes no ExpiresIn — the utility enforces the cap.
+          If a URL is intercepted or leaked, it becomes useless in ≤15 min.
+
+        Both images and videos use this URL. Large video downloads (5GB)
+        go directly to Cloudflare R2 edge — Django is not in the data path.
+        """
+        from gallery.storage import generate_r2_presigned_get_url
+
+        if self.r2_object_key:
+            # Primary: EDA-uploaded files in R2
+            return generate_r2_presigned_get_url(self.r2_object_key)
+
+        # Backward compat: legacy local file uploads
+        if self.image_file:
+            try:
+                return self.image_file.url
+            except Exception:
+                pass
+
+        return None
+
+    @property
+    def aspect_ratio(self) -> float | None:
+        """
+        PHASE 3: Aspect ratio for zero-layout-shift masonry grids.
+
+        The React frontend uses this to pre-allocate the card height before
+        the image bytes arrive, preventing the dreaded 'content jump' that
+        degrades CLS (Core Web Vitals: Cumulative Layout Shift).
+
+        Returns width/height rounded to 4 decimal places, or None if dimensions
+        are not yet available (photo still PENDING processing).
+        """
+        if self.width and self.height and self.height > 0:
+            return round(self.width / self.height, 4)
+        return None
+
+    # --- BACKWARD COMPATIBILITY ALIASES ---
+    # Kept for any code still referencing the old property names.
+    # Will be removed in the next major version.
+    @property
+    def r2_download_url(self):
+        """Deprecated alias. Use download_url instead."""
+        return self.download_url
+
+    @property
     def cloudinary_thumbnail_url(self):
-        """
-        Generates a cryptographically signed Cloudinary fetch URL.
-        Prevents parameter tampering (watermark removal, dimension hijacking).
-        """
-        if not self.image_file and not self.r2_object_key:
-            return None
-
-        # ENGINEER FIX: Gracefully handles trailing slashes in settings
-        domain = getattr(settings, 'CLOUDFLARE_R2_DOMAIN', '').rstrip('/')
-
-        # Determine the source based on how the file was uploaded (Legacy vs EDA)
-        source_path = self.image_file.url if self.image_file else f"https://{domain}/{self.r2_object_key}"
-
-        try:
-            url, options = cloudinary.utils.cloudinary_url(
-                source_path,
-                type="fetch",
-                sign_url=True, # Critical: Enforces the s--HMAC-- signature
-                width=800,
-                fetch_format="auto",
-                quality="auto:eco",
-                crop="limit"
-            )
-            return url
-        except Exception as e:
-            logger.error(f"Cloudinary signature failed for Asset {self.id}: {str(e)}")
-            return source_path
+        """Deprecated alias. Use delivery_url instead."""
+        return self.delivery_url
 
 
 # --- THE ALIAS BRIDGE ---

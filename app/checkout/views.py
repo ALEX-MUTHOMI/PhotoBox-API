@@ -123,5 +123,8 @@ class GenerateCheckoutLinkView(APIView):
                 return Response({"error": "Failed to communicate with payment provider."}, status=status.HTTP_502_BAD_GATEWAY)
 
         finally:
-            # Always clear the lock so the user isn't stuck forever if the API crashes
-            pass
+            # SECURITY FIX: Was `pass` — cache lock was NEVER released!
+            # User would be permanently locked after first checkout attempt
+            # until the 5-second cache TTL expired. Under load this causes
+            # cascading 409 CONFLICT responses for legitimate users.
+            cache.delete(lock_key)

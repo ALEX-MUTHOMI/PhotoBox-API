@@ -1,11 +1,21 @@
-from unittest.mock import patch
-from django.test import TestCase
+"""
+Gallery Model & CDN Security Tests — Updated for Unified Vault Architecture
+
+ARCHITECTURE CHANGE (2026-04):
+  cloudinary.utils.cloudinary_url is NO LONGER CALLED.
+  Photos are delivered via the Cloudinary Fetch Proxy pattern:
+    https://res.cloudinary.com/{cloud_name}/image/fetch/q_auto,f_webp/{r2_public_url}
+  These tests verify the NEW delivery contract.
+"""
+from unittest.mock import patch, PropertyMock
+from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.db.utils import IntegrityError
-from core.models import Workspace # Assuming Workspace remains in core
+from core.models import Workspace
 from gallery.models import Event, Scene, Photo
 
 User = get_user_model()
+
 
 class EventSecurityTests(TestCase):
     """The Hacker's Domain: Attacking the Event Access Controls."""
@@ -24,11 +34,9 @@ class EventSecurityTests(TestCase):
         raw_pin = "4920"
         self.event.set_pin(raw_pin)
 
-        # 1. The database must not contain the raw PIN anywhere
         self.assertNotEqual(self.event._hashed_pin, raw_pin, "FATAL: PIN stored in plain text!")
         self.assertTrue(self.event._hashed_pin.startswith('pbkdf2_') or 'argon2' in self.event._hashed_pin)
 
-        # 2. The verification function must mathematically prove the match
         self.assertTrue(self.event.check_pin("4920"), "FATAL: Correct PIN rejected.")
         self.assertFalse(self.event.check_pin("0000"), "FATAL: Incorrect PIN accepted.")
         self.assertFalse(self.event.check_pin("49201"), "FATAL: PIN length overflow bypass allowed.")
@@ -39,12 +47,16 @@ class EventSecurityTests(TestCase):
             Event.objects.create(
                 workspace=self.workspace,
                 title="Another Launch",
-                slug="safaricom-launch-2026" # Duplicate slug
+                slug="safaricom-launch-2026"  # Duplicate slug
             )
 
 
+@override_settings(
+    CLOUDINARY_CLOUD_NAME='test-cloud',
+    CLOUDFLARE_R2_DOMAIN='test-r2-domain.example.com',
+)
 class PhotoCloudinaryTests(TestCase):
-    """The Hacker's Domain: Attacking the CDN Delivery mechanisms."""
+    """Tests the Cloudinary Fetch Proxy delivery architecture."""
 
     def setUp(self):
         self.user = User.objects.create_user(email="dev@test.com", password="password123")
@@ -52,37 +64,65 @@ class PhotoCloudinaryTests(TestCase):
         self.event = Event.objects.create(workspace=self.workspace, title="Cloud Event", slug="cloud-event")
         self.scene = Scene.objects.create(event=self.event, title="Keynote", display_order=1)
 
+        # Photo with r2_object_key — the new architecture
         self.photo = Photo.objects.create(
             scene=self.scene,
             original_filename="raw_shot.jpg",
-            file_size_bytes=25000000, # 25MB
-            image_file="events/2026/04/raw_shot.jpg",
+            file_size_bytes=25000000,
+            r2_object_key="events/2026/04/raw_shot.jpg",
             is_processed=True
         )
 
-    @patch('cloudinary.utils.cloudinary_url')
-    def test_cloudinary_url_is_cryptographically_signed(self, mock_cloudinary_url):
-        """SECURITY: Proves the CDN URL cannot be tampered with to steal un-watermarked photos."""
-        # Mocking the cloudinary SDK response to simulate a signed URL
-        mock_cloudinary_url.return_value = (
-            "https://res.cloudinary.com/demo/image/upload/s--8xkj3j--/w_800,l_watermark/raw_shot.jpg",
-            {}
-        )
-
+    def test_cloudinary_thumbnail_url_uses_fetch_proxy(self):
+        """
+        ARCHITECTURE: delivery_url must use Cloudinary Fetch Proxy, NOT SDK upload.
+        The URL must encode WebP conversion (f_webp) and quality optimisation (q_auto).
+        """
         url = self.photo.cloudinary_thumbnail_url
 
-        # The URL must contain the Cloudinary signature parameter (s--...--)
-        self.assertIn("s--", url, "FATAL: Cloudinary URL is missing cryptographic signature!")
-        mock_cloudinary_url.assert_called_once()
+        self.assertIsNotNone(url, "FATAL: delivery_url returned None!")
+        self.assertIn("res.cloudinary.com", url, "FATAL: Not a Cloudinary URL!")
+        self.assertIn("/image/fetch/", url, "FATAL: Not using Fetch Proxy pattern!")
+        self.assertIn("q_auto", url, "FATAL: Quality optimisation missing — bandwidth risk!")
+        self.assertIn("f_webp", url, "FATAL: WebP conversion missing — serving raw files!")
+        self.assertIn("test-cloud", url, "FATAL: Wrong cloud name in URL!")
 
-        # Verify the exact parameters sent to the SDK request the signature
-        call_kwargs = mock_cloudinary_url.call_args[1]
-        self.assertTrue(call_kwargs.get('sign_url'), "FATAL: SDK was not instructed to sign the URL!")
-        self.assertEqual(call_kwargs.get('width'), 800)
-        self.assertEqual(call_kwargs.get('fetch_format'), 'auto')
+    def test_delivery_url_contains_r2_origin(self):
+        """
+        SECURITY: The fetch proxy URL must point to our private R2 bucket domain.
+        Cloudinary fetches from R2, not from a public URL.
+        """
+        url = self.photo.cloudinary_thumbnail_url
+        self.assertIn("test-r2-domain.example.com", url,
+                      "FATAL: Delivery URL doesn't reference R2 origin!")
+        self.assertIn(self.photo.r2_object_key, url,
+                      "FATAL: R2 object key missing from delivery URL!")
+
+    def test_delivery_url_is_not_cloudinary_sdk_upload(self):
+        """
+        REGRESSION: The old architecture used cloudinary.uploader.upload().
+        Proves the SDK upload path is completely removed.
+        """
+        from unittest.mock import patch
+        with patch('cloudinary.uploader.upload') as mock_upload:
+            _ = self.photo.cloudinary_thumbnail_url
+            mock_upload.assert_not_called()
 
     def test_r2_download_url_bypasses_cdn(self):
         """INFRASTRUCTURE: Proves ZIP generation targets the zero-egress R2 bucket directly."""
         url = self.photo.r2_download_url
         self.assertNotIn("cloudinary", url, "FATAL: High-res download is bleeding CDN bandwidth!")
         self.assertIn("raw_shot.jpg", url)
+
+    def test_photo_without_r2_key_returns_fallback(self):
+        """BACKWARD COMPAT: Older photos without r2_object_key use optimized_url fallback."""
+        legacy_photo = Photo.objects.create(
+            scene=self.scene,
+            original_filename="legacy.jpg",
+            file_size_bytes=1000,
+            image_file="events/2026/04/legacy.jpg",
+            optimized_url="https://res.cloudinary.com/legacy-url",
+        )
+        url = legacy_photo.cloudinary_thumbnail_url
+        # Falls back to optimized_url
+        self.assertEqual(url, "https://res.cloudinary.com/legacy-url")
