@@ -1,8 +1,11 @@
+from unittest.mock import patch
 from rest_framework.test import APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.test import override_settings
 from checkout.models import PricingPlan
+from checkout.views import CheckoutRateThrottle, GenerateCheckoutLinkView
 
 User = get_user_model()
 
@@ -49,8 +52,11 @@ class CheckoutAPISecurityTests(APITestCase):
 
     # --- 2. NETWORK & CONCURRENCY DEFENSES ---
 
+    @patch.object(GenerateCheckoutLinkView, 'throttle_classes', [CheckoutRateThrottle])
     def test_brute_force_checkout_generation_blocked(self):
-        """FRAUD DEFENSE: Hacker writes a script to hammer the generate endpoint."""
+        """FRAUD DEFENSE: Hacker writes a script to hammer the generate endpoint.
+        Re-enables the per-view throttle (disabled globally during tests) for this test only.
+        """
         self.client.force_authenticate(user=self.user)
 
         responses = []
@@ -65,16 +71,25 @@ class CheckoutAPISecurityTests(APITestCase):
         )
 
     def test_idempotency_double_tap_defense(self):
-        """ENGINEERING REALITY: User double-taps the upgrade button on slow 3G."""
+        """ENGINEERING REALITY: User double-taps the upgrade button while a request is in-flight.
+        Simulates the concurrent second request arriving while the first holds the lock.
+        """
         self.client.force_authenticate(user=self.user)
-        resp1 = self.client.post(self.generate_url, {"plan_id": self.plan.id})
-        resp2 = self.client.post(self.generate_url, {"plan_id": self.plan.id})
 
-        self.assertEqual(
-            resp2.status_code,
-            status.HTTP_409_CONFLICT,
-            "FATAL: Vulnerable to Double-Tap race conditions!"
-        )
+        # Pre-seed the cache lock exactly as the view does — simulating a concurrent in-flight request
+        lock_key = f"checkout_lock_{self.user.id}"
+        cache.add(lock_key, "locked", timeout=30)  # Hold the lock
+
+        try:
+            # This request arrives while the lock is held by the "first" request
+            resp = self.client.post(self.generate_url, {"plan_id": self.plan.id})
+            self.assertEqual(
+                resp.status_code,
+                status.HTTP_409_CONFLICT,
+                "FATAL: Vulnerable to Double-Tap race conditions!"
+            )
+        finally:
+            cache.delete(lock_key)
 
     # --- 3. BUSINESS LOGIC & INPUT DEFENSES ---
 

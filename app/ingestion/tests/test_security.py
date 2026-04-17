@@ -44,7 +44,19 @@ class IngestionSecurityAuditTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("valid uuid", str(response.data['scene_id']).lower())
 
-    def test_cryptographic_condition_injection(self):
+    @patch('ingestion.views.get_r2_client')
+    def test_cryptographic_condition_injection(self, mock_r2):
+        mock_r2.return_value.generate_presigned_post.return_value = {
+            'url': 'https://test.r2.cloudflarestorage.com/test-bucket',
+            'fields': {
+                'key': 'raw/tenant/scene/wedding_shot.jpg',
+                'policy': 'base64encodedpolicy==',
+                'x-amz-algorithm': 'AWS4-HMAC-SHA256',
+                'x-amz-credential': 'test-key/20260416/auto/s3/aws4_request',
+                'x-amz-date': '20260416T000000Z',
+                'x-amz-signature': 'abc123def456',
+            }
+        }
         payload = {
             "scene_id": str(self.scene.id),
             "files": [{"filename": "wedding_shot.jpg", "file_size": 1024, "client_reference_id": "ref-1"}]
@@ -76,10 +88,7 @@ class IngestionSecurityAuditTests(TestCase):
             self.assertIn(str(self.user.id), log_output)
 
 
-# OLD:
-# class WebhookSecurityAuditTests(TestCase):
-
-# NEW:
+@override_settings(CLOUDFLARE_WEBHOOK_SECRET='super-secret-cloudflare-key')
 class WebhookSecurityAuditTests(TestCase):
     """
     THE BACK DOOR (EVENT INGRESS): Testing EDA state hijacking,
@@ -107,8 +116,9 @@ class WebhookSecurityAuditTests(TestCase):
 
     def _generate_valid_signature(self, payload_bytes):
         """Helper to simulate Cloudflare's HMAC generation."""
-        # Use settings secret to match view
-        secret = getattr(settings, 'CLOUDFLARE_SECRET_ACCESS_KEY', 'test-secret-key').encode('utf-8')
+        # Must use CLOUDFLARE_WEBHOOK_SECRET — the dedicated signing secret.
+        # CLOUDFLARE_SECRET_ACCESS_KEY is the R2 IAM key and is NEVER used for HMAC.
+        secret = getattr(settings, 'CLOUDFLARE_WEBHOOK_SECRET', 'test-webhook-secret').encode('utf-8')
         return hmac.new(secret, payload_bytes, hashlib.sha256).hexdigest()
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET="super-secret-cloudflare-key")

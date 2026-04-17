@@ -43,7 +43,12 @@ class CloudflareWebhookView(APIView):
             return Response({"error": "Missing signature"}, status=status.HTTP_403_FORBIDDEN)
 
         # 4. Validate HMAC Signature (Timing Attack Resistant)
-        secret = getattr(settings, 'CLOUDFLARE_SECRET_ACCESS_KEY', 'test-secret-key').encode('utf-8')
+        # SECURITY FIX: Was previously using CLOUDFLARE_SECRET_ACCESS_KEY (the R2 IAM key!)
+        # Must use the dedicated webhook signing secret, NOT the storage credentials.
+        secret = getattr(settings, 'CLOUDFLARE_WEBHOOK_SECRET', '').encode('utf-8')
+        if not secret:
+            logger.critical("[WEBHOOK] CLOUDFLARE_WEBHOOK_SECRET is not configured!")
+            return Response({"error": "Server misconfiguration"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         expected_signature = hmac.new(secret, payload_bytes, hashlib.sha256).hexdigest()
         
         if not hmac.compare_digest(expected_signature, cloudflare_signature):
