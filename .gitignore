@@ -134,3 +134,6 @@ app/core/management/commands/seed_db.py
 **/static_root/
 media_root/
 static/
+app/test_media/
+
+"app/test_media/" 
