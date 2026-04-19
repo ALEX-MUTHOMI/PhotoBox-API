@@ -2,7 +2,6 @@ from unittest.mock import patch, MagicMock
 from botocore.exceptions import ClientError
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
-from django.db.models import F
 
 from gallery.models import Workspace, Event, Scene, Photo
 from gallery.tasks import process_fast_lane_asset

@@ -490,8 +490,13 @@ if _IS_TEST:
     CELERY_TASK_EAGER_PROPAGATES = True
     CELERY_TASK_STORE_EAGER_RESULT = True
 
-    # FIXED — app user owns /app, always writable
-    MEDIA_ROOT = '/app/test_media/'
+    # Keep test uploads entirely off the repository filesystem.
+    # Django<4.1 has no built-in InMemoryStorage, so we wire in a tiny
+    # process-local backend for FileField/ImageField saves during tests.
+    DEFAULT_FILE_STORAGE = 'core.utils.test_storage.InMemoryTestStorage'
+
+    # Accepted test uploads stay in RAM instead of spilling to temp files.
+    FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 
     # -- JWT: guarantee the signing key meets RFC 7518 minimum (32 bytes) --
     # This eliminates the InsecureKeyLengthWarning that pollutes test output.
