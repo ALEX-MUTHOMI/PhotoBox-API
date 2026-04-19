@@ -1,0 +1,25 @@
+[flake8]
+exclude =
+  migrations,
+  __pycache__,
+  manage.py,
+  settings.py
+extend-ignore =
+  E111,
+  E115,
+  E117,
+  E128,
+  E127,
+  E221,
+  E261,
+  E301,
+  E302,
+  E303,
+  E304,
+  E305,
+  E501,
+  F541,
+  W291,
+  W292,
+  W293,
+  W391

@@ -1,6 +1,4 @@
 import uuid
-import hashlib
-import base64
 import logging
 from django.db import models
 from django.conf import settings

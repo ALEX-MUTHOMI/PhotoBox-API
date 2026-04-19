@@ -1,16 +1,12 @@
 """
 Enterprise Tests for the JWT User API & Anti-Fraud Perimeter.
 """
-import hashlib
-from concurrent.futures import ThreadPoolExecutor
 
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 from django.core.cache import cache
 
-from allauth.socialaccount.models import SocialApp
-from django.contrib.sites.models import Site
 from rest_framework.test import APIClient
 from rest_framework import status
 
@@ -227,6 +223,7 @@ class PrivateUserApiTests(TestCase):
     def test_billing_fields_are_read_only(self):
         payload = {'subscription_tier': 'PRO', 'storage_limit_gb': 1000}
         res = self.client.patch(ME_URL, payload)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.user.refresh_from_db()
         self.assertEqual(self.user.subscription_tier, 'FREE')
         self.assertEqual(self.user.storage_limit_gb, 1)

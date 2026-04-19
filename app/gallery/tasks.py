@@ -57,7 +57,7 @@ def _sanitise_filename(raw: Optional[str]) -> Optional[str]:
     Validate and sanitise a filename before embedding it in an R2 key.
 
     Rejects:
-      - Path traversal sequences (../, ..\)
+      - Path traversal sequences (../, ..\\)
       - Null bytes
       - Shell metacharacters
       - Filenames exceeding OS path limits
@@ -265,7 +265,6 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Private helpers — extracted so the main task reads like a flow chart
 # ---------------------------------------------------------------------------
-from gallery.models import Photo  # noqa: PLC0415
 
 def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:
     """

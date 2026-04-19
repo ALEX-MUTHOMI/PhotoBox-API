@@ -1,7 +1,6 @@
 """
 Serializers for the Gallery API View (The Pixieset Standard).
 """
-import uuid
 import secrets
 from rest_framework import serializers
 from gallery.models import Event, Scene, Photo

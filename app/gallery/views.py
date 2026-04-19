@@ -5,7 +5,7 @@ import logging
 import os
 
 from django.db import transaction
-from django.db.models import F, Sum
+from django.db.models import F
 from django.db.models.functions import Greatest
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin

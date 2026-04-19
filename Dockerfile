@@ -32,7 +32,7 @@ RUN python -m venv /py && \
     rm -rf /tmp && \
     # Create the unprivileged user (Debian syntax)
     useradd --system --no-create-home django-user && \
-    # Create media/static volume directories
+    # Create runtime volume directories for collected static/media files
     mkdir -p /vol/web/media && \
     mkdir -p /vol/web/static && \
     # Set strict ownership and execution permissions
@@ -50,6 +50,3 @@ EXPOSE 8000
 USER django-user
 
 CMD ["run.sh"]
-
-
-

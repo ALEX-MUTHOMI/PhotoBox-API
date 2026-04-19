@@ -22,8 +22,8 @@ import hmac
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone as dt_timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone as dt_timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from django.conf import settings

@@ -20,8 +20,7 @@ ARCHITECTURE NOTES:
 
 import time
 import threading
-import uuid
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 from botocore.exceptions import ClientError
 
 from django.contrib.auth import get_user_model

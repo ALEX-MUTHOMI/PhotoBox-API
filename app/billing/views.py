@@ -15,7 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 
 
 from django.contrib.auth import get_user_model
-from .models import Subscription , ProcessedWebhook
+from .models import Subscription
 from .tasks import process_lemon_squeezy_webhook
 
 User = get_user_model()
