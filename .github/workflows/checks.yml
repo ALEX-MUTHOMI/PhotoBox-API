@@ -12,12 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -37,4 +31,10 @@ jobs:
 
       - name: Tear Down Stack
         if: always()
-        run: docker compose down -v
+        # Bash check: Only run docker compose down IF the file was actually checked out
+        run: |
+          if [ -f "docker-compose.yml" ]; then
+            docker compose down -v
+          else
+            echo "Skipping teardown: docker-compose.yml not found."
+          fi
