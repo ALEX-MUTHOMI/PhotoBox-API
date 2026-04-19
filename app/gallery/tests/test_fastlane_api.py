@@ -180,6 +180,31 @@ class FastLaneApiTests(TestCase):
         self.workspace.refresh_from_db()
         self.assertEqual(self.workspace.storage_used_bytes, 0, "FATAL: Quota not refunded after deletion!")
 
+    def test_delete_refund_clamps_ledger_at_zero(self):
+        """
+        SECURITY: Even if the quota ledger is already inconsistent, deleting a photo
+        must never push storage_used_bytes negative.
+        """
+        photo = Photo.objects.create(
+            scene=self.scene,
+            original_filename='orphaned.jpg',
+            file_size_bytes=4096,
+            status='READY',
+            is_processed=True,
+        )
+        Workspace.objects.filter(id=self.workspace.id).update(storage_used_bytes=1024)
+
+        del_url = reverse('gallery:fastlane-photo-detail', args=[photo.id])
+        del_res = self.client.delete(del_url)
+
+        self.assertEqual(del_res.status_code, status.HTTP_204_NO_CONTENT)
+        self.workspace.refresh_from_db()
+        self.assertEqual(
+            self.workspace.storage_used_bytes,
+            0,
+            "FATAL: Fast Lane deletion pushed the ledger negative."
+        )
+
     @patch(CELERY_TASK_PATH)
     def test_response_body_contains_queued_status_and_photo_id(self, mock_task):
         """

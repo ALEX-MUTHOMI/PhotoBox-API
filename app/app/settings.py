@@ -300,6 +300,7 @@ ACCOUNT_AUTHENTICATION_METHOD      = 'email'
 # Google login matching an existing email is blocked, not auto-linked.
 SOCIALACCOUNT_EMAIL_AUTHENTICATION             = True
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = False
+SOCIALACCOUNT_ADAPTER = 'user.adapters.HardenedSocialAccountAdapter'
 
 REST_AUTH_REGISTER_SERIALIZERS = {
     'REGISTER_SERIALIZER': 'user.serializers.UserSerializer',
@@ -452,6 +453,7 @@ if SENTRY_DSN:
     from sentry_sdk.integrations.django import DjangoIntegration
     from sentry_sdk.integrations.celery import CeleryIntegration
     from sentry_sdk.integrations.logging import LoggingIntegration
+    from core.security import sentry_before_breadcrumb, sentry_before_send
 
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -464,6 +466,8 @@ if SENTRY_DSN:
         release=os.environ.get('APP_VERSION', 'photobox-api@dev'),
         environment=os.environ.get('SENTRY_ENVIRONMENT', 'development'),
         send_default_pii=False,   # GDPR: never send passwords / tokens to Sentry
+        before_send=sentry_before_send,
+        before_breadcrumb=sentry_before_breadcrumb,
     )
 
 

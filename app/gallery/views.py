@@ -4,7 +4,9 @@ Views for the Gallery API (The Pixieset Standard).
 import logging
 import os
 
+from django.db import transaction
 from django.db.models import F, Sum
+from django.db.models.functions import Greatest
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from rest_framework import mixins, parsers, status, viewsets
@@ -291,38 +293,28 @@ class PhotoFastLaneViewSet(
         workspace = scene.event.workspace
 
         # 4. ATOMIC QUOTA GATE & RACE CONDITION DEFENSE
-        #
-        # KNOWN LIMITATION (TOCTOU Race Condition):
-        # The check below is a READ, and the .update() below is a WRITE.
-        # Two concurrent requests can both pass this `if` check before either
-        # commits the update, allowing a brief double-spend of quota bytes.
-        #
-        # CORRECT FIX (when scale demands it):
-        #   with transaction.select_for_update():
-        #       workspace = Workspace.objects.select_for_update().get(id=workspace.id)
-        #       if (workspace.storage_used_bytes + image_file.size) > workspace.storage_limit_bytes:
-        #           raise ValidationError(...)
-        #       workspace.storage_used_bytes = F('storage_used_bytes') + image_file.size
-        #       workspace.save(update_fields=['storage_used_bytes'])
-        #
-        # Current implementation is acceptable for low concurrency (< 100 rps per workspace).
-        if (workspace.storage_used_bytes + image_file.size) > workspace.storage_limit_bytes:
-            raise ValidationError("Storage quota exceeded. Please upgrade your subscription.")
+        # Hold the workspace row lock only across the quota math + photo insert so
+        # concurrent uploads for the same tenant cannot double-spend the ledger.
+        with transaction.atomic():
+            locked_workspace = Workspace.objects.select_for_update().get(id=workspace.id)
+            projected_usage = locked_workspace.storage_used_bytes + image_file.size
+            if projected_usage > locked_workspace.storage_limit_bytes:
+                raise ValidationError("Storage quota exceeded. Please upgrade your subscription.")
 
-        Workspace.objects.filter(id=workspace.id).update(
-            storage_used_bytes=F('storage_used_bytes') + image_file.size
-        )
+            Workspace.objects.filter(id=locked_workspace.id).update(
+                storage_used_bytes=F('storage_used_bytes') + image_file.size
+            )
 
-        safe_filename = os.path.basename(image_file.name)
+            safe_filename = os.path.basename(image_file.name)
 
-        # 5. DB WRITE — is_processed=False (the Celery task will flip this to True)
-        # This is the LAST thing the web thread does. No Cloudinary. No external I/O.
-        photo = serializer.save(
-            file_size_bytes=image_file.size,
-            original_filename=safe_filename,
-            is_processed=False,   # Honest: processing hasn't happened yet
-            status='PENDING',
-        )
+            # 5. DB WRITE — is_processed=False (the Celery task will flip this to True)
+            # This is the LAST thing the web thread does. No Cloudinary. No external I/O.
+            photo = serializer.save(
+                file_size_bytes=image_file.size,
+                original_filename=safe_filename,
+                is_processed=False,   # Honest: processing hasn't happened yet
+                status='PENDING',
+            )
 
         # 6. FIRE AND FORGET — hand off to Celery worker pool
         # The web worker is now FREE. The HTTP response will return in milliseconds.
@@ -364,7 +356,7 @@ class PhotoFastLaneViewSet(
         
         # Atomically strip the bytes from the ledger
         Workspace.objects.filter(id=workspace.id).update(
-            storage_used_bytes=F('storage_used_bytes') - file_size
+            storage_used_bytes=Greatest(0, F('storage_used_bytes') - file_size)
         )
         
         instance.delete()

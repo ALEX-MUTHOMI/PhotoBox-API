@@ -206,6 +206,24 @@ class R2WebhookSecurityTests(TestCase):
         self.assertEqual(self.asset.status, 'PENDING')
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    def test_missing_timestamp_header_returns_403(self):
+        """SECURITY: Freshness proof is mandatory for signed R2 webhooks."""
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1234)
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        sig = _sign(payload_bytes)
+
+        res = self.client.post(
+            WEBHOOK_URL,
+            data=payload_bytes,
+            content_type="application/json",
+            HTTP_X_CLOUDFLARE_SIGNATURE=sig,
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "PENDING")
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
     def test_wrong_signature_returns_403(self):
         """SECURITY (Forgery): A webhook signed with the wrong secret → 403."""
         payload = _make_payload(r2_object_key=self.asset.r2_object_key)

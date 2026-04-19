@@ -165,7 +165,26 @@ class FullTransactionLifecycleTests(TransactionTestCase):
 
         self.assertIn('processed successfully', result1)
         self.assertIn('Duplicate', result2)
-        self.assertEqual(ProcessedWebhook.objects.filter(event_id='evt_dupe_001').count(), 1)
+        self.assertEqual(ProcessedWebhook.objects.count(), 1)
+
+    def test_replayed_payload_with_new_header_event_id_is_deduplicated(self):
+        """
+        SECURITY: Replaying the exact same signed payload with a forged new X-Event-ID
+        must not bypass idempotency.
+        """
+        payload = _make_ls_payload(
+            'subscription_created', self.user.id, self.session.session_token,
+        )
+        payload_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+
+        result1 = process_lemon_squeezy_webhook(payload, 'evt_replay_001', payload_hash)
+        result2 = process_lemon_squeezy_webhook(payload, 'evt_replay_999', payload_hash)
+
+        self.assertIn('processed successfully', result1)
+        self.assertIn('Duplicate', result2)
+        self.assertEqual(ProcessedWebhook.objects.count(), 1)
 
     # ─────────────────────────────────────────
     # 3. SECURITY: Unpaid Subscription Exploit

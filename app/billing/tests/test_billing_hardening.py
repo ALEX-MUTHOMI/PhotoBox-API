@@ -76,10 +76,10 @@ class OutOfOrderWebhookTests(TransactionTestCase):
       clears lemon_squeezy_subscription_id, so the renewal webhook
       cannot find the subscription by that ID.
 
-    EXPECTED RESULT (VULNERABILITY PROOF):
-      - The renewal is orphaned to the Dead Letter Queue.
-      - The user is permanently stuck on FREE despite having an active payment.
-      - The ProcessedWebhook idempotency entry is rolled back (broken).
+    EXPECTED RESULT:
+      - The renewal is reconciled onto the tenant even if cancellation arrived first.
+      - The user returns to PRO with the correct storage limit.
+      - No dead-letter entry is emitted for a valid delayed update.
     """
 
     def setUp(self):
@@ -113,10 +113,8 @@ class OutOfOrderWebhookTests(TransactionTestCase):
     def test_lemon_squeezy_out_of_order_webhooks(self):
         """
         Simulate: subscription_cancelled arrives BEFORE subscription_updated.
-        Proves the system CANNOT survive this attack in its current state.
+        The billing state machine must recover once the delayed active update arrives.
         """
-
-        # ── STEP 1: Cancellation arrives first ──────────────────────────
         cancel_payload = _make_ls_payload(
             'subscription_cancelled',
             self.user.id,
@@ -130,15 +128,11 @@ class OutOfOrderWebhookTests(TransactionTestCase):
 
         self.assertIn('downgraded', cancel_result)
 
-        # Verify downgrade completed
         self.sub.refresh_from_db()
         self.assertFalse(self.sub.is_pro)
         self.assertEqual(self.sub.storage_limit_bytes, ONE_GB)
+        self.assertEqual(self.sub.lemon_squeezy_subscription_id, 'sub_100')
 
-        # THE LANDMINE: subscription_id is now None
-        self.assertIsNone(self.sub.lemon_squeezy_subscription_id)
-
-        # ── STEP 2: Delayed renewal arrives 50ms later ──────────────────
         renew_payload = _make_ls_payload(
             'subscription_updated',
             self.user.id,
@@ -151,45 +145,20 @@ class OutOfOrderWebhookTests(TransactionTestCase):
             renew_payload, 'evt_renew_ooo_02'
         )
 
-        # ── VULNERABILITY ASSERTIONS ────────────────────────────────────
-
-        # The task returns None because the generic Exception handler
-        # catches Subscription.DoesNotExist and does not return a value.
-        self.assertIsNone(
-            renew_result,
-            "Renewal should silently fail (no return from exception handler)"
-        )
-
-        # The orphaned webhook MUST be preserved in the Dead Letter Queue.
-        dlq_entry = DeadLetterQueue.objects.filter(event_id='evt_renew_ooo_02')
-        self.assertTrue(
-            dlq_entry.exists(),
-            "CRITICAL: Renewal webhook payload was silently lost — no DLQ entry!"
-        )
-
-        # The ProcessedWebhook entry was ROLLED BACK because it was created
-        # inside the same atomic() block that crashed.  This means the
-        # idempotency guard is broken — a retry will fail identically.
-        processed = ProcessedWebhook.objects.filter(event_id='evt_renew_ooo_02')
+        self.assertIn('processed successfully', renew_result)
         self.assertFalse(
-            processed.exists(),
-            "Idempotency entry should be rolled back — webhook can be "
-            "retried by Lemon Squeezy but will fail again in an infinite loop"
+            DeadLetterQueue.objects.filter(event_id='evt_renew_ooo_02').exists(),
+            'FATAL: The delayed renewal was dead-lettered instead of reconciled.'
         )
+        self.assertEqual(ProcessedWebhook.objects.count(), 2)
 
-        # SMOKING GUN: User is permanently stuck on FREE.
         self.sub.refresh_from_db()
-        self.assertFalse(
-            self.sub.is_pro,
-            "VULNERABILITY: User remains FREE despite having an active payment"
-        )
+        self.assertTrue(self.sub.is_pro)
+        self.assertEqual(self.sub.storage_limit_bytes, FIFTY_GB)
 
         self.user.refresh_from_db()
-        self.assertEqual(
-            self.user.subscription_tier, 'FREE',
-            "VULNERABILITY: User tier stuck on FREE — revenue lost"
-        )
-
+        self.assertEqual(self.user.subscription_tier, 'PRO')
+        self.assertEqual(self.user.storage_limit_gb, 50)
 
 # ======================================================================
 # TEST 2: CONCURRENT CHECKOUT CACHE LOCK (10 BUTTON MASHES ON SLOW 3G)
@@ -441,3 +410,4 @@ class AtomicQuotaDeductionTests(TransactionTestCase):
             "CRITICAL: storage_used_bytes exceeds storage_limit_bytes — "
             "quota enforcement bypass detected!"
         )
+

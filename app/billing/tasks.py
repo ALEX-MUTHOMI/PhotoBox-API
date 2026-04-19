@@ -1,5 +1,6 @@
 import logging
 import json
+import hashlib
 from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
 from django.db import transaction, OperationalError
@@ -13,6 +14,33 @@ User = get_user_model()
 # Configuration Variables - Free tier remains static, Pro tier is now dynamic
 FREE_TIER_BYTES = 1073741824       # 1GB
 FREE_TIER_GB = 1
+
+
+def _resolve_subscription_for_event(event_name, subscription_id, user_id):
+    """
+    Resolve the subscription row in a way that survives out-of-order delivery.
+
+    `subscription_updated` can legally arrive after `subscription_cancelled`.
+    When that happens, we fall back to the user anchor from custom_data instead
+    of treating the renewal as an orphaned event.
+    """
+    if event_name == 'subscription_created':
+        user = User.objects.select_for_update().get(id=user_id)
+        sub = Subscription.objects.select_for_update().get(user=user)
+        return user, sub
+
+    try:
+        sub = Subscription.objects.select_for_update().get(
+            lemon_squeezy_subscription_id=subscription_id
+        )
+        user = User.objects.select_for_update().get(id=sub.user_id)
+        return user, sub
+    except Subscription.DoesNotExist:
+        if user_id is None:
+            raise
+        user = User.objects.select_for_update().get(id=user_id)
+        sub = Subscription.objects.select_for_update().get(user=user)
+        return user, sub
 
 def safe_create_dlq(event_id, payload_data, error_message):
     """
@@ -34,7 +62,7 @@ def safe_create_dlq(event_id, payload_data, error_message):
         )
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=5)
-def process_lemon_squeezy_webhook(self, payload_data, event_id):
+def process_lemon_squeezy_webhook(self, payload_data, event_id, payload_hash=None):
     """
     BACKGROUND WORKER: Asynchronously processes verified webhooks from Lemon Squeezy.
     Fully secured against Unpaid exploits, replay attacks, and state desynchronization.
@@ -49,6 +77,9 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id):
     subscription_id = str(data_node.get('id'))
     attributes = data_node.get('attributes', {})
     sub_status = attributes.get('status')
+    idempotency_key = payload_hash or hashlib.sha256(
+        json.dumps(payload_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()
 
     if not event_name or not event_name.startswith('subscription_'):
         return "Ignored: Irrelevant event type"
@@ -57,9 +88,15 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id):
         with transaction.atomic():
 
             # 1. IDEMPOTENCY LOCK: Prevent Replay Attacks and Duplicate Webhooks (From Original)
-            webhook_log, created = ProcessedWebhook.objects.select_for_update().get_or_create(event_id=event_id)
+            webhook_log, created = ProcessedWebhook.objects.select_for_update().get_or_create(
+                event_id=idempotency_key
+            )
             if not created:
-                logger.info(f"Webhook {event_id} already processed. Skipping.")
+                logger.info(
+                    "Webhook replay skipped. source_event_id=%s idempotency_key=%s",
+                    event_id,
+                    idempotency_key,
+                )
                 return "Ignored: Duplicate event"
 
             # ==========================================
@@ -84,14 +121,20 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id):
                     session.status = 'COMPLETED'
                     session.save()
 
-                    user = User.objects.select_for_update().get(id=user_id)
-                    sub = Subscription.objects.select_for_update().get(user=user)
+                    user, sub = _resolve_subscription_for_event(
+                        event_name,
+                        subscription_id,
+                        user_id,
+                    )
                     bandwidth_limit = session.plan.bandwidth_limit_bytes
 
                 # UPGRADING EXISTING SUBSCRIPTION: Dynamic Pricing Lookup
                 else:
-                    sub = Subscription.objects.select_for_update().get(lemon_squeezy_subscription_id=subscription_id)
-                    user = User.objects.select_for_update().get(id=sub.user_id)
+                    user, sub = _resolve_subscription_for_event(
+                        event_name,
+                        subscription_id,
+                        user_id,
+                    )
                     variant_id = str(attributes.get('variant_id'))
                     new_plan = PricingPlan.objects.get(lemon_squeezy_variant_id=variant_id)
                     bandwidth_limit = new_plan.bandwidth_limit_bytes
@@ -122,14 +165,19 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id):
             # EVENT: SUBSCRIPTION CANCELLED OR EXPIRED
             # ==========================================
             elif event_name in ['subscription_cancelled', 'subscription_expired']:
-                sub = Subscription.objects.select_for_update().get(lemon_squeezy_subscription_id=subscription_id)
-                user = User.objects.select_for_update().get(id=sub.user_id)
+                user, sub = _resolve_subscription_for_event(
+                    event_name,
+                    subscription_id,
+                    user_id,
+                )
 
                 if sub.is_pro:
                     # A. Downgrade the Billing Vault Physics
                     sub.is_pro = False
                     sub.storage_limit_bytes = FREE_TIER_BYTES
-                    sub.lemon_squeezy_subscription_id = None
+                    # Preserve the external id for late-arriving update events and
+                    # operator forensics instead of severing the correlation anchor.
+                    sub.lemon_squeezy_subscription_id = subscription_id
                     sub.save()
 
                     # B. Sync with the Core User App (Preserving your original DDD logic)
@@ -162,7 +210,7 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id):
             logger.error(f"Max retries exhausted for webhook {event_id}. Routing to DLQ.")
             safe_create_dlq(event_id, payload_data, "Max retries exceeded (Database locked)")
 
-    except User.DoesNotExist:
+    except (User.DoesNotExist, Subscription.DoesNotExist):
         logger.error(f"User not found for webhook {event_id}.")
         safe_create_dlq(event_id, payload_data, "User Not Found")
 

@@ -404,10 +404,11 @@ def _verify_webhook_timestamp(
     timezone utilities, which are affected by USE_TZ and TIME_ZONE settings.
 
     Returns (is_valid, failure_reason).
-    Absent timestamp returns (True, "") — HMAC is the hard requirement.
+    Timestamp is mandatory. Without it, a captured valid webhook can be replayed
+    indefinitely because the HMAC alone proves authenticity, not freshness.
     """
     if not timestamp_header:
-        return True, ""
+        return False, "timestamp_missing"
 
     try:
         ts = int(timestamp_header)
@@ -424,10 +425,10 @@ def _verify_webhook_timestamp(
 
     except (ValueError, TypeError, OSError):
         logger.warning(
-            "[R2-WEBHOOK] Unparseable Webhook-Timestamp header. "
-            "Skipping replay check. header=%r",
+            "[R2-WEBHOOK] Unparseable Webhook-Timestamp header. header=%r",
             timestamp_header,
         )
+        return False, "timestamp_unparseable"
 
     return True, ""
 

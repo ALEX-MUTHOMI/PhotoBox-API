@@ -197,7 +197,7 @@ class Photo(models.Model):
         PHASE 3: Presigned R2 GET URL for client download.
 
         SECURITY — Presigned URL Exfiltration Defense:
-          Hard ceiling of 900 seconds (15 minutes) enforced in storage.py.
+          Hard ceiling of 60 seconds enforced in storage.py.
           This property passes no ExpiresIn — the utility enforces the cap.
           If a URL is intercepted or leaked, it becomes useless in ≤15 min.
 
