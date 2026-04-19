@@ -1,3 +1,5 @@
+
+
 # 📸 PhotoBox API
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python)
@@ -8,7 +10,6 @@
 
 **PhotoBox** is an enterprise-grade, multi-tenant photography SaaS platform built on an **Event-Driven Architecture (EDA)**. It provides professional photographers with a highly resilient, asynchronous backend to upload, curate, and deliver client galleries at massive scale.
 
----
 
 ## 🏗 Architecture & The Unified Vault Pattern
 
@@ -36,8 +37,6 @@ PhotoBox implements a **Unified Vault Pattern**, utilizing Cloudflare R2 as the 
 * **Billing:** Lemon Squeezy
 * **Infrastructure:** Docker, Docker Compose, Nginx
 
----
-
 ## 💻 Getting Started (Local Development)
 
 ### 1. Prerequisites
@@ -50,3 +49,6 @@ Clone the repository and set up your `.env` file (see `.env.example` for require
 git clone [https://github.com/your-org/photobox-api.git](https://github.com/your-org/photobox-api.git)
 cd photobox-api
 # Create and populate your .env file
+
+
+staging
