@@ -32,7 +32,7 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ['email', 'name']
     list_filter = ['is_active', 'is_staff']
     ordering = ['email']
-    list_display = ['email', 'name', 'storage_limit_gb']
+    list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb']
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),

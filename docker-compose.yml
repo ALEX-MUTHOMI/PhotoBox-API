@@ -21,6 +21,17 @@ services:
       - DB_USER=devuser
       - DB_PASS=changeme
       - DEBUG=1
+      - SECRET_KEY=your-secret-key-here
+      - CLOUDFLARE_R2_ENDPOINT=https://placeholder.r2.cloudflarestorage.com
+      - CLOUDFLARE_R2_BUCKET_NAME=test-bucket
+      - CLOUDFLARE_ACCESS_KEY_ID=test-access-key
+      - CLOUDFLARE_SECRET_ACCESS_KEY=test-secret-key
+      - CLOUDFLARE_R2_DOMAIN=placeholder.r2.cloudflarestorage.com
+      - CLOUDFLARE_WEBHOOK_SECRET=test-webhook-secret
+      - CLOUDINARY_CLOUD_NAME=photobox-app
+      - LEMON_SQUEEZY_API_KEY=test-key
+      - LEMON_SQUEEZY_STORE_ID=1
+      - LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY=test-ls-secret
     depends_on:
       - db
 

@@ -1,14 +1,18 @@
 """
 Views for the Gallery API (The Pixieset Standard).
 """
+import logging
 import os
+
 from django.db.models import F, Sum
-from rest_framework import viewsets, parsers, mixins
+from django.views.generic import TemplateView
+from django.contrib.auth.mixins import LoginRequiredMixin
+from rest_framework import mixins, parsers, status, viewsets
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
-from rest_framework import status
 
 from core.models import Workspace
 from gallery.models import Event, Scene, Photo
@@ -18,7 +22,6 @@ from gallery.throttles import FastLaneUploadThrottle
 # Enterprise Image Inspection
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +29,6 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # 1. PIXIESET STANDARD: EVENT (The Collection)
 # ==========================================
-
-from django.views.generic import TemplateView
-from django.contrib.auth.mixins import LoginRequiredMixin
 
 class PhotographerDashboardView(LoginRequiredMixin, TemplateView):
     template_name = 'gallery/dashboard.html'
@@ -154,6 +154,18 @@ class SceneViewSet(viewsets.ModelViewSet):
 # Then immediately fires a Celery task and returns 202.
 # The web worker is FREE within milliseconds.
 
+class FastLanePhotoPagination(PageNumberPagination):
+    """
+    Fail-closed pagination for tenant photo listings.
+
+    The explicit max_page_size prevents authenticated clients from requesting
+    arbitrarily large result sets and turning the endpoint into a response-body
+    amplification vector.
+    """
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 class PhotoFastLaneViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
@@ -177,6 +189,7 @@ class PhotoFastLaneViewSet(
 
     # DRF native Multipart parser for binary
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
+    pagination_class = FastLanePhotoPagination
 
     def get_queryset(self):
         """
@@ -194,6 +207,33 @@ class PhotoFastLaneViewSet(
             queryset = queryset.filter(scene_id=scene_id)
 
         return queryset.order_by('-uploaded_at')
+
+    def download_url(self, request, pk=None):
+        """
+        Return a short-lived presigned R2 download URL for a single photo.
+
+        This endpoint performs an explicit ownership check so cross-tenant access
+        attempts fail closed before a signed URL can ever be minted.
+        """
+        photo = Photo.objects.select_related(
+            'scene__event__workspace__user'
+        ).filter(pk=pk).first()
+
+        if photo is None:
+            raise NotFound("Photo not found.")
+
+        if photo.scene.event.workspace.user_id != request.user.id:
+            raise PermissionDenied(
+                "You do not have permission to generate a download URL for this photo."
+            )
+
+        download_url = photo.download_url
+        if not download_url:
+            raise ValidationError(
+                "Download URL unavailable. The asset is not ready for download."
+            )
+
+        return Response({"download_url": download_url}, status=status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         """

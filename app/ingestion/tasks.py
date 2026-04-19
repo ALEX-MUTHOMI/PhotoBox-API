@@ -1,35 +1,38 @@
 import logging
+from typing import Dict, Any
 from celery import shared_task
+from django.db import DatabaseError, transaction
+from django.db.models import F
+from django.db.models.functions import Greatest
 from django.utils import timezone
 from datetime import timedelta
-from django.db import transaction
-from botocore.exceptions import ClientError
-from gallery.models import MediaAsset, Workspace
-from .views import get_r2_client
-from django.conf import settings
+from botocore.exceptions import ClientError, BotoCoreError, EndpointConnectionError, ConnectTimeoutError, ReadTimeoutError
 
 logger = logging.getLogger(__name__)
 
-@shared_task
-def reap_abandoned_uploads():
+@shared_task(bind=True, name="ingestion.tasks.reap_abandoned_uploads", max_retries=5)
+def reap_abandoned_uploads(self) -> Dict[str, Any]:
     """
     THE FIX: The Reaper Task with Phantom Upload Defense.
     Finds PENDING assets older than 24 hours.
     CRITICALLY: Verifies via Cloudflare R2 if the file actually exists 
-    before refunding the workspace quota.
+    before refunding the workspace quota. Uses exponential backoff on outages.
     """
-    cutoff_time = timezone.now() - timedelta(hours=24)
-    
+    # Local imports prevent circular dependencies at Django boot time
+    from gallery.models import Photo  
+    from core.models import Workspace
+    from gallery.storage import r2_object_exists
+
     # 1. Look for abandoned tickets
-    abandoned_assets = MediaAsset.objects.filter(
+    abandoned_assets = Photo.objects.filter(
         status='PENDING',
-        uploaded_at__lt=cutoff_time
-    ).select_related('scene__event__workspace')
+        uploaded_at__lt=timezone.now() - timedelta(hours=24),
+        r2_object_key__isnull=False,
+    ).exclude(r2_object_key="").select_related('scene__event__workspace')
     
     if not abandoned_assets.exists():
-        return "No abandoned assets to reap."
+        return {"status": "clean", "message": "No abandoned assets to reap."}
 
-    r2_client = get_r2_client()
     reaped_count = 0
     phantom_count = 0
 
@@ -37,44 +40,60 @@ def reap_abandoned_uploads():
         workspace = asset.scene.event.workspace
         
         # 2. THE PHANTOM EXORCISM: Head check R2 physically
-        file_physically_exists = False
         try:
-            r2_client.head_object(
-                Bucket=getattr(settings, 'CLOUDFLARE_R2_BUCKET_NAME', 'test-bucket'),
-                Key=asset.r2_object_key
-            )
-            file_physically_exists = True
-        except ClientError as e:
-            # 404 means it truly wasn't uploaded.
-            if e.response['Error']['Code'] == '404':
-                file_physically_exists = False
-            else:
-                # Other errors (throttle, auth), skip and try next time.
-                logger.error(f"Reaper R2 API Error for {asset.id}: {e}")
-                continue
-                
+            # Uses the centralized, thread-safe, path-traversal-protected storage API
+            file_physically_exists = r2_object_exists(asset.r2_object_key)
+        except Exception as exc:
+            # FAIL CLOSED: if R2 cannot be trusted, do not mutate asset state or quota.
+            # In a real worker we retry with backoff; in direct/eager execution
+            # (used by tests and local debugging) we stop quietly instead of
+            # propagating Celery's Retry exception into the caller.
+            logger.warning("[REAPER] R2 unreachable for Asset %s: %s. Backing off.", asset.id, exc)
+            if getattr(self.request, 'called_directly', False) or getattr(self.request, 'is_eager', False):
+                return {
+                    "status": "deferred",
+                    "message": "R2 unavailable; reaper aborted without mutating asset state.",
+                    "reaped_count": reaped_count,
+                    "phantom_count": phantom_count,
+                }
+            raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+
         with transaction.atomic():
-            # Lock the workspace row to safely adjust quota
-            locked_workspace = Workspace.objects.select_for_update().get(id=workspace.id)
-            
             if file_physically_exists:
                 # PHANTOM UPLOAD DETECTED!
                 # Hacker uploaded the file but blocked the webhook to keep it 'PENDING'.
-                # We DO NOT refund quota. We mark it as QUARANTINED (or UPLOADED).
                 logger.critical(f"PHANTOM UPLOAD DETECTED: Asset {asset.id} exists in R2 but webhook was suppressed!")
+                Photo.objects.filter(id=asset.id, status='PENDING').update(status='QUARANTINED')
                 phantom_count += 1
-                asset.status = 'QUARANTINED' 
-                asset.save(update_fields=['status'])
             else:
                 # LEGITIMATE ABANDONMENT
-                # User requested ticket but never uploaded. Safe to refund.
+                try:
+                    # Lock ONLY this specific asset row to prevent worker collisions
+                    locked_asset = Photo.objects.select_for_update(nowait=True).get(
+                        id=asset.id,
+                        status='PENDING',
+                    )
+                except (Photo.DoesNotExist, DatabaseError):
+                    continue  # Another worker grabbed this or it was deleted
+
+                refund = locked_asset.file_size_bytes or 0
+                if refund > 0:
+                    # ATOMIC QUOTA REFUND: Delegates math to Postgres. 
+                    # `Greatest(0, ...)` ensures unexpected math never drops quota below 0.
+                    Workspace.objects.filter(id=workspace.id).update(
+                        storage_used_bytes=Greatest(0, F("storage_used_bytes") - refund)
+                    )
+
+                # Preserve the row for forensics and make the refund idempotent:
+                # only PENDING assets are ever reaped, so once marked FAILED the
+                # quota cannot be refunded twice on a later pass.
+                locked_asset.status = 'FAILED'
+                locked_asset.save(update_fields=['status'])
                 reaped_count += 1
-                locked_workspace.storage_used_bytes -= asset.file_size_bytes
-                # Ensure we don't go below 0 due to unexpected math
-                locked_workspace.storage_used_bytes = max(0, locked_workspace.storage_used_bytes)
-                locked_workspace.save(update_fields=['storage_used_bytes'])
-                
-                asset.status = 'FAILED'
-                asset.save(update_fields=['status'])
-                
-    return f"Reaper finished. Reaped: {reaped_count}. Phantoms Caught: {phantom_count}."
+                logger.info(f"[REAPER] Cleaned stale asset {asset.id}, refunded {refund} bytes.")
+
+    return {
+        "status": "complete", 
+        "reaped_count": reaped_count, 
+        "phantom_count": phantom_count
+    }
