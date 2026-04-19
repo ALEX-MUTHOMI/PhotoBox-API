@@ -3,6 +3,7 @@ import hmac
 import hashlib
 from django.test import TransactionTestCase, Client, override_settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from checkout.models import PricingPlan, CheckoutSession
 from unittest.mock import patch
 from billing.models import ProcessedWebhook
@@ -14,6 +15,7 @@ class WebhookSecurityTests(TransactionTestCase):
     """Automated penetration tests for the Lemon Squeezy Webhook Bridge."""
 
     def setUp(self):
+        cache.clear()
         self.client = Client()
         self.webhook_url = '/api/billing/webhook/'
         self.secret = b"super_secret_test_key_123"
@@ -87,6 +89,6 @@ class WebhookSecurityTests(TransactionTestCase):
         self.assertEqual(resp2.status_code, 202)
 
         # Verify the webhook was only logged ONCE in the database ledger
-        self.assertEqual(ProcessedWebhook.objects.filter(event_id='evt_999').count(), 1)
+        self.assertEqual(ProcessedWebhook.objects.count(), 1)
 
     # End of file

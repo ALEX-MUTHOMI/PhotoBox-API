@@ -67,8 +67,13 @@ class WebhookReceiverView(APIView):
         except json.JSONDecodeError:
             return Response("Malformed JSON", status=status.HTTP_400_BAD_REQUEST)
 
+        # The event id header is not authenticated by the HMAC, so never trust it
+        # as the sole idempotency key. We derive a deterministic payload hash and
+        # let the task use that for replay protection.
+        payload_hash = hashlib.sha256(raw_payload).hexdigest()
+
         # Async Handoff
-        process_lemon_squeezy_webhook.delay(payload_data, event_id)
+        process_lemon_squeezy_webhook.delay(payload_data, event_id, payload_hash)
         return Response("Payload queued for processing.", status=status.HTTP_202_ACCEPTED)
 
 

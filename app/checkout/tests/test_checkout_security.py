@@ -107,8 +107,8 @@ class CheckoutAPISecurityTests(APITestCase):
 
     def test_active_subscribers_blocked_from_duplicate_checkouts(self):
         """FRAUD DEFENSE: User already has an active Pro plan."""
-        self.user.is_pro = True
-        self.user.save()
+        self.user.subscription.is_pro = True
+        self.user.subscription.save(update_fields=['is_pro'])
 
         self.client.force_authenticate(user=self.user)
         response = self.client.post(self.generate_url, {"plan_id": self.plan.id})

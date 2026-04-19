@@ -16,6 +16,7 @@ from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 
+from core.security import scrub_email, scrub_ip
 from user.serializers import UserSerializer
 
 logger = logging.getLogger(__name__)
@@ -94,12 +95,12 @@ class ManageUserView(generics.RetrieveUpdateAPIView):
 class EnterpriseTokenObtainPairView(TokenObtainPairView):
     """Overrides JWT view to inject Threat Logging & HttpOnly cookie (XSS Shield)."""
     def post(self, request, *args, **kwargs):
-        ip_address = request.META.get('REMOTE_ADDR', 'Unknown IP')
-        email_attempt = request.data.get('email', 'No Email Provided')
+        ip_address = scrub_ip(request.META.get('REMOTE_ADDR', 'Unknown IP'))
+        email_attempt = scrub_email(request.data.get('email', ''))
 
         try:
             response = super().post(request, *args, **kwargs)
-            logger.info(f"SUCCESSFUL LOGIN: User {email_attempt} from IP {ip_address}")
+            logger.info("SUCCESSFUL LOGIN: principal=%s ip=%s", email_attempt, ip_address)
 
             # THE XSS SHIELD
             if response.status_code == 200:
@@ -119,7 +120,7 @@ class EnterpriseTokenObtainPairView(TokenObtainPairView):
                 )
             return response
         except (InvalidToken, AuthenticationFailed) as e:
-            logger.warning(f"FAILED LOGIN ATTEMPT: Target {email_attempt} from IP {ip_address}")
+            logger.warning("FAILED LOGIN ATTEMPT: principal=%s ip=%s", email_attempt, ip_address)
             raise e
 
 class CookieTokenRefreshView(TokenRefreshView):

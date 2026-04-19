@@ -80,7 +80,7 @@ upload, curate, and deliver galleries to their clients.
 | Principle | Implementation |
 |---|---|
 | **Single Source of Truth** | Cloudflare R2 stores ALL binaries. Cloudinary is a CDN proxy only. |
-| **Async-First** | Django web threads do ZERO I/O to external services. All I/O → Celery. |
+| **Async-First** | Heavy Lane signing and DB commits stay in-request; all slow storage reconciliation and Fast Lane vault uploads run out-of-band via Celery. |
 | **Tenant Isolation** | Every DB query enforces `workspace__user=request.user` join chain. |
 | **Defense in Depth** | Nginx → Django OOM limits → Pillow magic bytes → Quota gate → Celery. |
 
@@ -130,7 +130,7 @@ Workspace (Tenant Boundary)
                     ├── is_processed: True when R2 upload confirmed
                     ├── width, height (masonry grid dimensions)
                     ├── delivery_url (Cloudinary Fetch proxy)
-                    └── download_url (R2 presigned GET, 15-min TTL)
+                    └── download_url (R2 presigned GET, 60-second TTL)
 ```
 
 ### Photo Status State Machine
@@ -218,6 +218,22 @@ This avoids a migration while keeping the ingestion code semantically clean.
 4. `bulk_create()` inserts all `MediaAsset` rows in one INSERT.
 5. React client uploads directly to R2 using the tickets — Django is NOT in the data path.
 
+### Event-Driven Control Loops
+
+PhotoBox is event-driven in three different places, and they do not all have the same failure semantics:
+
+1. **Fast Lane acceptance loop**
+   `PhotoFastLaneViewSet.perform_create()` atomically reserves quota, creates a `Photo(status='PENDING')`, then dispatches `process_fast_lane_asset`.
+   The worker performs the actual R2 upload, and `gallery.tasks` later self-heals or refunds abandoned uploads.
+
+2. **Heavy Lane completion loop**
+   `BulkIngestionView` signs direct-to-R2 upload tickets and inserts all `MediaAsset` rows in one transaction.
+   `R2WebhookView` is the authoritative completion signal, with idempotent `PENDING -> READY | QUARANTINED` transitions.
+
+3. **Billing reconciliation loop**
+   `WebhookReceiverView` performs HMAC verification, derives a payload hash, and hands the event to Celery.
+   `process_lemon_squeezy_webhook()` uses the payload hash as the idempotency key, not the unauthenticated `X-Event-ID` header, and preserves the Lemon Squeezy subscription id across cancellations so delayed `subscription_updated` events can reconcile state.
+
 ---
 
 ## Delivery Layer
@@ -237,7 +253,7 @@ https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/image/fetch/q_auto,f_webp/{R2
 ### download_url (R2 Presigned GET)
 
 - Generated on-demand via `generate_r2_presigned_get_url()`.
-- **Hard TTL cap: 900 seconds (15 minutes)** — enforced server-side in `storage.py`.
+- **Hard TTL cap: 60 seconds** — enforced server-side in `storage.py`.
 - Caller CANNOT bypass the cap by passing a larger `expires_in`.
 - Both images and videos use this path. Large downloads go directly to R2 edge.
 
@@ -278,11 +294,24 @@ https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/image/fetch/q_auto,f_webp/{R2
 | Defense | Implementation |
 |---|---|
 | **HMAC-SHA256** | `hmac.compare_digest()` — timing-safe comparison |
-| **Replay Attack Window** | 5-minute Webhook-Timestamp check |
+| **Replay Attack Window** | `Webhook-Timestamp` is mandatory for R2 and enforced with a 5-minute freshness window; Lemon Squeezy uses payload-hash idempotency because the provider event header is not authenticated |
 | **Ghost Key Tolerance** | Unknown R2 keys → 200 (halts Cloudflare retry storms) |
 | **Size Mismatch Quarantine** | Actual > declared → `QUARANTINED` status |
 | **OOM Payload Guard** | Content-Length > 1MB → rejected before parsing |
 | **Secret Separation** | `CLOUDFLARE_WEBHOOK_SECRET` ≠ `CLOUDFLARE_SECRET_ACCESS_KEY` |
+
+### Billing Integrity Notes
+
+- `GenerateCheckoutLinkView` blocks duplicate upgrades by reading `request.user.subscription.is_pro`, not a transient attribute on the `User` model.
+- Lemon Squeezy idempotency is keyed from the raw payload hash. This closes the replay path where an intercepted valid payload is resent with a forged `X-Event-ID`.
+- Cancellation keeps `lemon_squeezy_subscription_id` for reconciliation and forensics. Downgrading no longer severs the only foreign key that a delayed renewal needs to find the tenant again.
+
+### Identity Hardening Notes
+
+- Google social sign-in is governed by `user.adapters.HardenedSocialAccountAdapter`.
+- Social identities without a verified email claim are rejected fail-closed.
+- If a local account already exists for the email and the incoming Google identity is not already linked to that exact provider `uid`, the login is rejected with a conflict instead of auto-linking.
+- Successful and failed password logins now log hashed principals and hashed IP fingerprints instead of raw email addresses and source IPs.
 
 ### Layer 4: Data Retention (GDPR)
 
@@ -473,6 +502,9 @@ python manage.py seed_db
 
 # Flush and reseed
 python manage.py seed_db --flush
+
+# Generate larger relational datasets safely
+python manage.py seed_db --flush --workspace-count 5 --events-per-workspace 10 --scenes-per-event 10 --photos-per-scene 25 --batch-size 500
 ```
 
 Creates:
@@ -480,6 +512,11 @@ Creates:
 - 3 events with 2-5 scenes each
 - ~100 photos with mocked R2 keys, delivery dimensions, and READY status
 - Realistic filenames, file sizes, and aspect ratios
+
+Scale notes:
+- Photo rows are inserted with `bulk_create()` in bounded batches.
+- Workspace quota is recomputed with a single aggregate query, not an in-memory full-table materialization.
+- The command exposes scale controls for workspaces, events, scenes, photos, and batch size so you can reach 10k+ rows without row-by-row write amplification.
 
 ---
 
@@ -511,4 +548,4 @@ Sentry is initialized in `settings.py` when `SENTRY_DSN` is set. It captures:
 - **Celery task failures** — R2 upload errors, email send failures
 - **Performance traces** — 20% sampling by default (configurable via `SENTRY_TRACES_SAMPLE_RATE`)
 - **Breadcrumbs** — All log levels captured for debugging context
-- **PII Protection** — `send_default_pii=False` strips passwords/tokens from payloads
+- **PII Protection** — `send_default_pii=False` disables default PII collection, and custom `before_send` / `before_breadcrumb` scrubbers redact authorization headers, cookies, tokens, emails, and inline bearer strings before telemetry leaves the process.

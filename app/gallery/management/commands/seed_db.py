@@ -21,6 +21,8 @@ import random
 from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
+from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 
@@ -120,6 +122,96 @@ class Command(BaseCommand):
             action='store_true',
             help='Delete all existing seeded data before re-seeding.',
         )
+        parser.add_argument(
+            '--workspace-count',
+            type=int,
+            default=len(PHOTOGRAPHERS),
+            help='Number of photographer workspaces to seed.',
+        )
+        parser.add_argument(
+            '--events-per-workspace',
+            type=int,
+            default=None,
+            help='Override the number of events per workspace.',
+        )
+        parser.add_argument(
+            '--scenes-per-event',
+            type=int,
+            default=None,
+            help='Override the number of scenes per event.',
+        )
+        parser.add_argument(
+            '--photos-per-scene',
+            type=int,
+            default=None,
+            help='Override the number of photos per scene.',
+        )
+        parser.add_argument(
+            '--batch-size',
+            type=int,
+            default=500,
+            help='bulk_create batch size for seeded photos.',
+        )
+
+    def _workspace_seed_specs(self, workspace_count):
+        specs = []
+        for index in range(workspace_count):
+            if index < len(PHOTOGRAPHERS):
+                specs.append(PHOTOGRAPHERS[index])
+                continue
+
+            specs.append(
+                {
+                    'email': f'seeded-{index + 1:03d}@photobox.dev',
+                    'password': 'PhotoBox2026!',
+                    'name': f'Seeded Photographer {index + 1:03d}',
+                    'business_name': f'Seeded Studio {index + 1:03d}',
+                    'tier': 'PRO' if index % 2 == 0 else 'FREE',
+                }
+            )
+        return specs
+
+    def _event_blueprints(self, events_per_workspace, scenes_per_event, photos_per_scene):
+        blueprints = []
+        for index in range(events_per_workspace):
+            template = EVENTS[index % len(EVENTS)]
+            default_scene_titles = template['scenes']
+            scene_count = scenes_per_event if scenes_per_event is not None else len(default_scene_titles)
+
+            if scenes_per_event is None and index < len(EVENTS):
+                scene_titles = list(default_scene_titles)
+            else:
+                scene_titles = [
+                    f"{template['event_type'].title()} Scene {scene_index + 1:02d}"
+                    for scene_index in range(scene_count)
+                ]
+
+            blueprints.append(
+                {
+                    'title': f"{template['title']} #{index + 1:02d}" if index >= len(EVENTS) else template['title'],
+                    'event_type': template['event_type'],
+                    'slug': f"{template['slug']}-{index + 1:02d}",
+                    'client_email': template['client_email'],
+                    'client_name': template['client_name'],
+                    'scenes': scene_titles,
+                    'photos_per_scene': (
+                        photos_per_scene
+                        if photos_per_scene is not None
+                        else template['photos_per_scene']
+                    ),
+                }
+            )
+        return blueprints
+
+    def _flush_photo_batch(self, photo_batch, batch_size):
+        if not photo_batch:
+            return 0, 0
+
+        Photo.objects.bulk_create(photo_batch, batch_size=batch_size)
+        bytes_inserted = sum(photo.file_size_bytes for photo in photo_batch)
+        inserted_count = len(photo_batch)
+        photo_batch.clear()
+        return inserted_count, bytes_inserted
 
     def handle(self, *args, **options):
         if not settings.DEBUG:
@@ -141,8 +233,20 @@ class Command(BaseCommand):
         self.stdout.write(self.style.HTTP_INFO('=' * 50))
 
         total_photos = 0
+        workspace_specs = self._workspace_seed_specs(options['workspace_count'])
+        events_per_workspace = (
+            options['events_per_workspace']
+            if options['events_per_workspace'] is not None
+            else len(EVENTS)
+        )
+        event_blueprints = self._event_blueprints(
+            events_per_workspace=events_per_workspace,
+            scenes_per_event=options['scenes_per_event'],
+            photos_per_scene=options['photos_per_scene'],
+        )
+        batch_size = max(1, options['batch_size'])
 
-        for photog_data in PHOTOGRAPHERS:
+        for photog_data in workspace_specs:
             user, created = User.objects.get_or_create(
                 email=photog_data['email'],
                 defaults={
@@ -167,9 +271,10 @@ class Command(BaseCommand):
             status = '✅ Created' if created else '⏭️  Exists'
             self.stdout.write(f'  {status} User: {user.email} → Workspace: {workspace.business_name}')
 
-            # Only the first photographer gets events (to keep it focused)
-            if photog_data['email'] == 'alex@photobox.dev':
-                for event_data in EVENTS:
+            workspace_seeded_bytes = 0
+
+            for event_index, event_data in enumerate(event_blueprints):
+                with transaction.atomic():
                     event, ev_created = Event.objects.get_or_create(
                         workspace=workspace,
                         slug=event_data['slug'],
@@ -193,50 +298,60 @@ class Command(BaseCommand):
                             defaults={'display_order': order}
                         )
 
-                        # Create mocked photos with fake R2 keys and Cloudinary URLs
-                        for i in range(event_data['photos_per_scene']):
+                        existing_count = Photo.objects.filter(scene=scene).count()
+                        target_count = event_data['photos_per_scene']
+                        missing_count = max(0, target_count - existing_count)
+
+                        photo_batch = []
+                        scene_seeded_bytes = 0
+
+                        for _ in range(missing_count):
                             filename = random.choice(MOCK_FILENAMES)
                             w, h = random.choice(MOCK_DIMENSIONS)
-                            file_size = random.randint(800_000, 4_500_000)  # 0.8-4.5 MB
+                            file_size = random.randint(800_000, 4_500_000)
                             photo_uuid = uuid.uuid4()
-
-                            # MOCK R2 OBJECT KEY — simulates what process_fast_lane_asset creates
                             mock_r2_key = (
                                 f"fast-lane/tenant_{workspace.id}/"
                                 f"{photo_uuid}/{filename}"
                             )
 
-                            Photo.objects.get_or_create(
-                                id=photo_uuid,
-                                defaults={
-                                    'scene': scene,
-                                    'original_filename': filename,
-                                    'file_size_bytes': file_size,
-                                    # MOCK: Simulates R2 upload completion
-                                    'r2_object_key': mock_r2_key,
-                                    'is_processed': True,
-                                    'status': 'READY',
-                                    # MOCK: Delivery layer dimensions for masonry grid
-                                    'width': w,
-                                    'height': h,
-                                    'media_type': 'IMAGE',
-                                }
+                            photo_batch.append(
+                                Photo(
+                                    id=photo_uuid,
+                                    scene=scene,
+                                    original_filename=filename,
+                                    file_size_bytes=file_size,
+                                    r2_object_key=mock_r2_key,
+                                    is_processed=True,
+                                    status='READY',
+                                    width=w,
+                                    height=h,
+                                    media_type='IMAGE',
+                                )
                             )
-                            total_photos += 1
+                            scene_seeded_bytes += file_size
 
-                        if ev_created:
+                            if len(photo_batch) >= batch_size:
+                                inserted_count, inserted_bytes = self._flush_photo_batch(photo_batch, batch_size)
+                                total_photos += inserted_count
+                                workspace_seeded_bytes += inserted_bytes
+
+                        inserted_count, inserted_bytes = self._flush_photo_batch(photo_batch, batch_size)
+                        total_photos += inserted_count
+                        workspace_seeded_bytes += inserted_bytes
+
+                        if ev_created or missing_count > 0:
                             self.stdout.write(
                                 f'      🖼️  Scene: {scene_title} '
-                                f'({event_data["photos_per_scene"]} photos seeded)'
+                                f'({target_count} target / {missing_count} new)'
                             )
 
-                    # Update workspace storage ledger with seeded bytes
-                    total_bytes = sum(
-                        p.file_size_bytes
-                        for p in Photo.objects.filter(scene__event__workspace=workspace)
-                    )
-                    workspace.storage_used_bytes = total_bytes
-                    workspace.save(update_fields=['storage_used_bytes'])
+            workspace.storage_used_bytes = (
+                Photo.objects.filter(scene__event__workspace=workspace)
+                .aggregate(total=Sum('file_size_bytes'))
+                .get('total') or 0
+            )
+            workspace.save(update_fields=['storage_used_bytes'])
 
         self.stdout.write('')
         self.stdout.write(self.style.SUCCESS(f'✅ Seeding complete!'))

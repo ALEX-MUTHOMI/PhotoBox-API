@@ -461,12 +461,9 @@ class CloudflareWebhookReplayAttackTests(TestCase):
 
     def test_webhook_with_no_timestamp_still_processes(self):
         """
-        ARCHITECTURAL REALITY CHECK:
-        The current codebase makes the Webhook-Timestamp header OPTIONAL.
-        If omitted, the replay check is skipped entirely. This test
-        documents this known gap as a PASSING behaviour for now.
-
-        See audit report for recommendation to make this header mandatory.
+        SECURITY:
+        Timestamp-less signed webhooks must be rejected so authenticity cannot
+        be replayed without freshness.
         """
         webhook_payload = {
             'action': 'PutObject',
@@ -474,7 +471,6 @@ class CloudflareWebhookReplayAttackTests(TestCase):
             'size': 2048,
         }
 
-        # POST without any Webhook-Timestamp header
         payload_bytes = json.dumps(webhook_payload).encode('utf-8')
         sig = _sign_webhook(payload_bytes)
 
@@ -483,16 +479,16 @@ class CloudflareWebhookReplayAttackTests(TestCase):
             data=payload_bytes,
             content_type='application/json',
             HTTP_X_CLOUDFLARE_SIGNATURE=sig,
-            # NOTE: No HTTP_WEBHOOK_TIMESTAMP header
         )
 
-        # Current behaviour: accepted (replay check skipped)
         self.assertEqual(
-            res.status_code, status.HTTP_200_OK,
-            "Without timestamp header, webhook should still be accepted "
-            "(current architecture — see audit for hardening recommendation)."
+            res.status_code, status.HTTP_403_FORBIDDEN,
+            'Missing timestamp must be rejected to close the replay window.'
         )
 
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'PENDING')
+        self.assertFalse(self.asset.is_processed)
 
 # ======================================================================
 # TEST 4: CLOUDINARY FETCH PROXY URL — STRUCTURAL VERIFICATION
@@ -762,4 +758,5 @@ def test_download_url_presigned_expiry_is_capped(self, mock_get_r2_client):
     #         f"Presigned GET URL expiry exceeds 900s ceiling! "
     #         f"ExpiresIn={expires_in}. Leaked URLs survive too long."
     #     )
+
 

@@ -34,7 +34,8 @@ class GenerateCheckoutLinkView(APIView):
 
     def post(self, request):
         # 1. STATE EXPLOITATION DEFENSE (Double-Bill Glitch)
-        if getattr(request.user, 'is_pro', False):
+        subscription = getattr(request.user, 'subscription', None)
+        if subscription and subscription.is_pro:
             return Response({"error": "You already have an active subscription."}, status=status.HTTP_400_BAD_REQUEST)
 
         # 2. THE BOUNCER (Delegating to the Input Serializer)
