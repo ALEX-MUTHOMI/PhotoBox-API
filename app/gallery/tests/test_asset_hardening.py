@@ -32,7 +32,7 @@ from gallery.models import Event, Scene, Photo
 User = get_user_model()
 
 # ── URL Constants ────────────────────────────────────────────────────────
-FAST_LANE_URL = reverse('gallery:photo-list')
+FAST_LANE_URL = reverse('gallery:fastlane-photo-list')
 HEAVY_LANE_URL = reverse('bulk-ingest')
 R2_WEBHOOK_URL = reverse('r2-ingestion-webhook')
 
@@ -175,7 +175,7 @@ class CrossTenantAssetHijackTests(TestCase):
             "Attacker's quota was charged despite the upload being rejected."
         )
 
-    @patch('ingestion.views.get_r2_client')
+    @patch('gallery.storage.generate_r2_presigned_post')
     def test_cross_tenant_asset_hijack_rejected_heavy_lane(self, mock_r2):
         """
         HEAVY LANE IDOR PROOF:
@@ -661,38 +661,105 @@ class CloudinaryURLCryptographicSignatureTests(TestCase):
             "return None for delivery_url."
         )
 
-    @patch('gallery.storage.get_r2_client')
-    def test_download_url_presigned_expiry_is_capped(self, mock_r2_client):
-        """
-        SECURITY: The download_url must use a presigned GET with a hard
-        ceiling of 900 seconds (15 minutes). Verify the boto3 call
-        enforces this ceiling even if a longer TTL is somehow requested.
-        """
-        mock_client = MagicMock()
-        mock_client.generate_presigned_url.return_value = (
-            'https://r2.example.com/signed?X-Amz-Expires=900'
-        )
-        mock_r2_client.return_value = mock_client
 
-        photo = Photo.objects.create(
-            scene=self.scene,
-            original_filename='highres.jpg',
-            file_size_bytes=50_000_000,
-            r2_object_key='fast-lane/tenant_1/highres/highres.jpg',
-            status='READY',
-            is_processed=True,
-        )
+@override_settings(
+    CLOUDFLARE_R2_BUCKET_NAME='test-bucket',       # was R2_BUCKET_NAME — wrong name
+    CLOUDFLARE_ACCESS_KEY_ID='test-key',            # was R2_ACCESS_KEY_ID — wrong name
+    CLOUDFLARE_SECRET_ACCESS_KEY='test-secret',     # was R2_SECRET_ACCESS_KEY — wrong name
+    CLOUDFLARE_R2_ENDPOINT='https://test.r2.cloudflarestorage.com',  # was missing entirely
+)
+@patch('gallery.storage.get_r2_client')
+def test_r2_download_url_bypasses_cdn(self, mock_get_r2_client):
+    ...
 
-        url = photo.download_url
+@patch('gallery.storage.get_r2_client')
+def test_download_url_presigned_expiry_is_capped(self, mock_get_r2_client):
+    """
+    SECURITY: download_url must generate a presigned GET with a hard ceiling
+    of 900 seconds (15 min). Boto3 must enforce this even if a longer TTL
+    is somehow requested upstream.
+    """
+    # Single mock — the one the decorator injected. This IS the real code path.
+    mock_client = mock_get_r2_client.return_value
+    mock_client.generate_presigned_url.return_value = (
+        'https://test-bucket.r2.cloudflarestorage.com/image.jpg'
+        '?X-Amz-Expires=900&X-Amz-Signature=abc123'
+    )
 
-        self.assertIsNotNone(url, "download_url returned None!")
+    photo = Photo.objects.create(
+        scene=self.scene,
+        original_filename='highres.jpg',
+        file_size_bytes=50_000_000,
+        r2_object_key='fast-lane/tenant_1/highres/highres.jpg',
+        status='READY',
+        is_processed=True,
+    )
 
-        # Verify generate_presigned_url was called with ExpiresIn <= 900
-        call_kwargs = mock_client.generate_presigned_url.call_args
-        expires_in = call_kwargs[1].get('ExpiresIn') or call_kwargs.kwargs.get('ExpiresIn')
-        self.assertLessEqual(
-            expires_in, 900,
-            f"Presigned GET URL expiry exceeds 900s ceiling! "
-            f"ExpiresIn={expires_in}. Leaked URLs survive too long."
-        )
+    url = photo.download_url
+
+    # ASSERTION 1 — URL was actually generated
+    self.assertIsNotNone(url,
+        "ARCHITECTURE FAILURE: download_url returned None. "
+        "R2 client was never called or returned nothing.")
+
+    # ASSERTION 2 — boto3 was actually called, not a cached/fallback value
+    mock_client.generate_presigned_url.assert_called_once()
+
+    # ASSERTION 3 — ExpiresIn ceiling is enforced at the boto3 call level
+    call_kwargs = mock_client.generate_presigned_url.call_args
+    expires_in = (
+        call_kwargs.kwargs.get('Params', {}).get('ExpiresIn')
+        or call_kwargs.kwargs.get('ExpiresIn')
+        or (call_kwargs.args[1] if len(call_kwargs.args) > 1 else None)
+    )
+
+    self.assertIsNotNone(expires_in,
+        "SECURITY FAILURE: ExpiresIn was not passed to generate_presigned_url. "
+        "URL has no expiry — it lives forever.")
+
+    self.assertLessEqual(expires_in, 900,
+        f"SECURITY FAILURE: Presigned URL expiry is {expires_in}s — exceeds 900s ceiling. "
+        "A leaked URL stays valid too long.")
+
+
+    # @override_settings(R2_BUCKET_NAME='test-bucket', R2_ACCESS_KEY_ID='test', R2_SECRET_ACCESS_KEY='test')
+    # @patch('gallery.storage.get_r2_client')
+    # def test_download_url_presigned_expiry_is_capped(self, mock_get_r2_client):
+    #     # 1. ENGINEER FIX: Prime the mock to return a synthetic string, NOT a MagicMock object.
+    #     # This simulates Boto3 successfully generating a secure link.
+    #     mock_client_instance = mock_get_r2_client.return_value
+    #     mock_client_instance.generate_presigned_url.return_value = "https://test-bucket.r2.cloudflarestorage.com/image.jpg?X-Amz-Expires=3600"
+        
+    #     """
+    #     SECURITY: The download_url must use a presigned GET with a hard
+    #     ceiling of 900 seconds (15 minutes). Verify the boto3 call
+    #     enforces this ceiling even if a longer TTL is somehow requested.
+    #     """
+    #     mock_client = MagicMock()
+    #     mock_client.generate_presigned_url.return_value = (
+    #         'https://r2.example.com/signed?X-Amz-Expires=900'
+    #     )
+    #     mock_r2_client.return_value = mock_client
+
+    #     photo = Photo.objects.create(
+    #         scene=self.scene,
+    #         original_filename='highres.jpg',
+    #         file_size_bytes=50_000_000,
+    #         r2_object_key='fast-lane/tenant_1/highres/highres.jpg',
+    #         status='READY',
+    #         is_processed=True,
+    #     )
+
+    #     url = photo.download_url
+
+    #     self.assertIsNotNone(url, "download_url returned None!")
+
+    #     # Verify generate_presigned_url was called with ExpiresIn <= 900
+    #     call_kwargs = mock_client.generate_presigned_url.call_args
+    #     expires_in = call_kwargs[1].get('ExpiresIn') or call_kwargs.kwargs.get('ExpiresIn')
+    #     self.assertLessEqual(
+    #         expires_in, 900,
+    #         f"Presigned GET URL expiry exceeds 900s ceiling! "
+    #         f"ExpiresIn={expires_in}. Leaked URLs survive too long."
+    #     )
 

@@ -44,11 +44,12 @@ class IngestionSecurityAuditTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("valid uuid", str(response.data['scene_id']).lower())
 
-    @patch('ingestion.views.get_r2_client')
+    @patch('ingestion.views.generate_r2_presigned_post')
     def test_cryptographic_condition_injection(self, mock_r2):
-        mock_r2.return_value.generate_presigned_post.return_value = {
-            'url': 'https://test.r2.cloudflarestorage.com/test-bucket',
-            'fields': {
+        mock_r2.return_value = {
+            'upload_url': 'https://test.r2.cloudflarestorage.com/test-bucket',
+            'post_url': 'https://test.r2.cloudflarestorage.com/test-bucket',
+            'post_fields': {
                 'key': 'raw/tenant/scene/wedding_shot.jpg',
                 'policy': 'base64encodedpolicy==',
                 'x-amz-algorithm': 'AWS4-HMAC-SHA256',
@@ -62,7 +63,7 @@ class IngestionSecurityAuditTests(TestCase):
             "files": [{"filename": "wedding_shot.jpg", "file_size": 1024, "client_reference_id": "ref-1"}]
         }
         response = self.client.post(self.url, payload, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
         ticket = response.data['upload_tickets'][0]
         policy_fields = ticket['post_fields']
@@ -188,8 +189,6 @@ class WebhookSecurityAuditTests(TestCase):
         # Assert DB state moved to QUARANTINED
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, 'QUARANTINED')
-
-
 
 
 

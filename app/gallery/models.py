@@ -158,7 +158,8 @@ class Photo(models.Model):
         ]
 
     @property
-    def delivery_url(self) -> str | None:
+    def delivery_url(self):
+    # def delivery_url(self) -> str | None:
         """
         PHASE 3: Cloudinary Fetch Proxy URL.
 
@@ -190,6 +191,7 @@ class Photo(models.Model):
         return None
 
     @property
+
     def download_url(self) -> str | None:
         """
         PHASE 3: Presigned R2 GET URL for client download.
@@ -206,7 +208,10 @@ class Photo(models.Model):
 
         if self.r2_object_key:
             # Primary: EDA-uploaded files in R2
-            return generate_r2_presigned_get_url(self.r2_object_key)
+            return generate_r2_presigned_get_url(
+                bucket=getattr(settings, 'CLOUDFLARE_R2_BUCKET_NAME', ''),
+                key=self.r2_object_key,
+            )
 
         # Backward compat: legacy local file uploads
         if self.image_file:
@@ -218,6 +223,7 @@ class Photo(models.Model):
         return None
 
     @property
+
     def aspect_ratio(self) -> float | None:
         """
         PHASE 3: Aspect ratio for zero-layout-shift masonry grids.
@@ -252,3 +258,4 @@ class Photo(models.Model):
 # By aliasing it here, the ingestion tests pass instantly, the database remains a single table,
 # and we don't have to rewrite thousands of lines of your legacy frontend code.
 MediaAsset = Photo
+

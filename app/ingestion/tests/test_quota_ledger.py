@@ -4,7 +4,6 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from botocore.exceptions import BotoCoreError
 from gallery.models import Workspace, Event, Scene, MediaAsset
 
 User = get_user_model()
@@ -32,12 +31,16 @@ class EconomicLedgerSecurityTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self.url = reverse('bulk-ingest')
 
-    @patch('ingestion.views.get_r2_client')
+    @patch('ingestion.views.generate_r2_presigned_post')
     def test_exact_byte_boundary_success(self, mock_boto):
         """
         THE LOGIC: If a user has exactly 5MB left, and uploads exactly 5MB, it must pass.
         """
-        mock_boto.return_value.generate_presigned_post.return_value = {"url": "test", "fields": {}}
+        mock_boto.return_value = {
+            "upload_url": "https://test.r2.cloudflarestorage.com/test-bucket",
+            "post_url": "https://test.r2.cloudflarestorage.com/test-bucket",
+            "post_fields": {"policy": "base64", "x-amz-signature": "hash"},
+        }
 
         # Payload is exactly 5MB (5 * 1024 * 1024 = 5242880 bytes)
         payload = {
@@ -46,13 +49,13 @@ class EconomicLedgerSecurityTests(TestCase):
         }
 
         response = self.client.post(self.url, payload, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
         # Assert the ledger was updated correctly to 10MB total
         self.workspace.refresh_from_db()
         self.assertEqual(self.workspace.storage_used_bytes, 10 * 1024 * 1024)
 
-    @patch('ingestion.views.get_r2_client')
+    @patch('ingestion.views.generate_r2_presigned_post')
     def test_single_byte_overflow_rejection(self, mock_boto):
         """
         THE THREAT: User tries to squeeze in 1 byte over their paid limit.
@@ -71,7 +74,7 @@ class EconomicLedgerSecurityTests(TestCase):
         self.workspace.refresh_from_db()
         self.assertEqual(self.workspace.storage_used_bytes, 5 * 1024 * 1024)
 
-    @patch('ingestion.views.get_r2_client')
+    @patch('ingestion.views.generate_r2_presigned_post')
     def test_array_sum_overflow_rejection(self, mock_boto):
         """
         THE THREAT: Hacker uploads ten 1MB files when they only have 5MB left.
@@ -97,14 +100,14 @@ class EconomicLedgerSecurityTests(TestCase):
         # Prove no tickets or records were created in the Vault
         self.assertEqual(MediaAsset.objects.count(), 0)
 
-    @patch('ingestion.views.get_r2_client')
+    @patch('ingestion.views.generate_r2_presigned_post')
     def test_cloud_outage_auto_refund_and_rollback(self, mock_boto):
         """
         THE THREAT: Cloudflare crashes after the quota is deducted.
         THE TEST: The system must refund the bytes AND roll back the database inserts.
         """
-        # Simulate Cloudflare going offline
-        mock_boto.return_value.generate_presigned_post.side_effect = BotoCoreError()
+        # Simulate the storage helper failing closed before any DB mutation.
+        mock_boto.return_value = None
 
         payload = {
             "scene_id": str(self.scene.id),

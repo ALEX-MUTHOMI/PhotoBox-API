@@ -24,7 +24,7 @@ from gallery.models import Event, Scene, Photo
 
 # The router registers this viewset under 'fast-lane/photos', which Django resolves
 # to the basename 'photo' because the queryset model is Photo.
-FAST_LANE_URL = reverse('gallery:photo-list')
+FAST_LANE_URL = reverse('gallery:fastlane-photo-list')
 
 # The exact Celery task path that the view fires. We patch it in every test that
 # hits the upload endpoint so no real Celery broker or R2 connection is needed.
@@ -173,7 +173,7 @@ class FastLaneApiTests(TestCase):
         used_bytes_before = self.workspace.storage_used_bytes
         self.assertGreater(used_bytes_before, 0)
 
-        del_url = reverse('gallery:photo-detail', args=[photo_id])
+        del_url = reverse('gallery:fastlane-photo-detail', args=[photo_id])
         del_res = self.client.delete(del_url)
         self.assertEqual(del_res.status_code, status.HTTP_204_NO_CONTENT)
 
@@ -225,7 +225,8 @@ class FastLaneApiTests(TestCase):
         res = self.client.get(FAST_LANE_URL)
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         # Our user has 0 photos — must not see the rival's photo
-        self.assertEqual(len(res.data), 0)
+        self.assertEqual(res.data['count'], 0)
+        self.assertEqual(len(res.data['results']), 0)
 
     # ==========================================
     # 3. RED TEAM SCRIPTS (THE PERIMETER DEFENSES)
@@ -369,4 +370,3 @@ class FastLaneApiTests(TestCase):
 
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('Invalid Magic Bytes', str(res.data))
-
