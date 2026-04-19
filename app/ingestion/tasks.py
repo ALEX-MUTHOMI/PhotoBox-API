@@ -6,7 +6,6 @@ from django.db.models import F
 from django.db.models.functions import Greatest
 from django.utils import timezone
 from datetime import timedelta
-from botocore.exceptions import ClientError, BotoCoreError, EndpointConnectionError, ConnectTimeoutError, ReadTimeoutError
 
 logger = logging.getLogger(__name__)
 
