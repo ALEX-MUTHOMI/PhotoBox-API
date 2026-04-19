@@ -11,14 +11,9 @@ ARCHITECTURE CHANGE (2026-04):
     2. The R2 origin URL fed to Cloudinary is never a public permanent link.
     3. Domain security tests (PIN encryption, slug uniqueness).
 """
-import uuid
 from django.test import TestCase, override_settings
-from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.db.utils import IntegrityError
-
-from rest_framework import status
-from rest_framework.test import APIClient
 
 from core.models import Workspace
 from gallery.models import Event, Scene, Photo

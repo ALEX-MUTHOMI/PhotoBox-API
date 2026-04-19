@@ -7,7 +7,7 @@ ARCHITECTURE CHANGE (2026-04):
     https://res.cloudinary.com/{cloud_name}/image/fetch/q_auto,f_webp/{r2_public_url}
   These tests verify the NEW delivery contract.
 """
-from unittest.mock import patch, PropertyMock
+from unittest.mock import patch
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.db.utils import IntegrityError
@@ -186,8 +186,8 @@ class PhotoCloudinaryTests(TestCase):
             'https://r2/signed-url-call-2?X-Amz-Expires=3600',
         ]
 
-        url_1 = self.photo.r2_download_url
-        url_2 = self.photo.r2_download_url
+        self.photo.r2_download_url
+        self.photo.r2_download_url
 
         self.assertEqual(
             mock_presign.call_count, 

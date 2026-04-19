@@ -3,7 +3,6 @@ from rest_framework.test import APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import override_settings
 from checkout.models import PricingPlan
 from checkout.views import CheckoutRateThrottle, GenerateCheckoutLinkView
 
