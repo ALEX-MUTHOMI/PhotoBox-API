@@ -1,0 +1,72 @@
+---
+title: PhotoBox Platform Docs
+description: Production documentation for the PhotoBox API, ingestion workflows, tenant security, and deployment operations.
+template: splash
+tableOfContents: false
+hero:
+  tagline: Architecture, ingestion, delivery, and operational docs for the PhotoBox photography SaaS platform.
+  image:
+    file: ../../assets/photobox-hero.svg
+  actions:
+    - text: Explore Architecture
+      link: /foundations/architecture-overview/
+      icon: right-arrow
+      variant: primary
+    - text: Deployment Checklist
+      link: /operations/deployment/
+      icon: right-arrow
+      variant: secondary
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What this portal covers
+
+<CardGrid stagger>
+    <Card title="Unified Vault" icon="cloudflare">
+        PhotoBox treats Cloudflare R2 as the binary source of truth and uses Cloudinary only as a delivery proxy.
+    </Card>
+    <Card title="Async Ingestion" icon="random">
+        Fast Lane requests return quickly, while Celery and webhooks complete the long-running storage work.
+    </Card>
+    <Card title="Tenant Isolation" icon="approve-check-circle">
+        Every major query path is scoped through workspace ownership so one studio cannot cross into another.
+    </Card>
+    <Card title="Production Operations" icon="rocket">
+        Deployment, environment, testing, and webhook guidance live here in one browsable, searchable portal.
+    </Card>
+</CardGrid>
+
+## Quick paths
+
+<CardGrid>
+    <LinkCard
+        title="Architecture Overview"
+        description="Start with the unified vault pattern, the system boundary map, and the core operating principles."
+        href="/foundations/architecture-overview/"
+    />
+    <LinkCard
+        title="Upload Pipelines"
+        description="Review the Fast Lane and Heavy Lane flows, including quota controls and event-driven completion loops."
+        href="/pipelines/upload-pipelines/"
+    />
+    <LinkCard
+        title="Security Architecture"
+        description="Walk through perimeter controls, application hardening, webhook defenses, and identity protections."
+        href="/security/security-architecture/"
+    />
+    <LinkCard
+        title="Deployment"
+        description="Use the production checklist, Sentry setup, and worker commands when promoting changes safely."
+        href="/operations/deployment/"
+    />
+</CardGrid>
+
+## Operating model
+
+PhotoBox is documented here as a disposable, cloud-native service. The docs site itself is static, self-hosted, and production-friendly:
+
+- No third-party font CDN is required.
+- Search runs locally through Pagefind.
+- The site builds to static assets and can sit behind any CDN.
+- Content is split into focused pages so engineers can deep-link the exact subsystem they are discussing.
