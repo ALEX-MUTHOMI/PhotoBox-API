@@ -1,4 +1,6 @@
 services:
+
+  # ── Django Application ──────────────────────────────────────────────────────
   app:
     build:
       context: .
@@ -9,39 +11,147 @@ services:
     volumes:
       - ./app:/app
       - dev-static-data:/vol/web
-    command: >
-      sh -c "python manage.py wait_for_db &&
-             python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8000"
-    environment:
-      - DB_HOST=db
-      - DB_NAME=devdb
-      - DB_USER=devuser
-      - DB_PASS=changeme
-      - DEBUG=1
-      - SECRET_KEY=your-secret-key-here
-      - CLOUDFLARE_R2_ENDPOINT=https://placeholder.r2.cloudflarestorage.com
-      - CLOUDFLARE_R2_BUCKET_NAME=test-bucket
-      - CLOUDFLARE_ACCESS_KEY_ID=test-access-key
-      - CLOUDFLARE_SECRET_ACCESS_KEY=test-secret-key
-      - CLOUDFLARE_R2_DOMAIN=placeholder.r2.cloudflarestorage.com
-      - CLOUDFLARE_WEBHOOK_SECRET=test-webhook-secret
-      - CLOUDINARY_CLOUD_NAME=photobox-app
-      - LEMON_SQUEEZY_API_KEY=test-key
-      - LEMON_SQUEEZY_STORE_ID=1
-      - LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY=test-ls-secret
+    command: [ "run.sh" ]
+    env_file:
+      - .env
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - photobox_network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/')" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
 
+  # ── PostgreSQL Database ─────────────────────────────────────────────────────
   db:
     image: postgres:13-alpine
     volumes:
       - dev-db-data:/var/lib/postgresql/data
+    env_file:
+      - .env
+    networks:
+      - photobox_network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $$DB_USER -d $$DB_NAME" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - photobox_network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ── Celery Worker ───────────────────────────────────────────────────────────
+  celery:
+    build:
+      context: .
+      args:
+        - DEV=true
+    command: [ "celery", "-A", "app", "worker", "--loglevel=info", "--queues=image-processing,default", "--concurrency=2" ]
+    volumes:
+      - ./app:/app
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - photobox_network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "celery -A app inspect ping -d celery@$$HOSTNAME || exit 1" ]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+  # ── Celery Beat ─────────────────────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: .
+      args:
+        - DEV=true
+    command: [ "celery", "-A", "app", "beat", "--loglevel=info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler" ]
+    volumes:
+      - ./app:/app
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery:
+        condition: service_healthy
+    networks:
+      - photobox_network
+    restart: unless-stopped
+
+  # ── Test Runner ─────────────────────────────────────────────────────────────
+  # Usage:
+  #   docker compose run --rm test unit
+  #   docker compose run --rm test api
+  #   docker compose run --rm test celery
+  #   docker compose run --rm test e2e
+  #   docker compose run --rm test coverage
+  #   docker compose run --rm test all
+  test:
+    build:
+      context: .
+      args:
+        - DEV=true
+    entrypoint: [ "run-tests.sh" ]
+    command: [ "unit" ]
+    volumes:
+      - ./app:/app
+    env_file:
+      - .env
     environment:
-      - POSTGRES_DB=devdb
-      - POSTGRES_USER=devuser
-      - POSTGRES_PASSWORD=changeme
+      - STAGING_BASE_URL=http://app:8000
+      - CELERY_TASK_ALWAYS_EAGER=True
+      - DB_HOST=db
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    networks:
+      - photobox_network
+    profiles:
+      - test
+
+networks:
+  photobox_network:
+    driver: bridge
 
 volumes:
   dev-db-data:
   dev-static-data:
+  redis-data:

@@ -1,11 +1,17 @@
-"""
-Core views for app.
-"""
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
+import logging
+from django.http import JsonResponse
+from django.db import connection
 
+logger = logging.getLogger(__name__)
 
-@api_view(['GET'])
 def health_check(request):
-    """Returns successful response."""
-    return Response({'healthy': True})
+    """Lightweight health check for Docker/load balancer probes."""
+    try:
+        connection.ensure_connection()
+        return JsonResponse({'status': 'healthy'})
+    except Exception as e:
+        logger.critical("Health check failed: %s", str(e))
+        return JsonResponse(
+            {'status': 'unhealthy', 'reason': 'Database unavailable'},
+            status=503
+        )

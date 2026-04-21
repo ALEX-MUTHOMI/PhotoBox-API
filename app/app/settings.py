@@ -265,9 +265,21 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
+    # 1. General Branding
+    'TITLE': 'PhotoBox API',
+    'DESCRIPTION': 'Production API for the PhotoBox SaaS platform. Includes ingestion, delivery, and tenant isolation.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    
+    # 2. The Clean-Up Crew (Fixing the "Ugly" Look)
+    'CAMELIZE_NAMES': True,
     'COMPONENT_SPLIT_REQUEST': True,
+    
+    # 3. Smart Grouping
+    # This tells the generator to look at your URLs (like /api/v1/galleries/) 
+    # and automatically group them into neat folders, stripping out the repetitive "/api/" part.
+    'SCHEMA_PATH_PREFIX': r'/api/', 
 }
-
 
 # ============================================================
 # 13. JWT AUTHENTICATION
@@ -378,12 +390,14 @@ EMAIL_HOST_USER   = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL  = os.environ.get('DEFAULT_FROM_EMAIL', 'PhotoBox <no-reply@photobox.app>')
 
+import os
 
 # ============================================================
 # 20. CELERY
 # ============================================================
-CELERY_BROKER_URL        = os.environ.get('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
-CELERY_RESULT_BACKEND    = os.environ.get('CELERY_RESULT_BACKEND', 'redis://127.0.0.1:6379/0')
+# The app will look at your .env file first. If it fails, it defaults to the Docker network.
+CELERY_BROKER_URL        = os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0')
+CELERY_RESULT_BACKEND    = os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
 CELERY_ACCEPT_CONTENT    = ['json']
 CELERY_TASK_SERIALIZER   = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
