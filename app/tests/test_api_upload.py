@@ -46,30 +46,33 @@ from tests.conftest import (
 
 pytestmark = pytest.mark.django_db
 
+PHOTO_LIST_URL_NAME = "gallery:fastlane-photo-list"
+PHOTO_DETAIL_URL_NAME = "gallery:fastlane-photo-detail"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _mock_external_calls(mocker):
-    """Patch Cloudinary and Celery so upload tests never touch external services."""
+    """Patch the async dispatch boundary so upload tests stay purely HTTP-layer."""
     mocker.patch("gallery.tasks.process_fast_lane_asset.delay")
-    mocker.patch(
-        "gallery.services.cloudinary_service.upload",
-        return_value={
-            "public_id": f"test/{uuid.uuid4().hex}",
-            "secure_url": "https://res.cloudinary.com/demo/test.jpg",
-            "width": 1920,
-            "height": 1080,
-            "format": "jpg",
-            "bytes": 1_048_576,
-        },
-    )
 
 
-def _upload(client, image_file, extra_data: dict = None):
-    url = reverse("photo-upload")
-    payload = {"image": image_file}
+def _photo_list_url():
+    return reverse(PHOTO_LIST_URL_NAME)
+
+
+def _photo_detail_url(pk):
+    return reverse(PHOTO_DETAIL_URL_NAME, kwargs={"pk": str(pk)})
+
+
+def _upload(client, image_file, extra_data: dict = None, scene_id: str | None = None):
+    url = _photo_list_url()
+    payload = {"image_file": image_file}
+    resolved_scene_id = scene_id or getattr(client, "test_scene_id", None)
+    if resolved_scene_id is not None:
+        payload["scene"] = resolved_scene_id
     if extra_data:
         payload.update(extra_data)
     return client.post(url, payload, format="multipart")
@@ -82,17 +85,17 @@ def _upload(client, image_file, extra_data: dict = None):
 class TestUploadAuthEnforcement:
 
     def test_anonymous_upload_returns_401(self, api_client):
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         response = api_client.post(
-            url, {"image": make_image_file()}, format="multipart"
+            url, {"image_file": make_image_file(), "scene": str(uuid.uuid4())}, format="multipart"
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_invalid_jwt_returns_401(self, api_client):
         api_client.credentials(HTTP_AUTHORIZATION="Bearer totally.invalid.token")
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         response = api_client.post(
-            url, {"image": make_image_file()}, format="multipart"
+            url, {"image_file": make_image_file(), "scene": str(uuid.uuid4())}, format="multipart"
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
@@ -111,9 +114,9 @@ class TestUploadAuthEnforcement:
         unsigned_token = f"{header.decode()}.{payload.decode()}."
 
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {unsigned_token}")
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         response = api_client.post(
-            url, {"image": make_image_file()}, format="multipart"
+            url, {"image_file": make_image_file(), "scene": str(uuid.uuid4())}, format="multipart"
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED, (
             "Server accepted a JWT with alg:none — signature verification is disabled!"
@@ -130,9 +133,9 @@ class TestUploadAuthEnforcement:
         token.set_exp(lifetime=timedelta(seconds=-1))
 
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(token)}")
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         response = api_client.post(
-            url, {"image": make_image_file()}, format="multipart"
+            url, {"image_file": make_image_file(), "scene": str(uuid.uuid4())}, format="multipart"
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
@@ -146,19 +149,16 @@ class TestUploadAuthEnforcement:
         api_client.credentials(
             HTTP_AUTHORIZATION=str(refresh.access_token)  # no "Bearer " prefix
         )
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         response = api_client.post(
-            url, {"image": make_image_file()}, format="multipart"
+            url, {"image_file": make_image_file(), "scene": str(uuid.uuid4())}, format="multipart"
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_authenticated_request_is_accepted(self, authenticated_client, test_image, mocker):
         """Authenticated POST reaches the view — external calls mocked."""
         _mock_external_calls(mocker)
-        url = reverse("photo-upload")
-        response = authenticated_client.post(
-            url, {"image": test_image}, format="multipart"
-        )
+        response = _upload(authenticated_client, test_image)
         assert response.status_code in (
             status.HTTP_200_OK,
             status.HTTP_201_CREATED,
@@ -190,7 +190,7 @@ class TestIDOR:
         """
         photo = ProcessedPhotoFactory(owner=photographer_user)
 
-        url = reverse("photo-detail", kwargs={"pk": str(photo.pk)})
+        url = _photo_detail_url(photo.pk)
         response = second_authenticated_client.get(url)
         assert response.status_code in (
             status.HTTP_403_FORBIDDEN,
@@ -210,7 +210,7 @@ class TestIDOR:
         """User B must not be able to delete User A's photo."""
         photo = ProcessedPhotoFactory(owner=photographer_user)
 
-        url = reverse("photo-detail", kwargs={"pk": str(photo.pk)})
+        url = _photo_detail_url(photo.pk)
         response = second_authenticated_client.delete(url)
         assert response.status_code in (
             status.HTTP_403_FORBIDDEN,
@@ -234,7 +234,7 @@ class TestIDOR:
         """
         ProcessedPhotoFactory.create_batch(3, owner=photographer_user)
 
-        url = reverse("photo-list")
+        url = _photo_list_url()
         response = second_authenticated_client.get(url)
         assert response.status_code == status.HTTP_200_OK
 
@@ -265,7 +265,7 @@ class TestIDOR:
         except (ValueError, TypeError):
             pytest.skip("Photo PK is a UUID — enumeration not applicable")
 
-        url = reverse("photo-detail", kwargs={"pk": guessed_pk})
+        url = _photo_detail_url(guessed_pk)
         response = second_authenticated_client.get(url)
         assert response.status_code in (
             status.HTTP_403_FORBIDDEN,
@@ -312,9 +312,13 @@ class TestUploadFileValidation:
         assert _upload(authenticated_client, empty).status_code == status.HTTP_400_BAD_REQUEST
 
     def test_no_file_field_returns_400(self, authenticated_client):
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         assert (
-            authenticated_client.post(url, {}, format="multipart").status_code
+            authenticated_client.post(
+                url,
+                {"scene": authenticated_client.test_scene_id},
+                format="multipart",
+            ).status_code
             == status.HTTP_400_BAD_REQUEST
         )
 
@@ -572,17 +576,21 @@ class TestMassAssignment:
         Must never persist attacker-controlled values for privileged columns.
         """
         _mock_external_calls(mocker)
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         response = authenticated_client.post(
             url,
-            {"image": make_image_file(), injected_field: injected_value},
+            {
+                "image_file": make_image_file(),
+                "scene": authenticated_client.test_scene_id,
+                injected_field: injected_value,
+            },
             format="multipart",
         )
 
         # If the upload succeeds, verify the injected field was NOT applied
         if response.status_code in (200, 201, 202):
             body = response.json()
-            upload_id = body.get("upload_id") or body.get("id")
+            upload_id = body.get("photo_id") or body.get("upload_id") or body.get("id")
 
             if upload_id:
                 from gallery.models import Photo
@@ -607,26 +615,27 @@ class TestMassAssignment:
 
 class TestUploadResponseSchema:
 
-    REQUIRED_FIELDS = {"upload_id", "status", "message"}
+    REQUIRED_FIELDS = {"photo_id", "status", "message"}
 
     def test_successful_upload_contains_required_fields(
         self, authenticated_client, test_image, mocker
     ):
         _mock_external_calls(mocker)
-        url = reverse("photo-upload")
-        response = authenticated_client.post(
-            url, {"image": test_image}, format="multipart"
-        )
+        response = _upload(authenticated_client, test_image)
         assert response.status_code in (200, 201, 202)
         data = response.json()
         missing = self.REQUIRED_FIELDS - set(data.keys())
         assert not missing, f"Response missing fields: {missing}"
 
     def test_error_response_contains_errors_key(self, authenticated_client):
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         empty = io.BytesIO(b"")
         empty.name = "bad.jpg"
-        response = authenticated_client.post(url, {"image": empty}, format="multipart")
+        response = authenticated_client.post(
+            url,
+            {"image_file": empty, "scene": authenticated_client.test_scene_id},
+            format="multipart",
+        )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         data = response.json()
         assert "errors" in data or "detail" in data
@@ -637,10 +646,14 @@ class TestUploadResponseSchema:
         paths, or ORM query details. These are information disclosure vectors
         that help attackers map internal structure.
         """
-        url = reverse("photo-upload")
+        url = _photo_list_url()
         empty = io.BytesIO(b"")
         empty.name = "bad.jpg"
-        response = authenticated_client.post(url, {"image": empty}, format="multipart")
+        response = authenticated_client.post(
+            url,
+            {"image_file": empty, "scene": authenticated_client.test_scene_id},
+            format="multipart",
+        )
 
         body = response.content
         assert b"Traceback" not in body, "Stack trace leaked in error response."
@@ -653,8 +666,12 @@ class TestUploadResponseSchema:
         The Server header must not reveal Django/gunicorn version strings
         that aid fingerprinting.
         """
-        url = reverse("photo-upload")
-        response = authenticated_client.post(url, {}, format="multipart")
+        url = _photo_list_url()
+        response = authenticated_client.post(
+            url,
+            {"scene": authenticated_client.test_scene_id},
+            format="multipart",
+        )
         server_header = response.get("Server", "")
         assert "django" not in server_header.lower(), (
             f"Server header reveals Django: {server_header!r}"
@@ -671,10 +688,7 @@ class TestUploadResponseSchema:
         or any data that maps application internals.
         """
         _mock_external_calls(mocker)
-        url = reverse("photo-upload")
-        response = authenticated_client.post(
-            url, {"image": make_image_file()}, format="multipart"
-        )
+        response = _upload(authenticated_client, make_image_file())
         if response.status_code in (200, 201, 202):
             body_str = response.content.decode("utf-8", errors="ignore")
             assert "/app/" not in body_str, "Internal filesystem path leaked."
@@ -691,18 +705,8 @@ class TestUploadRateLimiting:
     @pytest.mark.slow
     def test_burst_uploads_are_throttled(self, authenticated_client, mocker):
         mocker.patch("gallery.tasks.process_fast_lane_asset.delay")
-        mocker.patch(
-            "gallery.services.cloudinary_service.upload",
-            return_value={
-                "public_id": "test/x",
-                "secure_url": "https://res.cloudinary.com/test/x.jpg",
-            },
-        )
-        url = reverse("photo-upload")
         statuses = [
-            authenticated_client.post(
-                url, {"image": make_image_file()}, format="multipart"
-            ).status_code
+            _upload(authenticated_client, make_image_file()).status_code
             for _ in range(20)
         ]
         assert status.HTTP_429_TOO_MANY_REQUESTS in statuses, (
@@ -722,19 +726,14 @@ class TestUploadRateLimiting:
         User A exhausting their quota must not deny service to User B.
         """
         _mock_external_calls(mocker)
-        url = reverse("photo-upload")
 
         # Exhaust User A's quota
         for _ in range(20):
-            authenticated_client.post(
-                url, {"image": make_image_file()}, format="multipart"
-            )
+            _upload(authenticated_client, make_image_file())
 
         # User B should still get through (or at least not be rate-limited
         # due to User A's activity)
-        response = second_authenticated_client.post(
-            url, {"image": make_image_file()}, format="multipart"
-        )
+        response = _upload(second_authenticated_client, make_image_file())
         assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
             "User B was rate-limited because of User A's activity. "
             "Rate limits must be per-user, not global."

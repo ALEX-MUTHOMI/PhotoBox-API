@@ -209,6 +209,7 @@ class UserFactory(DjangoModelFactory):
 class WorkspaceFactory(DjangoModelFactory):
     class Meta:
         model = "core.Workspace"
+        django_get_or_create = ("user",)
 
     class Params:
         owner = None
@@ -314,6 +315,9 @@ def second_photographer_user(db):
 
 @pytest.fixture
 def authenticated_client(api_client, photographer_user) -> APIClient:
+    owned_scene = SceneFactory(owner=photographer_user)
+    api_client.test_scene_id = str(owned_scene.id)
+    api_client.test_scene = owned_scene
     refresh = RefreshToken.for_user(photographer_user)
     api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
     return api_client
@@ -322,6 +326,9 @@ def authenticated_client(api_client, photographer_user) -> APIClient:
 @pytest.fixture
 def second_authenticated_client(second_photographer_user) -> APIClient:
     client = APIClient()
+    owned_scene = SceneFactory(owner=second_photographer_user)
+    client.test_scene_id = str(owned_scene.id)
+    client.test_scene = owned_scene
     refresh = RefreshToken.for_user(second_photographer_user)
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
     return client

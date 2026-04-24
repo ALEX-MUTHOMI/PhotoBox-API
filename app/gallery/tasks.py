@@ -21,11 +21,13 @@ Security invariants enforced here:
 """
 import logging
 import re
+import uuid
 from typing import Any, Dict, Optional
 
 from botocore.exceptions import BotoCoreError, ClientError
 from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.conf import settings
 from django.db import OperationalError, transaction
 from django.db.models import F, Value
@@ -123,6 +125,7 @@ def _build_expected_r2_key(
     bind=True,
     max_retries=3,
     default_retry_delay=60,
+    queue="image-processing",
     # Explicit name survives module renames / refactors
     name="gallery.tasks.process_fast_lane_asset",
     # Re-queue if the worker crashes mid-execution
@@ -141,6 +144,15 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     from gallery.storage import get_r2_client # noqa: PLC0415
 
     logger.info("[FAST LANE MONITOR] Checking vault status for photo_id=%s", photo_id)
+
+    try:
+        uuid.UUID(str(photo_id))
+    except (ValueError, TypeError, AttributeError):
+        logger.warning(
+            "[FAST LANE MONITOR] Invalid photo_id received. Rejecting without DB mutation: %r",
+            photo_id,
+        )
+        return {"status": "error", "reason": "invalid_photo_id", "photo_id": str(photo_id)}
 
     # ------------------------------------------------------------------
     # STEP 1: Fetch the photo record WITHOUT a database lock.
@@ -171,7 +183,7 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
         file_size_bytes: int = photo.file_size_bytes or 0
         stored_key: Optional[str] = photo.r2_object_key or None
 
-    except Photo.DoesNotExist:
+    except (Photo.DoesNotExist, DjangoValidationError):
         # Photo was deleted between dispatch and execution (e.g. user deleted event).
         # Quota was already refunded at delete time by the view's delete handler.
         logger.warning(
@@ -415,3 +427,36 @@ def _retry_or_fail(
 # Both names point to the same implementation.
 # ---------------------------------------------------------------------------
 upload_photo_to_r2 = process_fast_lane_asset
+
+
+@shared_task(
+    bind=True,
+    name="gallery.tasks.prepare_gallery_bulk_download",
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def prepare_gallery_bulk_download(
+    self,
+    event_id: str,
+    requested_by_user_id: Optional[str] = None,
+    requester_kind: str = "photographer",
+) -> Dict[str, Any]:
+    """
+    Stable Celery entry point for asynchronous gallery archive preparation.
+
+    The actual archive assembly pipeline can evolve behind this task name
+    without breaking views, tests, or beat schedules that enqueue bulk
+    download work.
+    """
+    logger.info(
+        "[BULK DOWNLOAD] Accepted archive preparation request for event_id=%s requester_kind=%s requested_by_user_id=%s",
+        event_id,
+        requester_kind,
+        requested_by_user_id,
+    )
+    return {
+        "status": "queued",
+        "event_id": event_id,
+        "requester_kind": requester_kind,
+        "requested_by_user_id": requested_by_user_id,
+    }

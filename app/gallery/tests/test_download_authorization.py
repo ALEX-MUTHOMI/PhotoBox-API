@@ -23,7 +23,13 @@ class PresignedGetUrlTenantIsolationTests(TestCase):
         self.victim_workspace = Workspace.objects.create(user=self.victim, business_name='Victim Studio')
         self.victim_event = Event.objects.create(workspace=self.victim_workspace, title='Private Wedding', slug='private-wedding')
         self.victim_scene = Scene.objects.create(event=self.victim_event, title='Ceremony')
-        self.victim_photo = Photo.objects.create(scene=self.victim_scene, r2_object_key='raw/victim/kiss.jpg', file_size_bytes=5000)
+        self.victim_photo = Photo.objects.create(
+            scene=self.victim_scene,
+            r2_object_key='raw/victim/kiss.jpg',
+            file_size_bytes=5000,
+            status='READY',
+            is_processed=True,
+        )
 
         self.attacker = User.objects.create_user(email='attacker@evil.com', password='password123')
         self.attacker_workspace = Workspace.objects.create(user=self.attacker, business_name='Attacker Co')
