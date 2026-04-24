@@ -17,13 +17,10 @@ Lock contention architecture:
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone as dt_timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from django.conf import settings
@@ -35,6 +32,10 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.security import (
+    verify_webhook_signature as verify_signed_webhook_signature,
+    verify_webhook_timestamp as validate_signed_webhook_timestamp,
+)
 from gallery.models import MediaAsset, Scene, Workspace
 from gallery.storage import (
     R2KeyValidationError,
@@ -362,6 +363,7 @@ def _phase2_commit(
 
 def _verify_webhook_hmac(
     payload_bytes: bytes,
+    timestamp: str,
     signature_header: str,
 ) -> Tuple[bool, str]:
     """
@@ -376,61 +378,24 @@ def _verify_webhook_hmac(
         "secret_encoding_error" — secret contains non-UTF-8 bytes
         "signature_mismatch"    — forgery or tampered payload
     """
-    raw_secret = getattr(settings, "CLOUDFLARE_WEBHOOK_SECRET", "")
-    if not raw_secret:
-        return False, "secret_not_configured"
-
-    try:
-        secret_bytes = raw_secret.encode("utf-8", errors="strict")
-    except (UnicodeEncodeError, AttributeError):
-        return False, "secret_encoding_error"
-
-    expected = hmac.new(secret_bytes, payload_bytes, hashlib.sha256).hexdigest()
-
-    # constant-time comparison — eliminates timing oracle attacks
-    if not hmac.compare_digest(expected, signature_header):
-        return False, "signature_mismatch"
-
-    return True, ""
+    return verify_signed_webhook_signature(
+        payload_bytes,
+        timestamp,
+        signature_header,
+        secret_setting="CLOUDFLARE_WEBHOOK_SECRET",
+    )
 
 
 def _verify_webhook_timestamp(
     timestamp_header: Optional[str],
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, Optional[str]]:
     """
-    Verify webhook timestamp is within the replay attack window.
-
-    Uses Python stdlib datetime.timezone.utc explicitly — NOT Django's
-    timezone utilities, which are affected by USE_TZ and TIME_ZONE settings.
-
-    Returns (is_valid, failure_reason).
-    Timestamp is mandatory. Without it, a captured valid webhook can be replayed
-    indefinitely because the HMAC alone proves authenticity, not freshness.
+    Verify webhook timestamp is within the replay attack window and canonicalise it.
     """
-    if not timestamp_header:
-        return False, "timestamp_missing"
-
-    try:
-        ts = int(timestamp_header)
-        webhook_dt = datetime.fromtimestamp(ts, tz=dt_timezone.utc)
-        now = datetime.now(tz=dt_timezone.utc)
-        age_seconds = (now - webhook_dt).total_seconds()
-
-        if age_seconds > _WEBHOOK_REPLAY_WINDOW:
-            return False, f"age:{age_seconds:.0f}s_exceeds:{_WEBHOOK_REPLAY_WINDOW}s"
-
-        # Future-dated by more than 60 seconds → suspicious clock skew or attack
-        if age_seconds < -60:
-            return False, f"future_dated:{abs(age_seconds):.0f}s_ahead"
-
-    except (ValueError, TypeError, OSError):
-        logger.warning(
-            "[R2-WEBHOOK] Unparseable Webhook-Timestamp header. header=%r",
-            timestamp_header,
-        )
-        return False, "timestamp_unparseable"
-
-    return True, ""
+    return validate_signed_webhook_timestamp(
+        timestamp_header,
+        max_age_seconds=_WEBHOOK_REPLAY_WINDOW,
+    )
 
 
 # =============================================================================
@@ -564,9 +529,9 @@ class R2WebhookView(APIView):
       1.  Content-Length soft guard (hard limit must be in nginx)
       2.  Raw body capture before DRF stream consumption
       3.  Signature header presence check
-      4.  Secret misconfiguration guard (fail closed → 500, not 403)
-      5.  HMAC-SHA256 constant-time verification
-      6.  Replay attack window (timestamp-based, optional header)
+      4.  Replay attack window (timestamp-based, mandatory header)
+      5.  Secret misconfiguration guard (fail closed → 500, not 403)
+      6.  HMAC-SHA256 constant-time verification over "<ts>.<raw_body>"
       7.  JSON parse with explicit error handling
       8.  Action filter (PutObject only, 200 on others)
       9.  r2_object_key presence check
@@ -613,9 +578,27 @@ class R2WebhookView(APIView):
             )
 
         # ------------------------------------------------------------------
-        # Steps 4 + 5: HMAC verification
+        # Step 4: Replay attack window + canonical timestamp
         # ------------------------------------------------------------------
-        valid, reason = _verify_webhook_hmac(payload_bytes, signature_header)
+        ts_header = (
+            request.META.get("HTTP_WEBHOOK_TIMESTAMP")
+            or request.META.get("HTTP_X_WEBHOOK_TIMESTAMP")
+        )
+        ts_valid, ts_reason, canonical_ts = _verify_webhook_timestamp(ts_header)
+        if not ts_valid:
+            logger.warning(
+                "[R2-WEBHOOK] Timestamp validation failed. reason=%s",
+                ts_reason,
+            )
+            return Response(
+                {"detail": "Webhook expired or timestamp invalid."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # ------------------------------------------------------------------
+        # Steps 5 + 6: HMAC verification over "<ts>.<raw_body>"
+        # ------------------------------------------------------------------
+        valid, reason = _verify_webhook_hmac(payload_bytes, canonical_ts, signature_header)
         if not valid:
             if reason in ("secret_not_configured", "secret_encoding_error"):
                 logger.critical(
@@ -628,31 +611,14 @@ class R2WebhookView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
             logger.warning(
-                "[R2-WEBHOOK] HMAC mismatch — possible forgery. remote=%s",
+                "[R2-WEBHOOK] Signature verification failed. reason=%s remote=%s",
+                reason,
                 (request.META.get("HTTP_X_FORWARDED_FOR", "")
                  .split(",")[0].strip()
                  or request.META.get("REMOTE_ADDR", "unknown")),
             )
             return Response(
                 {"detail": "Invalid signature."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        # ------------------------------------------------------------------
-        # Step 6: Replay attack window
-        # ------------------------------------------------------------------
-        ts_header = (
-            request.META.get("HTTP_WEBHOOK_TIMESTAMP")
-            or request.META.get("HTTP_X_WEBHOOK_TIMESTAMP")
-        )
-        ts_valid, ts_reason = _verify_webhook_timestamp(ts_header)
-        if not ts_valid:
-            logger.warning(
-                "[R2-WEBHOOK] Timestamp validation failed. reason=%s",
-                ts_reason,
-            )
-            return Response(
-                {"detail": "Webhook expired or timestamp invalid."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 

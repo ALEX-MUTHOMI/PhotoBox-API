@@ -10,9 +10,7 @@ EMAIL POLICY:
   - Only sends if Event.client_email is set.
   - Idempotent: repeated publishes will re-send (photographers may re-notify).
   - Uses Django's email backend (configured in settings.py).
-  - Renders a branded HTML template with photographer logo + frontend gallery URL.
-  - Never sends a raw presigned R2 URL by email. Download links are minted on demand
-    inside the client gallery so the 60-second TTL is evaluated at click time.
+  - Renders a branded HTML template with photographer logo + gallery URL.
 """
 import logging
 from celery import shared_task

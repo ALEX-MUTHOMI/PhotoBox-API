@@ -1,14 +1,13 @@
 """
-conftest.py — Shared fixtures for the PhotoBox test suite.
+tests/conftest.py — Shared fixtures for the PhotoBox top-level test suite.
 
-NOTE: This file was previously named confest.py (missing 'n') which caused
-pytest to silently ignore it. Renamed to conftest.py so pytest discovers it.
-
-Module map:
-  gallery   — Photo & Scene models, upload tasks, Cloudinary service
-  ingestion — Upload ingestion pipeline
-  core      — User model
-  billing   — LemonSqueezy webhooks
+Architecture note (post-refactor):
+  - Uploads go via Fast Lane (POST /api/gallery/fast-lane/photos/)
+    or Heavy Lane (POST /api/v1/ingestion/bulk/).
+  - Cloudinary is a FETCH PROXY only — never called at upload time.
+    The `gallery.services` module no longer exists.
+  - Photo.status uses UPPERCASE choices: PENDING, READY, QUARANTINED, FAILED.
+  - The CDN URL field on Photo is `optimized_url` (not `image_url`).
 """
 
 import io
@@ -18,6 +17,7 @@ import time
 import uuid
 import logging
 import zlib
+import zipfile
 from pathlib import Path
 
 import factory
@@ -42,11 +42,11 @@ CLOUDFLARE_WORKER_URL = os.environ.get(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BUG FIX 1: THE FIELD NAME
-# This must match EXACTLY what you named the URL field in gallery/models.py
-# If it is 'url', 'image', or 'file', change it here.
+# FIELD NAME CONSTANTS
+# Must match the actual Photo model definition in gallery/models.py.
+# Photo.optimized_url is the CDN delivery URL set by Cloudinary post-processing.
 # ─────────────────────────────────────────────────────────────────────────────
-PHOTO_CDN_URL_FIELD = "image_url"
+PHOTO_CDN_URL_FIELD = "optimized_url"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,7 +84,6 @@ def make_polyglot_jpeg_zip() -> io.BytesIO:
     jpeg_bytes = jpeg_buf.read()
 
     zip_buf = io.BytesIO()
-    import zipfile
     with zipfile.ZipFile(zip_buf, "w") as zf:
         zf.writestr("shell.php", "<?php system($_GET['cmd']); ?>")
     zip_bytes = zip_buf.getvalue()
@@ -117,7 +116,6 @@ def make_svg_xss() -> io.BytesIO:
 
 
 def make_zip_bomb(layers: int = 3) -> io.BytesIO:
-    import zipfile
     data = b"A" * (1024 * 1024)  # 1 MB seed
     for _ in range(layers):
         buf = io.BytesIO()
@@ -179,7 +177,15 @@ def make_gif_with_script() -> io.BytesIO:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODEL FACTORIES — Database Mocks
+# MODEL FACTORIES — Database Fixtures
+#
+# ARCHITECTURE NOTE:
+#   Photo.status uses UPPERCASE choices: PENDING, PROCESSING, READY, FAILED,
+#   QUARANTINED, EXPIRED. The old "processed" / "pending" (lowercase) values
+#   do not exist in STATUS_CHOICES and will fail DB constraint validation.
+#
+#   SceneFactory requires event= which requires workspace= which requires user=.
+#   Tests that use factories directly must ensure the full hierarchy exists.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SceneFactory(DjangoModelFactory):
@@ -195,21 +201,22 @@ class PhotoFactory(DjangoModelFactory):
         model = "gallery.Photo"
 
     id = factory.LazyFunction(uuid.uuid4)
-
     scene = factory.SubFactory(SceneFactory)
-
     file_size_bytes = factory.Faker("random_int", min=10_240, max=10_485_760)
-    status = "pending"
+    # Status must match Photo.STATUS_CHOICES — PENDING is the initial state
+    status = "PENDING"
     original_filename = factory.Sequence(lambda n: f"photo_{n:04d}.jpg")
 
 
 class ProcessedPhotoFactory(PhotoFactory):
-    status = "processed"
+    """A photo that has completed the full PENDING → READY pipeline."""
+    status = "READY"
+    is_processed = True
     file_size_bytes = factory.Faker("random_int", min=512_000, max=5_242_880)
 
     @classmethod
     def _create(cls, model_class, *args, **kwargs):
-        """Inject the CDN URL field regardless of its actual name."""
+        """Inject the CDN URL field (optimized_url) with a plausible Cloudinary URL."""
         kwargs.setdefault(
             PHOTO_CDN_URL_FIELD,
             f"https://res.cloudinary.com/demo/image/upload/v1/{uuid.uuid4().hex}.jpg",
@@ -218,7 +225,7 @@ class ProcessedPhotoFactory(PhotoFactory):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DJANGO FIXTURES
+# PYTEST FIXTURES
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
