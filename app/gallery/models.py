@@ -173,13 +173,12 @@ class Photo(models.Model):
     class Meta:
         ordering = ['uploaded_at']
         indexes = [
-            models.Index(fields=['scene', 'is_processed']), # Legacy frontend query
-            models.Index(fields=['scene', 'status']),       # New EDA frontend polling query
+            models.Index(fields=['scene', 'is_processed']),  # Legacy frontend query
+            models.Index(fields=['scene', 'status']),  # New EDA frontend polling query
         ]
 
     @property
     def delivery_url(self):
-    # def delivery_url(self) -> str | None:
         """
         PHASE 3: Cloudinary Fetch Proxy URL.
 
@@ -299,7 +298,10 @@ class ClientAllowlist(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['gallery', 'email']),
+            models.Index(
+                fields=['gallery', 'email'],
+                name='gal_allow_gallery_email_idx',
+            ),
         ]
 
     def __str__(self):
@@ -321,7 +323,10 @@ class GalleryMagicLink(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=['gallery', 'email']),
+            models.Index(
+                fields=['gallery', 'email'],
+                name='gal_magic_gallery_email_idx',
+            ),
         ]
 
     def __str__(self):
@@ -342,8 +347,14 @@ class GalleryAccessSession(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=['gallery', 'email']),
-            models.Index(fields=['gallery', 'role']),
+            models.Index(
+                fields=['gallery', 'email'],
+                name='gal_access_gallery_email_idx',
+            ),
+            models.Index(
+                fields=['gallery', 'role'],
+                name='gal_access_gallery_role_idx',
+            ),
         ]
 
     def __str__(self):
@@ -372,7 +383,10 @@ class GalleryArchiveJob(models.Model):
     class Meta:
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['gallery', 'status']),
+            models.Index(
+                fields=['gallery', 'status'],
+                name='gal_archive_gallery_status_idx',
+            ),
         ]
 
     def __str__(self):

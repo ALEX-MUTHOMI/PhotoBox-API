@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 import zipfile
 from datetime import timedelta
 from pathlib import PurePosixPath
@@ -21,7 +22,7 @@ from django.db.models.functions import Greatest
 from django.utils import timezone
 from django.utils.text import slugify
 
-from gallery.models import GalleryArchiveJob, Photo, VisibilityChoices
+from gallery.models import Event, GalleryArchiveJob, Photo, VisibilityChoices
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ def _build_expected_r2_key(
     name="gallery.tasks.process_fast_lane_asset",
     acks_late=True,
     reject_on_worker_lost=True,
+    queue="image-processing",
 )
 def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     from gallery.models import Photo  # noqa: PLC0415
@@ -83,19 +85,32 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     logger.info("[FAST LANE MONITOR] Checking vault status for photo_id=%s", photo_id)
 
     try:
+        normalized_photo_id = str(uuid.UUID(str(photo_id)))
+    except (TypeError, ValueError, AttributeError):
+        logger.warning(
+            "[FAST LANE MONITOR] Rejected invalid photo identifier: %s",
+            photo_id,
+        )
+        return {
+            "status": "rejected",
+            "reason": "invalid_photo_id",
+            "photo_id": str(photo_id),
+        }
+
+    try:
         photo = (
             Photo.objects
             .select_related("scene__event__workspace")
-            .get(id=photo_id)
+            .get(id=normalized_photo_id)
         )
 
         if photo.status in ("READY", "QUARANTINED") or photo.is_processed:
             logger.info(
                 "[FAST LANE MONITOR] Photo %s already processed (status=%s).",
-                photo_id,
+                normalized_photo_id,
                 photo.status,
             )
-            return {"status": "already_processed", "photo_id": photo_id}
+            return {"status": "already_processed", "photo_id": normalized_photo_id}
 
         workspace = photo.scene.event.workspace
         file_size_bytes: int = photo.file_size_bytes or 0
@@ -103,23 +118,27 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     except Photo.DoesNotExist:
         logger.warning(
             "[FAST LANE MONITOR] Photo %s not found, already deleted.",
-            photo_id,
+            normalized_photo_id,
         )
         return {"status": "skipped", "reason": "not_found"}
 
     probe_key = stored_key or _build_expected_r2_key(
         workspace.id,
-        photo_id,
+        normalized_photo_id,
         photo.original_filename,
     )
 
     if not probe_key:
         logger.error(
             "[FAST LANE MONITOR] Cannot determine R2 key for photo %s. Marking FAILED.",
-            photo_id,
+            normalized_photo_id,
         )
-        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
-        return {"status": "error", "reason": "no_safe_r2_key", "photo_id": photo_id}
+        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
+        return {
+            "status": "error",
+            "reason": "no_safe_r2_key",
+            "photo_id": normalized_photo_id,
+        }
 
     try:
         r2 = get_r2_client()
@@ -134,24 +153,32 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
 
         logger.error(
             "[FAST LANE MONITOR] R2 API error probing photo %s (code=%s): %s",
-            photo_id,
+            normalized_photo_id,
             error_code,
             exc,
         )
-        return _retry_or_fail(self, photo_id, exc)
+        return _retry_or_fail(self, normalized_photo_id, exc)
     except (BotoCoreError, OSError) as exc:
-        logger.error("[FAST LANE MONITOR] Network error probing photo %s: %s", photo_id, exc)
-        return _retry_or_fail(self, photo_id, exc)
+        logger.error(
+            "[FAST LANE MONITOR] Network error probing photo %s: %s",
+            normalized_photo_id,
+            exc,
+        )
+        return _retry_or_fail(self, normalized_photo_id, exc)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.exception(
             "[FAST LANE MONITOR] Unexpected error probing photo %s: %s",
-            photo_id,
+            normalized_photo_id,
             exc,
         )
-        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
-        return {"status": "error", "reason": "unexpected", "photo_id": photo_id}
+        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
+        return {
+            "status": "error",
+            "reason": "unexpected",
+            "photo_id": normalized_photo_id,
+        }
 
-    return _handle_self_heal(photo_id, probe_key)
+    return _handle_self_heal(normalized_photo_id, probe_key)
 
 
 def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:
@@ -388,4 +415,74 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             os.remove(temp_zip_path)
 
 
+@shared_task(
+    bind=True,
+    max_retries=0,
+    name="gallery.tasks.prepare_gallery_bulk_download",
+)
+def prepare_gallery_bulk_download(
+    self,
+    event_id: str,
+    requested_by_user_id: Optional[str] = None,
+    requester_kind: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        gallery = Event.objects.get(id=event_id)
+    except Event.DoesNotExist:
+        logger.warning(
+            "[ARCHIVE] Bulk download requested for missing gallery %s by %s (%s).",
+            event_id,
+            requested_by_user_id,
+            requester_kind,
+        )
+        return {"status": "missing", "gallery_id": event_id}
+
+    active_job = (
+        GalleryArchiveJob.objects
+        .filter(gallery=gallery)
+        .order_by("-created_at")
+        .first()
+    )
+    if active_job and active_job.status in (
+        GalleryArchiveJob.Status.PENDING,
+        GalleryArchiveJob.Status.PROCESSING,
+    ):
+        return {
+            "status": active_job.status.lower(),
+            "gallery_id": str(gallery.id),
+            "archive_job_id": str(active_job.id),
+        }
+
+    if (
+        active_job
+        and active_job.status == GalleryArchiveJob.Status.COMPLETED
+        and active_job.r2_zip_key
+        and active_job.expires_at
+        and active_job.expires_at > timezone.now()
+    ):
+        return {
+            "status": "already_completed",
+            "gallery_id": str(gallery.id),
+            "archive_job_id": str(active_job.id),
+            "r2_zip_key": active_job.r2_zip_key,
+        }
+
+    archive_job = GalleryArchiveJob.objects.create(gallery=gallery)
+    build_result = build_gallery_archive.delay(str(archive_job.id))
+    logger.info(
+        "[ARCHIVE] Queued gallery archive job %s for gallery %s by %s (%s).",
+        archive_job.id,
+        gallery.id,
+        requested_by_user_id,
+        requester_kind,
+    )
+    return {
+        "status": "queued",
+        "gallery_id": str(gallery.id),
+        "archive_job_id": str(archive_job.id),
+        "build_task_id": getattr(build_result, "id", None),
+    }
+
+
+process_fast_lane_asset.queue = "image-processing"
 upload_photo_to_r2 = process_fast_lane_asset
