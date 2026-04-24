@@ -1,40 +1,123 @@
-name: Checks
+name: CI — Security, Tests & Lint
 
 on:
   push:
-    branches: [ "main", "staging", "development" ]
+    branches: ["main", "staging", "development"]
   pull_request:
-    branches: [ "main", "staging" ]
+    branches: ["main", "staging"]
 
 jobs:
-  test-lint:
-    name: Test and Lint
+  test-and-lint:
+    name: Build, Test & Lint
     runs-on: ubuntu-latest
-    
+
     steps:
+      # ──────────────────────────────────────────────────────────────────────
+      # 1. Checkout
+      # ──────────────────────────────────────────────────────────────────────
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Spin up Docker Stack
-        # 'up -d' ensures app, db, redis, and celery ALL start together
-        run: docker compose up -d --build
-        
-      - name: Wait for Database
-        # The -T flag prevents "the input device is not a TTY" errors in CI
-        run: docker compose exec -T app python manage.py wait_for_db
+      # ──────────────────────────────────────────────────────────────────────
+      # 2. Generate .env from GitHub Secrets + safe CI defaults
+      #
+      # WHY: docker-compose.yml uses `env_file: required: false`.
+      #      CI services still need env vars — we write them from secrets.
+      #      Secrets that are unset default to safe CI stubs (never prod values).
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Generate CI .env from Secrets
+        run: |
+          cat > .env << 'ENVEOF'
+          SECRET_KEY=${{ secrets.SECRET_KEY || 'ci-only-insecure-secret-key-do-not-use-in-prod-aabbccdd' }}
+          DEBUG=0
+          ALLOWED_HOSTS=localhost,127.0.0.1,app,0.0.0.0
+          DB_HOST=db
+          DB_NAME=${{ secrets.DB_NAME || 'photobox_ci' }}
+          DB_USER=${{ secrets.DB_USER || 'photobox_ci_user' }}
+          DB_PASS=${{ secrets.DB_PASS || 'ci_db_pass_not_used_externally' }}
+          POSTGRES_DB=${{ secrets.DB_NAME || 'photobox_ci' }}
+          POSTGRES_USER=${{ secrets.DB_USER || 'photobox_ci_user' }}
+          POSTGRES_PASSWORD=${{ secrets.DB_PASS || 'ci_db_pass_not_used_externally' }}
+          REDIS_URL=redis://redis:6379/0
+          CLOUDFLARE_R2_ENDPOINT=${{ secrets.CLOUDFLARE_R2_ENDPOINT || 'https://stub.r2.cloudflarestorage.com' }}
+          CLOUDFLARE_R2_BUCKET_NAME=${{ secrets.CLOUDFLARE_R2_BUCKET_NAME || 'ci-test-bucket' }}
+          CLOUDFLARE_R2_DOMAIN=${{ secrets.CLOUDFLARE_R2_DOMAIN || 'ci-test.r2.dev' }}
+          CLOUDFLARE_ACCESS_KEY_ID=${{ secrets.CLOUDFLARE_ACCESS_KEY_ID || 'ci-access-key-id' }}
+          CLOUDFLARE_SECRET_ACCESS_KEY=${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY || 'ci-secret-access-key' }}
+          CLOUDFLARE_WEBHOOK_SECRET=${{ secrets.CLOUDFLARE_WEBHOOK_SECRET || 'ci-webhook-secret' }}
+          CLOUDINARY_CLOUD_NAME=${{ secrets.CLOUDINARY_CLOUD_NAME || 'ci-cloud' }}
+          LEMON_SQUEEZY_API_KEY=${{ secrets.LEMON_SQUEEZY_API_KEY || 'ci-ls-api-key' }}
+          LEMON_SQUEEZY_STORE_ID=${{ secrets.LEMON_SQUEEZY_STORE_ID || '0' }}
+          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY=${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY || 'ci-ls-primary-secret' }}
+          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY=${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY || 'ci-ls-secondary-secret' }}
+          FRONTEND_URL=${{ secrets.FRONTEND_URL || 'http://localhost:3000' }}
+          CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS || 'http://localhost:3000' }}
+          EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+          DJANGO_LOG_LEVEL=WARNING
+          TURNSTILE_SECRET_KEY=${{ secrets.TURNSTILE_SECRET_KEY || 'ci-turnstile-stub' }}
+          IP_HASH_SALT=${{ secrets.IP_HASH_SALT || 'ci-ip-salt-stub' }}
+          ENVEOF
+          # Strip leading whitespace from heredoc (shell artifact)
+          sed -i 's/^[[:space:]]*//' .env
+          echo "✅ .env generated ($(wc -l < .env) variables)"
+          echo "--- Variables set (values redacted) ---"
+          cut -d= -f1 .env
 
-      - name: Run Security & Regression Suite
-        run: docker compose exec -T -e SAFE_TEST_ENV=1 app python manage.py test --verbosity=2
+      # ──────────────────────────────────────────────────────────────────────
+      # 3. Build images (--parallel builds app, db, redis, test concurrently)
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Build Docker Images
+        run: docker compose build --parallel
+        timeout-minutes: 15
 
-      - name: Run Linter
-        run: docker compose exec -T app flake8
+      # ──────────────────────────────────────────────────────────────────────
+      # 4. Start infrastructure (db + redis ONLY)
+      #    The test container manages migrations itself — no app service needed
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Start Infrastructure Services
+        run: docker compose up -d db redis
+        timeout-minutes: 5
 
+      - name: Wait for Infrastructure to be Healthy
+        run: |
+          echo "Waiting for PostgreSQL and Redis to be healthy..."
+          for i in $(seq 1 60); do
+            DB_STATUS=$(docker compose ps db --format json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health','unknown'))" 2>/dev/null || echo "starting")
+            REDIS_STATUS=$(docker compose ps redis --format json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health','unknown'))" 2>/dev/null || echo "starting")
+            echo "  [${i}s] db=${DB_STATUS} redis=${REDIS_STATUS}"
+            if [ "$DB_STATUS" = "healthy" ] && [ "$REDIS_STATUS" = "healthy" ]; then
+              echo "✅ All infrastructure services healthy"
+              break
+            fi
+            sleep 2
+          done
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 5. Run test suites via the dedicated test container
+      #    run-tests.sh waits for db internally and runs migrations before pytest
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Run Unit & Integration Tests
+        run: docker compose run --rm test unit
+        timeout-minutes: 20
+
+      - name: Run Security Tests (IDOR, Webhook, OAuth, JWT)
+        run: docker compose run --rm test security
+        timeout-minutes: 10
+
+      - name: Run Pipeline & Celery Tests
+        run: docker compose run --rm test celery
+        timeout-minutes: 10
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 6. Lint
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Run Linter (flake8)
+        run: docker compose run --rm test flake8
+        timeout-minutes: 5
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 7. Teardown — always runs to prevent orphan containers
+      # ──────────────────────────────────────────────────────────────────────
       - name: Tear Down Stack
         if: always()
-        # Bash check: Only run docker compose down IF the file was actually checked out
-        run: |
-          if [ -f "docker-compose.yml" ]; then
-            docker compose down -v
-          else
-            echo "Skipping teardown: docker-compose.yml not found."
-          fi
+        run: docker compose down -v --remove-orphans

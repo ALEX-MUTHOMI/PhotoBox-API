@@ -36,7 +36,8 @@ services:
       - dev-static-data:/vol/web
     command: ["run.sh"]
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - STATIC_ROOT=/vol/web/static
       - MEDIA_ROOT=/vol/web/media
@@ -72,7 +73,16 @@ services:
     volumes:
       - dev-db-data:/var/lib/postgresql/data
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      # The postgres image reads POSTGRES_* vars to initialize the database.
+      # These must match DB_NAME/DB_USER/DB_PASS used by Django.
+      # If set in .env as POSTGRES_DB etc., they are picked up by env_file.
+      # Fallback defaults allow the container to start in a bare environment.
+      - POSTGRES_DB=${DB_NAME:-photobox_dev}
+      - POSTGRES_USER=${DB_USER:-photobox_dev_user}
+      - POSTGRES_PASSWORD=${DB_PASS:-change-me-in-env-file}
     networks:
       - photobox_network
     restart: unless-stopped
@@ -81,7 +91,8 @@ services:
         limits:
           memory: 512M
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$DB_USER -d $$DB_NAME"]
+      # Use POSTGRES_USER/POSTGRES_DB — these are what postgres image initializes with
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -155,7 +166,8 @@ services:
     volumes:
       - ./app:/app
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - STATIC_ROOT=/vol/web/static
       - MEDIA_ROOT=/vol/web/media
@@ -197,7 +209,8 @@ services:
     volumes:
       - ./app:/app
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - STATIC_ROOT=/vol/web/static
       - MEDIA_ROOT=/vol/web/media
@@ -240,7 +253,8 @@ services:
     volumes:
       - ./app:/app
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - STAGING_BASE_URL=http://app:8000
       - CELERY_TASK_ALWAYS_EAGER=True
@@ -257,8 +271,6 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      app:
         condition: service_healthy
     networks:
       - photobox_network

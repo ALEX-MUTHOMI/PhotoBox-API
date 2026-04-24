@@ -174,6 +174,16 @@ case "$SUITE" in
       --timeout=180 -v --tb=short $EXTRA_ARGS
     ;;
 
+  # ── FLAKE8: linting ──────────────────────────────────────────────────────
+  flake8)
+    echo "[RUNNING] flake8 lint check (max-line-length=100, migrations excluded)..."
+    exec python -m flake8 \
+      --config /app/.flake8 \
+      --count \
+      --statistics \
+      . $EXTRA_ARGS
+    ;;
+
   *)
     echo "ERROR: Unknown suite '$SUITE'"
     echo ""
@@ -187,6 +197,7 @@ case "$SUITE" in
     echo "  cloudinary — Cloudinary integration (requires real credentials)"
     echo "  e2e        — End-to-end photographer flow"
     echo "  coverage   — Full suite with HTML coverage report"
+    echo "  flake8     — Lint the codebase"
     echo "  all        — Everything"
     exit 1
     ;;

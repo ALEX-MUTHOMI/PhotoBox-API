@@ -1,25 +1,59 @@
 [flake8]
+# ─────────────────────────────────────────────────────────────────────────────
+# PhotoBox Flake8 Configuration
+#
+# Line length: 100 chars — matches Black's recommended default for Django projects.
+# (79 is PEP 8's historical limit from 1980s terminals; 88/100 is modern Black default)
+#
+# Philosophy: Enforce correctness (E1xx, W6xx, F-codes) strictly.
+#             Relax stylistic rules that conflict with Black auto-formatting.
+# ─────────────────────────────────────────────────────────────────────────────
+max-line-length = 100
+
 exclude =
-  migrations,
-  __pycache__,
-  manage.py,
-  settings.py
+    # Django auto-generated files — never touch by hand, never lint
+    */migrations/*,
+    # Python bytecode cache
+    __pycache__,
+    .git,
+    # Build / virtual env dirs
+    .venv,
+    venv,
+    env,
+    dist,
+    build,
+    # Static / media — not Python
+    static,
+    static_root,
+    media_root,
+    # Test fixtures and generated data
+    fixtures,
+    htmlcov,
+    .pytest_cache,
+    # Project-level scripts
+    manage.py
+
+per-file-ignores =
+    # Test files: allow long assertion messages, magic numbers, assert usage,
+    # and f-string placeholders for readable failure messages
+    */tests/*.py: E501, S101, PLR2004
+    # Settings file: allow long string assignments (URLs, lists), star imports
+    */settings.py: F401, F403, E501
+    # __init__ files: allow unused imports (re-exported symbols)
+    */__init__.py: F401
+
 extend-ignore =
-  E111,
-  E115,
-  E117,
-  E128,
-  E127,
-  E221,
-  E261,
-  E301,
-  E302,
-  E303,
-  E304,
-  E305,
-  E501,
-  F541,
-  W291,
-  W292,
-  W293,
-  W391
+    # ── Black-compatibility ignores ──────────────────────────────────────────
+    # E1: Indentation — Black handles this
+    E111,  # indentation is not a multiple of 4
+    E114,  # indentation is not a multiple of 4 (comment)
+    E117,  # over-indented
+    # E2: Whitespace — Black handles this
+    E203,  # whitespace before ':' (conflicts with Black slice formatting)
+    E231,  # missing whitespace after ',' (Black handles)
+    # W5: Line breaks — Black handles this
+    W503,  # line break before binary operator (Black prefers this style)
+    W504,  # line break after binary operator
+    # ── Django-specific ignores ──────────────────────────────────────────────
+    # E501 is NOT ignored globally — we set max-line-length=100 instead.
+    # Use `# noqa: E501` inline only for unavoidable long lines (URLs, etc.)
