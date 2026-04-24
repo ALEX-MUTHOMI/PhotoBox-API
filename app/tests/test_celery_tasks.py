@@ -86,7 +86,7 @@ class TestProcessFastLaneAsset:
         assert result.successful(), f"Task failed unexpectedly:\n{result.traceback}"
 
         photo.refresh_from_db()
-        assert photo.status == "processed"
+        assert photo.status == "READY"
         assert getattr(photo, PHOTO_CDN_URL_FIELD) == result_data["secure_url"], (
             f"Expected {PHOTO_CDN_URL_FIELD} to be set. "
             f"If the field is named differently, update PHOTO_CDN_URL_FIELD in conftest.py"
@@ -144,8 +144,8 @@ class TestProcessFastLaneAsset:
         process_fast_lane_asset.apply(args=[str(photo.pk)])
 
         photo.refresh_from_db()
-        assert photo.status == "failed", (
-            f"Expected status='failed' after max retries. Got: '{photo.status}'"
+        assert photo.status == "FAILED", (
+            f"Expected status='FAILED' after max retries. Got: '{photo.status}'"
         )
 
     def test_failed_photo_is_not_left_in_processing_state(self, db, mocker):
@@ -153,7 +153,7 @@ class TestProcessFastLaneAsset:
         If the task errors out, it must never leave the photo stuck in
         a 'processing' limbo state — that would silently block resubmission.
         """
-        photo = PhotoFactory(status="pending")
+        photo = PhotoFactory(status="PENDING")
         import cloudinary.exceptions
         mocker.patch(
             "gallery.services.cloudinary_service.upload",
@@ -168,8 +168,8 @@ class TestProcessFastLaneAsset:
         process_fast_lane_asset.apply(args=[str(photo.pk)])
 
         photo.refresh_from_db()
-        assert photo.status != "processing", (
-            "Task left photo in 'processing' state on unrecoverable failure. "
+        assert photo.status != "PROCESSING", (
+            "Task left photo in 'PROCESSING' state on unrecoverable failure. "
             "This blocks the photographer from resubmitting."
         )
 
@@ -320,7 +320,7 @@ class TestProcessFastLaneAsset:
                 f"Validate that secure_url starts with 'https://res.cloudinary.com/'."
             )
             # Reset for next iteration
-            photo.status = "pending"
+            photo.status = "PENDING"
             setattr(photo, PHOTO_CDN_URL_FIELD, None)
             photo.save(update_fields=["status", PHOTO_CDN_URL_FIELD])
 
@@ -372,16 +372,16 @@ class TestReapAbandonedUploads:
         """
         from ingestion.tasks import reap_abandoned_uploads
 
-        stale_photo = PhotoFactory(status="pending")
+        stale_photo = PhotoFactory(status="PENDING")
         Photo.objects.filter(pk=stale_photo.pk).update(
-            created_at=timezone.now() - datetime.timedelta(hours=25)
+            uploaded_at=timezone.now() - datetime.timedelta(hours=25)
         )
 
         reap_abandoned_uploads.apply()
 
         stale_photo.refresh_from_db()
-        assert stale_photo.status in ("abandoned", "failed"), (
-            f"Stale upload should be marked abandoned/failed. Got: '{stale_photo.status}'"
+        assert stale_photo.status in ("FAILED", "QUARANTINED"), (
+            f"Stale upload should be marked FAILED/QUARANTINED. Got: '{stale_photo.status}'"
         )
 
     def test_reap_task_does_not_touch_recent_uploads(self, db):
@@ -391,13 +391,13 @@ class TestReapAbandonedUploads:
         """
         from ingestion.tasks import reap_abandoned_uploads
 
-        fresh_photo = PhotoFactory(status="pending")
+        fresh_photo = PhotoFactory(status="PENDING")
         # created_at defaults to now — well within the threshold
 
         reap_abandoned_uploads.apply()
 
         fresh_photo.refresh_from_db()
-        assert fresh_photo.status == "pending", (
+        assert fresh_photo.status == "PENDING", (
             f"Fresh upload was incorrectly reaped. Got status: '{fresh_photo.status}'. "
             "Check the abandonment threshold — it may be too aggressive."
         )
@@ -410,13 +410,13 @@ class TestReapAbandonedUploads:
 
         old_processed = ProcessedPhotoFactory()
         Photo.objects.filter(pk=old_processed.pk).update(
-            created_at=timezone.now() - datetime.timedelta(days=30)
+            uploaded_at=timezone.now() - datetime.timedelta(days=30)
         )
 
         reap_abandoned_uploads.apply()
 
         old_processed.refresh_from_db()
-        assert old_processed.status == "processed", (
+        assert old_processed.status == "READY", (
             f"Reaper clobbered a processed photo. Got: '{old_processed.status}'. "
             "The WHERE clause on the reap query is missing a status filter."
         )
@@ -428,9 +428,9 @@ class TestReapAbandonedUploads:
         """
         from ingestion.tasks import reap_abandoned_uploads
 
-        stale_photo = PhotoFactory(status="pending")
+        stale_photo = PhotoFactory(status="PENDING")
         Photo.objects.filter(pk=stale_photo.pk).update(
-            created_at=timezone.now() - datetime.timedelta(hours=25)
+            uploaded_at=timezone.now() - datetime.timedelta(hours=25)
         )
 
         reap_abandoned_uploads.apply()
@@ -462,9 +462,9 @@ class TestReapAbandonedUploads:
         """
         from ingestion.tasks import reap_abandoned_uploads
 
-        photos = PhotoFactory.create_batch(200, status="pending")
+        photos = PhotoFactory.create_batch(200, status="PENDING")
         Photo.objects.filter(pk__in=[p.pk for p in photos]).update(
-            created_at=timezone.now() - datetime.timedelta(hours=25)
+            uploaded_at=timezone.now() - datetime.timedelta(hours=25)
         )
         # This should complete without locking timeout
         result = reap_abandoned_uploads.apply()
@@ -506,7 +506,7 @@ class TestCeleryLiveBroker:
         assert result is not None
 
         photo.refresh_from_db()
-        assert photo.status == "processed"
+        assert photo.status == "READY"
 
     def test_task_result_not_stored_indefinitely(self, db, live_celery_config, mocker):
         """
