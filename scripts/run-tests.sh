@@ -63,7 +63,16 @@ sys.exit(1)
 
 # Run migrations to ensure schema is current
 echo "[INFO] Running migrations..."
-python manage.py migrate --run-syncdb --no-input 2>&1 | tail -5
+TMP_ROOT="${TMPDIR:-/var/tmp}"
+mkdir -p "$TMP_ROOT"
+MIGRATE_LOG="$TMP_ROOT/photobox-migrate-$$.log"
+if ! python manage.py migrate --run-syncdb --no-input >"$MIGRATE_LOG" 2>&1; then
+  tail -20 "$MIGRATE_LOG"
+  rm -f "$MIGRATE_LOG"
+  exit 1
+fi
+tail -5 "$MIGRATE_LOG"
+rm -f "$MIGRATE_LOG"
 
 echo ""
 

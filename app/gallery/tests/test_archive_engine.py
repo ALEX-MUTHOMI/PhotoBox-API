@@ -156,7 +156,7 @@ class GalleryArchiveEngineTests(TestCase):
 
     @patch("gallery.client_views.generate_r2_presigned_get_url")
     def test_archive_status_returns_short_lived_url_for_matching_gallery_scope(self, mock_presign):
-        job = GalleryArchiveJob.objects.create(
+        GalleryArchiveJob.objects.create(
             gallery=self.gallery,
             status=GalleryArchiveJob.Status.COMPLETED,
             r2_zip_key="archives/test.zip",

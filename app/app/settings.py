@@ -531,6 +531,10 @@ TEST_RUNNER = 'core.utils.test_runner.EnterpriseTestRunner'
 if _IS_TEST:
     ALLOWED_HOSTS = list(dict.fromkeys(ALLOWED_HOSTS + ["testserver", "localhost"]))
 
+    # Keep test database teardown deterministic by avoiding persistent
+    # PostgreSQL connections across test cases and container shutdown.
+    DATABASES["default"]["CONN_MAX_AGE"] = 0
+
     # -- Celery: run tasks synchronously, no broker required --
     CELERY_TASK_ALWAYS_EAGER    = True
     CELERY_TASK_EAGER_PROPAGATES = True

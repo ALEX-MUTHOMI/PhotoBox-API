@@ -16,7 +16,6 @@ from gallery.client_auth import (
     GalleryCookieJWTAuthentication,
     hash_magic_link_token,
     issue_gallery_access_token,
-    normalize_gallery_email,
     set_gallery_access_cookie,
 )
 from gallery.client_permissions import (
