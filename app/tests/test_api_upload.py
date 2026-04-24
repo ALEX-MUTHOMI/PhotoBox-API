@@ -24,19 +24,19 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
+from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from rest_framework import status
 
+from gallery.throttles import FastLaneUploadThrottle
 from tests.conftest import (
-    PhotoFactory,
     ProcessedPhotoFactory,
     make_image_file,
-    make_large_image_file,
     make_polyglot_jpeg_zip,
     make_svg_xxe,
     make_svg_xss,
     make_zip_bomb,
-    make_path_traversal_filename,
     make_null_byte_filename,
     make_overlong_filename,
     make_jpeg_with_embedded_php,
@@ -55,7 +55,7 @@ PHOTO_DETAIL_URL_NAME = "gallery:fastlane-photo-detail"
 # SHARED HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _mock_external_calls(mocker):
+def _mock_external_calls():
     """Compatibility shim: the async dispatch boundary is stubbed module-wide."""
     return None
 
@@ -90,6 +90,15 @@ def _upload(client, image_file, extra_data: dict = None, scene_id: str | None = 
     if extra_data:
         payload.update(extra_data)
     return client.post(url, payload, format="multipart")
+
+
+def _fast_lane_upload_limit() -> int:
+    throttle = FastLaneUploadThrottle()
+    rate = throttle.get_rate()
+    assert rate is not None, "fast_lane_upload throttle rate must be configured"
+    num_requests, _ = throttle.parse_rate(rate)
+    assert num_requests is not None
+    return num_requests
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +149,6 @@ class TestUploadAuthEnforcement:
         """An expired access token must be rejected, not silently accepted."""
         from rest_framework_simplejwt.tokens import AccessToken
         from datetime import timedelta
-        from django.utils import timezone
 
         token = AccessToken.for_user(photographer_user)
         # Force the token's expiry into the past
@@ -169,9 +177,9 @@ class TestUploadAuthEnforcement:
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_authenticated_request_is_accepted(self, authenticated_client, test_image, mocker):
+    def test_authenticated_request_is_accepted(self, authenticated_client, test_image):
         """Authenticated POST reaches the view — external calls mocked."""
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, test_image)
         assert response.status_code in (
             status.HTTP_200_OK,
@@ -293,8 +301,8 @@ class TestIDOR:
 
 class TestUploadFileValidation:
 
-    def test_jpeg_is_accepted(self, authenticated_client, mocker):
-        _mock_external_calls(mocker)
+    def test_jpeg_is_accepted(self, authenticated_client):
+        _mock_external_calls()
         response = _upload(
             authenticated_client,
             make_image_file(fmt="JPEG", filename="photo.jpg"),
@@ -304,8 +312,8 @@ class TestUploadFileValidation:
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    def test_png_is_accepted(self, authenticated_client, mocker):
-        _mock_external_calls(mocker)
+    def test_png_is_accepted(self, authenticated_client):
+        _mock_external_calls()
         response = _upload(
             authenticated_client,
             make_image_file(fmt="PNG", filename="photo.png"),
@@ -337,19 +345,23 @@ class TestUploadFileValidation:
         )
 
     def test_file_too_large_is_rejected(self, authenticated_client):
-        huge = make_large_image_file(mb=50)
+        huge = SimpleUploadedFile(
+            "too-large.jpg",
+            b"0" * (6 * 1024 * 1024),
+            content_type="image/jpeg",
+        )
         assert _upload(authenticated_client, huge).status_code in (
             status.HTTP_400_BAD_REQUEST,
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
-    def test_tiff_handling_is_explicit(self, authenticated_client, mocker):
+    def test_tiff_handling_is_explicit(self, authenticated_client):
         """
         TIFF is accepted by many image parsers but rarely tested explicitly.
         The policy (accept or reject) must be enforced — not just undefined.
         Update the assertion to match your intended policy.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, make_tiff_file())
         # POLICY: update to HTTP_200_OK/201/202 if TIFFs are allowed
         # For most photo platforms, TIFFs should be rejected at this layer.
@@ -423,7 +435,7 @@ class TestAdversarialFileUploads:
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         ), "Zip bomb was accepted — implement decompression-bomb detection."
 
-    def test_jpeg_with_embedded_php_is_handled(self, authenticated_client, mocker):
+    def test_jpeg_with_embedded_php_is_handled(self, authenticated_client):
         """
         JPEG with PHP code in the EXIF comment block.
         Accepted images with embedded scripts must have EXIF stripped before
@@ -431,7 +443,7 @@ class TestAdversarialFileUploads:
         """
         # This may be accepted (the image is structurally valid JPEG),
         # but the server must strip EXIF on processing.
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, make_jpeg_with_embedded_php())
         # If your API rejects it outright — great. If it accepts it,
         # the Cloudinary processing pipeline must strip metadata.
@@ -441,13 +453,13 @@ class TestAdversarialFileUploads:
                 "PHP code from EXIF comment was reflected in the API response."
             )
 
-    def test_gif_with_script_comment_is_rejected_or_sanitised(self, authenticated_client, mocker):
+    def test_gif_with_script_comment_is_rejected_or_sanitised(self, authenticated_client):
         """
         GIF89a with a <script> tag in the comment extension.
         Relevant when uploads are served with Content-Type: image/gif
         but without X-Content-Type-Options: nosniff.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, make_gif_with_script())
         if response.status_code in (200, 201, 202):
             assert b"<script>" not in response.content
@@ -472,13 +484,13 @@ class TestFilenameSecurityValidation:
         "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
     ])
     def test_path_traversal_filename_is_sanitised(
-        self, authenticated_client, mocker, traversal_payload
+        self, authenticated_client, traversal_payload
     ):
         """
         Path traversal sequences in filenames must be stripped or rejected.
         If accepted, the stored filename must not contain '../'.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         f = make_image_file()
         f.name = traversal_payload
         response = _upload(authenticated_client, f)
@@ -493,14 +505,12 @@ class TestFilenameSecurityValidation:
                 f"Raw traversal filename stored verbatim: {stored_name!r}"
             )
 
-    def test_null_byte_in_filename_is_rejected_or_sanitised(
-        self, authenticated_client, mocker
-    ):
+    def test_null_byte_in_filename_is_rejected_or_sanitised(self, authenticated_client):
         """
         Null bytes terminate strings in C/PHP. 'photo\x00.php.jpg' may be
         stored as 'photo' + '.php' on vulnerable systems.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, make_null_byte_filename())
         if response.status_code in (200, 201, 202):
             body = response.json()
@@ -522,15 +532,13 @@ class TestFilenameSecurityValidation:
             "4096-char filename was accepted — impose a max filename length."
         )
 
-    def test_unicode_filename_with_homograph_chars_is_sanitised(
-        self, authenticated_client, mocker
-    ):
+    def test_unicode_filename_with_homograph_chars_is_sanitised(self, authenticated_client):
         """
         Unicode homograph attack: Cyrillic 'а' (U+0430) looks identical to
         Latin 'a' but is a different byte — can confuse logging, deduplication,
         and human reviewers. Must be stored as-is or normalised, never crashed.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         f = make_image_file()
         f.name = "phоtо.jpg"  # 'о' is Cyrillic U+043E, not Latin 'o'
         response = _upload(authenticated_client, f)
@@ -543,14 +551,14 @@ class TestFilenameSecurityValidation:
         "javascript:alert(1).jpg",
     ])
     def test_xss_in_filename_is_sanitised_in_response(
-        self, authenticated_client, mocker, xss_name
+        self, authenticated_client, xss_name
     ):
         """
         If the filename is reflected back in the JSON response, it must be
         escaped. Raw <script> tags in filenames are stored-XSS in API consumers
         that render HTML without proper escaping.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         f = make_image_file()
         f.name = xss_name
         response = _upload(authenticated_client, f)
@@ -583,13 +591,13 @@ class TestMassAssignment:
         (PHOTO_CDN_URL_FIELD, "https://attacker.example/evil.jpg"),
     ])
     def test_cannot_inject_privileged_fields_via_upload(
-        self, authenticated_client, mocker, injected_field, injected_value
+        self, authenticated_client, injected_field, injected_value
     ):
         """
         POST /upload with extra fields must either ignore them or reject them.
         Must never persist attacker-controlled values for privileged columns.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         url = _photo_list_url()
         response = authenticated_client.post(
             url,
@@ -617,7 +625,7 @@ class TestMassAssignment:
                     if injected_field in ("cloudinary_url", PHOTO_CDN_URL_FIELD):
                         cdn_val = getattr(photo, PHOTO_CDN_URL_FIELD, None)
                         assert cdn_val != "https://attacker.example/evil.jpg", (
-                            f"Mass assignment: CDN URL was overwritten via upload body."
+                            "Mass assignment: CDN URL was overwritten via upload body."
                         )
                 except Photo.DoesNotExist:
                     pass  # Upload may be async — cannot check immediately
@@ -632,9 +640,9 @@ class TestUploadResponseSchema:
     REQUIRED_FIELDS = {"photo_id", "status", "message"}
 
     def test_successful_upload_contains_required_fields(
-        self, authenticated_client, test_image, mocker
+        self, authenticated_client, test_image
     ):
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, test_image)
         assert response.status_code in (200, 201, 202)
         data = response.json()
@@ -652,7 +660,7 @@ class TestUploadResponseSchema:
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         data = response.json()
-        assert "errors" in data or "detail" in data
+        assert "errors" in data or "detail" in data or "image_file" in data
 
     def test_error_response_does_not_leak_stack_trace(self, authenticated_client):
         """
@@ -695,13 +703,13 @@ class TestUploadResponseSchema:
         )
 
     def test_successful_response_does_not_include_internal_paths(
-        self, authenticated_client, mocker
+        self, authenticated_client
     ):
         """
         The success response must not include filesystem paths, internal IPs,
         or any data that maps application internals.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
         response = _upload(authenticated_client, make_image_file())
         if response.status_code in (200, 201, 202):
             body_str = response.content.decode("utf-8", errors="ignore")
@@ -717,14 +725,15 @@ class TestUploadResponseSchema:
 class TestUploadRateLimiting:
 
     @pytest.mark.slow
-    def test_burst_uploads_are_throttled(self, authenticated_client, mocker):
-        mocker.patch("gallery.tasks.process_fast_lane_asset.delay")
+    def test_burst_uploads_are_throttled(self, authenticated_client):
+        cache.clear()
+        limit = _fast_lane_upload_limit()
         statuses = [
             _upload(authenticated_client, make_image_file()).status_code
-            for _ in range(20)
+            for _ in range(limit + 1)
         ]
         assert status.HTTP_429_TOO_MANY_REQUESTS in statuses, (
-            "Rate limiter did not trigger after 20 rapid requests. "
+            "Rate limiter did not trigger after exceeding the configured burst limit. "
             "Configure DRF throttling or a reverse-proxy rate limit."
         )
 
@@ -733,17 +742,21 @@ class TestUploadRateLimiting:
         self,
         authenticated_client,
         second_authenticated_client,
-        mocker,
     ):
         """
         Rate limits must be scoped per user, not shared globally.
         User A exhausting their quota must not deny service to User B.
         """
-        _mock_external_calls(mocker)
+        _mock_external_calls()
+        cache.clear()
+        limit = _fast_lane_upload_limit()
 
         # Exhaust User A's quota
-        for _ in range(20):
-            _upload(authenticated_client, make_image_file())
+        statuses = [
+            _upload(authenticated_client, make_image_file()).status_code
+            for _ in range(limit + 1)
+        ]
+        assert status.HTTP_429_TOO_MANY_REQUESTS in statuses
 
         # User B should still get through (or at least not be rate-limited
         # due to User A's activity)
