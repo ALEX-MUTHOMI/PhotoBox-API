@@ -196,20 +196,71 @@ def make_gif_with_script() -> io.BytesIO:
 #   Tests that use factories directly must ensure the full hierarchy exists.
 # ─────────────────────────────────────────────────────────────────────────────
 
+class UserFactory(DjangoModelFactory):
+    class Meta:
+        model = "core.User"
+
+    email = factory.Sequence(lambda n: f"factory_user_{n}@photostudio.test")
+    name = factory.Sequence(lambda n: f"Factory User {n}")
+    accepted_terms = True
+    password = factory.PostGenerationMethodCall("set_password", "StrongTestPass!99")
+
+
+class WorkspaceFactory(DjangoModelFactory):
+    class Meta:
+        model = "core.Workspace"
+
+    class Params:
+        owner = None
+
+    user = factory.LazyAttribute(lambda obj: obj.owner or UserFactory())
+    business_name = factory.Sequence(lambda n: f"Factory Workspace {n}")
+
+
+class EventFactory(DjangoModelFactory):
+    class Meta:
+        model = "gallery.Event"
+
+    class Params:
+        owner = None
+
+    workspace = factory.SubFactory(
+        WorkspaceFactory,
+        owner=factory.SelfAttribute("..owner"),
+    )
+    title = factory.Sequence(lambda n: f"Automated Test Event {n}")
+    slug = factory.Sequence(lambda n: f"automated-test-event-{n}")
+    event_type = "OTHER"
+
+
 class SceneFactory(DjangoModelFactory):
     class Meta:
         model = "gallery.Scene"
 
+    class Params:
+        owner = None
+
+    event = factory.SubFactory(
+        EventFactory,
+        owner=factory.SelfAttribute("..owner"),
+    )
     id = factory.LazyFunction(uuid.uuid4)
     title = factory.Sequence(lambda n: f"Automated Test Scene {n}")
+    display_order = factory.Sequence(int)
 
 
 class PhotoFactory(DjangoModelFactory):
     class Meta:
         model = "gallery.Photo"
 
+    class Params:
+        owner = None
+
     id = factory.LazyFunction(uuid.uuid4)
-    scene = factory.SubFactory(SceneFactory)
+    scene = factory.SubFactory(
+        SceneFactory,
+        owner=factory.SelfAttribute("..owner"),
+    )
     file_size_bytes = factory.Faker("random_int", min=10_240, max=10_485_760)
     # Status must match Photo.STATUS_CHOICES — PENDING is the initial state
     status = "PENDING"
