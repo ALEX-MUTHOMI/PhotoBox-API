@@ -124,7 +124,8 @@ services:
     volumes:
       - ./app:/app
       - dev-static-data:/vol/web
-    command: ["pytest"]
+    entrypoint: ["/scripts/run-tests.sh"]
+    command: ["unit"]
     environment:
       <<: *app-environment
       PYTEST_ADDOPTS: --tb=short -v
