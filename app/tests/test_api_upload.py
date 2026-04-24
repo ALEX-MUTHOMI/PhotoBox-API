@@ -21,6 +21,7 @@ import base64
 import io
 import json
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from django.urls import reverse
@@ -60,12 +61,16 @@ def _mock_external_calls(mocker):
 
 
 @pytest.fixture(autouse=True)
-def _stub_fast_lane_dispatch(mocker):
+def _stub_fast_lane_dispatch(monkeypatch):
     """
     Hard guardrail for this module: upload API tests never execute the real
     Celery task, even if a future test forgets to call _mock_external_calls().
     """
-    return mocker.patch("gallery.tasks.process_fast_lane_asset.delay")
+    from gallery.tasks import process_fast_lane_asset
+
+    delay_mock = MagicMock(name="process_fast_lane_asset.delay")
+    monkeypatch.setattr(process_fast_lane_asset, "delay", delay_mock)
+    return delay_mock
 
 
 def _photo_list_url():

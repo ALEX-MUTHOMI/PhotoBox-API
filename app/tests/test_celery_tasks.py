@@ -16,7 +16,7 @@ from botocore.exceptions import ClientError
 from celery.exceptions import MaxRetriesExceededError
 from django.utils import timezone
 
-from conftest import PhotoFactory, ProcessedPhotoFactory
+from tests.conftest import PhotoFactory, ProcessedPhotoFactory
 from gallery.models import Photo
 from gallery.tasks import process_fast_lane_asset
 from ingestion.tasks import reap_abandoned_uploads
@@ -29,7 +29,7 @@ pytestmark = [
 
 
 @pytest.fixture(autouse=True)
-def r2_client_stub(mocker):
+def r2_client_stub(monkeypatch):
     """
     Guardrail: no task in this module may create a real boto3 client.
 
@@ -37,25 +37,31 @@ def r2_client_stub(mocker):
     ``head_object.return_value`` or ``head_object.side_effect`` on the returned
     mock client.
     """
+    from gallery import storage as gallery_storage
+
     client = MagicMock(name="mock_r2_client")
     client.head_object.side_effect = AssertionError(
         "Unexpected R2 HeadObject call in a unit test. Stub the return value explicitly."
     )
-    mocker.patch("gallery.storage.get_r2_client", return_value=client)
+    monkeypatch.setattr(gallery_storage, "get_r2_client", lambda: client)
     return client
 
 
 @pytest.fixture(autouse=True)
-def r2_object_exists_stub(mocker):
+def r2_object_exists_stub(monkeypatch):
     """
     Guardrail: the reaper must never perform a live R2 existence probe in tests.
     """
-    return mocker.patch(
-        "gallery.storage.r2_object_exists",
+    from gallery import storage as gallery_storage
+
+    exists_mock = MagicMock(
+        name="gallery.storage.r2_object_exists",
         side_effect=AssertionError(
             "Unexpected r2_object_exists call in a unit test. Stub it explicitly."
         ),
     )
+    monkeypatch.setattr(gallery_storage, "r2_object_exists", exists_mock)
+    return exists_mock
 
 
 class TestProcessFastLaneAsset:
