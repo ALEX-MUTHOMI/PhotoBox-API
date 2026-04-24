@@ -55,8 +55,17 @@ PHOTO_DETAIL_URL_NAME = "gallery:fastlane-photo-detail"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _mock_external_calls(mocker):
-    """Patch the async dispatch boundary so upload tests stay purely HTTP-layer."""
-    mocker.patch("gallery.tasks.process_fast_lane_asset.delay")
+    """Compatibility shim: the async dispatch boundary is stubbed module-wide."""
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _stub_fast_lane_dispatch(mocker):
+    """
+    Hard guardrail for this module: upload API tests never execute the real
+    Celery task, even if a future test forgets to call _mock_external_calls().
+    """
+    return mocker.patch("gallery.tasks.process_fast_lane_asset.delay")
 
 
 def _photo_list_url():
