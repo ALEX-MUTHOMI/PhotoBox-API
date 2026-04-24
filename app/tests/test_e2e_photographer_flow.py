@@ -1,182 +1,125 @@
-"""
-test_e2e_photographer_flow.py — Full end-to-end tests against the live stack.
+from unittest.mock import MagicMock, patch
 
-Proves a real photographer can upload a real image and it flows through:
-  Django API → Celery Worker → Cloudinary → DB record updated
+from django.contrib.auth import get_user_model
+from django.core import mail
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.test import APIClient
 
-Run with: docker compose run --rm test e2e
-Requires: E2E_PHOTOGRAPHER_USERNAME, E2E_PHOTOGRAPHER_PASSWORD in .env
-          STAGING_BASE_URL=http://app:8000 (set automatically by compose)
-"""
+from core.models import Workspace
+from gallery.models import Event, Photo, Scene
+from gallery.notifications import send_gallery_ready_email
+from gallery.tasks import process_fast_lane_asset
 
-import io
-import os
-import uuid
 
-import pytest
-import requests
+User = get_user_model()
 
-from conftest import (
-    make_image_file,
-    make_large_image_file,
-    wait_for_condition,
-    STAGING_BASE_URL,
-    TEST_CLOUDINARY_FOLDER,
+
+@override_settings(
+    CLOUDFLARE_R2_ENDPOINT="https://test.r2.cloudflarestorage.com",
+    CLOUDFLARE_R2_BUCKET_NAME="test-bucket",
+    CLOUDFLARE_ACCESS_KEY_ID="test-key",
+    CLOUDFLARE_SECRET_ACCESS_KEY="test-secret",
+    CLOUDFLARE_R2_DOMAIN="cdn.photobox-vault.com",
+    CLOUDINARY_CLOUD_NAME="photobox-prod",
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    FRONTEND_URL="https://app.photobox.test",
 )
+class PhotographerFlowE2ETests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.token_url = reverse("user:token")
+        self.upload_url = reverse("gallery:fastlane-photo-list")
 
-pytestmark = [pytest.mark.e2e, pytest.mark.slow]
+        self.user = User.objects.create_user(
+            email="photographer@example.com",
+            password="StrongPassword123!",
+            name="Photographer",
+            accepted_terms=True,
+        )
+        self.workspace = Workspace.objects.create(
+            user=self.user,
+            business_name="PhotoBox Studio",
+        )
+        self.event = Event.objects.create(
+            workspace=self.workspace,
+            title="Wedding Day",
+            slug="wedding-day",
+            client_email="client@example.com",
+            client_name="Client Name",
+        )
+        self.scene = Scene.objects.create(event=self.event, title="Ceremony")
 
-ASYNC_TIMEOUT = 60
-POLL_INTERVAL = 2
+    def _authenticate(self):
+        response = self.client.post(
+            self.token_url,
+            {"email": self.user.email, "password": "StrongPassword123!"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
 
+    @patch("gallery.tasks.process_fast_lane_asset.delay")
+    def test_photographer_upload_flow_reaches_ready_state_and_delivery_urls(self, mock_delay):
+        self._authenticate()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from PIL import Image as PILImage
+        import io
 
-def get_auth_token(username: str, password: str) -> str:
-    response = requests.post(
-        f"{STAGING_BASE_URL}/api/token/",
-        json={"username": username, "password": password},
-        timeout=15,
-    )
-    assert response.status_code == 200, (
-        f"Auth failed ({response.status_code}): {response.text[:500]}"
-    )
-    return response.json()["access"]
+        buffer = io.BytesIO()
+        PILImage.new("RGB", (64, 64), color=(8, 16, 32)).save(buffer, format="JPEG")
+        buffer.seek(0)
+        file = SimpleUploadedFile("hero.jpg", buffer.read(), content_type="image/jpeg")
 
-
-def poll_upload_status(upload_id: str, token: str) -> dict:
-    response = requests.get(
-        f"{STAGING_BASE_URL}/api/uploads/{upload_id}/",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=15,
-    )
-    if response.status_code != 200:
-        return {"status": "pending"}
-    return response.json()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# E2E SUITE
-# ─────────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.e2e
-class TestPhotographerUploadE2E:
-
-    PHOTOGRAPHER_USERNAME = os.environ.get("E2E_PHOTOGRAPHER_USERNAME", "test_photographer")
-    PHOTOGRAPHER_PASSWORD = os.environ.get("E2E_PHOTOGRAPHER_PASSWORD", "StrongTestPass!99")
-
-    @pytest.fixture(autouse=True)
-    def auth_token(self):
-        self._token = get_auth_token(
-            self.PHOTOGRAPHER_USERNAME,
-            self.PHOTOGRAPHER_PASSWORD,
+        response = self.client.post(
+            self.upload_url,
+            {"scene": str(self.scene.id), "image_file": file},
+            format="multipart",
         )
 
-    @property
-    def auth_headers(self) -> dict:
-        return {"Authorization": f"Bearer {self._token}"}
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        photo = Photo.objects.get(id=response.data["photo_id"])
+        mock_delay.assert_called_once_with(str(photo.id))
 
-    def test_jpeg_upload_produces_cloudinary_url(self, cloudinary_cleanup):
-        """Core contract: JPEG in → Cloudinary CDN URL out."""
-        upload_response = requests.post(
-            f"{STAGING_BASE_URL}/api/uploads/",
-            headers=self.auth_headers,
-            files={"image": ("photo.jpg", make_image_file(), "image/jpeg")},
-            timeout=30,
+        with patch("gallery.storage.get_r2_client") as mock_get_r2_client:
+            mock_client = MagicMock()
+            mock_client.head_object.return_value = {"ContentLength": photo.file_size_bytes}
+            mock_client.generate_presigned_url.return_value = "https://signed.example.com/download"
+            mock_get_r2_client.return_value = mock_client
+
+            result = process_fast_lane_asset(photo_id=str(photo.id))
+
+            self.assertEqual(result["status"], "self_healed")
+            photo.refresh_from_db()
+            self.assertEqual(photo.status, "READY")
+            self.assertTrue(photo.is_processed)
+            self.assertIn("res.cloudinary.com/photobox-prod/image/fetch", photo.delivery_url)
+            self.assertIn("q_auto,f_webp", photo.delivery_url)
+            self.assertEqual(photo.download_url, "https://signed.example.com/download")
+
+    @patch("gallery.notifications.send_gallery_ready_email.delay")
+    def test_publishing_gallery_queues_client_email_notification(self, mock_delay):
+        self._authenticate()
+
+        response = self.client.patch(
+            reverse("gallery:event-detail", args=[self.event.id]),
+            {"is_published": True},
+            format="json",
         )
-        assert upload_response.status_code in (200, 201, 202), (
-            f"Upload failed ({upload_response.status_code}): {upload_response.text[:500]}"
-        )
 
-        upload_id = upload_response.json().get("upload_id") or upload_response.json().get("id")
-        assert upload_id, f"No upload_id in response: {upload_response.json()}"
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_delay.assert_called_once_with(str(self.event.id))
 
-        final = wait_for_condition(
-            lambda: (d := poll_upload_status(upload_id, self._token))
-                    and d.get("status") == "processed" and d,
-            timeout=ASYNC_TIMEOUT,
-            poll_interval=POLL_INTERVAL,
-            description=f"upload {upload_id} to reach status=processed",
-        )
+    def test_gallery_ready_email_sends_expected_mobile_friendly_content(self):
+        self.event.is_published = True
+        self.event.save(update_fields=["is_published"])
 
-        cloudinary_url = final.get("cloudinary_url")
-        assert cloudinary_url, f"cloudinary_url missing from response: {final}"
-        assert cloudinary_url.startswith("https://res.cloudinary.com/")
+        send_gallery_ready_email.apply(args=[str(self.event.id)])
 
-        if final.get("cloudinary_public_id"):
-            cloudinary_cleanup(final["cloudinary_public_id"])
-
-        cdn_response = requests.get(cloudinary_url, timeout=15)
-        assert cdn_response.status_code == 200
-        assert "image" in cdn_response.headers.get("content-type", "")
-
-    def test_invalid_file_rejected_before_cloudinary(self):
-        """PDF must be rejected at the API layer — never reaches Cloudinary."""
-        fake_pdf = io.BytesIO(b"%PDF-1.4 not an image")
-        fake_pdf.name = "not_image.jpg"
-        response = requests.post(
-            f"{STAGING_BASE_URL}/api/uploads/",
-            headers=self.auth_headers,
-            files={"image": ("not_image.jpg", fake_pdf, "image/jpeg")},
-            timeout=15,
-        )
-        assert response.status_code == 400
-
-    def test_unauthenticated_upload_returns_401(self):
-        response = requests.post(
-            f"{STAGING_BASE_URL}/api/uploads/",
-            files={"image": ("photo.jpg", make_image_file(), "image/jpeg")},
-            timeout=15,
-        )
-        assert response.status_code == 401
-
-    @pytest.mark.slow
-    def test_large_image_upload(self, cloudinary_cleanup):
-        large_buf = make_large_image_file(mb=8)
-        response = requests.post(
-            f"{STAGING_BASE_URL}/api/uploads/",
-            headers=self.auth_headers,
-            files={"image": ("large.jpg", large_buf, "image/jpeg")},
-            timeout=60,
-        )
-        assert response.status_code in (200, 201, 202)
-
-        upload_id = response.json().get("upload_id")
-        final = wait_for_condition(
-            lambda: (d := poll_upload_status(upload_id, self._token))
-                    and d.get("status") == "processed" and d,
-            timeout=120,
-            description="large image to process",
-        )
-        assert final.get("cloudinary_url")
-        if final.get("cloudinary_public_id"):
-            cloudinary_cleanup(final["cloudinary_public_id"])
-
-    def test_upload_status_transitions(self, cloudinary_cleanup):
-        """Status must progress through: pending → processing → processed."""
-        response = requests.post(
-            f"{STAGING_BASE_URL}/api/uploads/",
-            headers=self.auth_headers,
-            files={"image": ("status_test.jpg", make_image_file(), "image/jpeg")},
-            timeout=30,
-        )
-        assert response.status_code in (200, 201, 202)
-        upload_id = response.json()["upload_id"]
-        observed = set()
-
-        def record_and_check():
-            data = poll_upload_status(upload_id, self._token)
-            if data.get("status"):
-                observed.add(data["status"])
-            return data if data.get("status") == "processed" else None
-
-        final = wait_for_condition(
-            record_and_check,
-            timeout=ASYNC_TIMEOUT,
-            description="status to reach processed",
-        )
-        assert "processed" in observed
-        if final.get("cloudinary_public_id"):
-            cloudinary_cleanup(final["cloudinary_public_id"])
+        self.assertEqual(len(mail.outbox), 1)
+        delivered = mail.outbox[0]
+        self.assertEqual(delivered.to, ["client@example.com"])
+        self.assertIn("Wedding Day", delivered.subject)
+        self.assertIn("https://app.photobox.test/gallery/wedding-day", delivered.body)

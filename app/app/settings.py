@@ -27,9 +27,36 @@ load_dotenv(dotenv_path=BASE_DIR / '.env')
 # ============================================================
 # 1. FAIL-FAST PERIMETER  —  halt before serving a broken app
 # ============================================================
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _detect_test_mode() -> bool:
+    """
+    Detect both Django's built-in runner and raw pytest invocations.
+
+    The live stack supports `docker compose run --rm test pytest ...`, so the
+    test-mode guard must not rely on the exact `manage.py test` argv shape.
+    """
+    if _env_flag("TESTING"):
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+
+    argv = [str(arg).lower() for arg in sys.argv]
+    if any(arg in {"test", "pytest", "py.test"} for arg in argv):
+        return True
+
+    return any("/tests/" in arg or "\\tests\\" in arg for arg in argv)
+
+
 # Skip credential checks when Django is only loading for the test runner.
 # The test block at the bottom injects safe stubs for all external services.
-_IS_TEST = 'test' in sys.argv
+_IS_TEST = _detect_test_mode()
+TESTING = _IS_TEST
 
 if not _IS_TEST:
     _missing = []
@@ -210,11 +237,11 @@ USE_TZ        = True
 mimetypes.add_type("text/css", ".css", True)
 
 STATIC_URL  = '/static/'
-STATIC_ROOT = BASE_DIR / 'static_root'
+STATIC_ROOT = Path(os.environ.get('STATIC_ROOT', BASE_DIR / 'static_root'))
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
 MEDIA_URL  = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media_root'
+MEDIA_ROOT = Path(os.environ.get('MEDIA_ROOT', BASE_DIR / 'media_root'))
 
 
 # ============================================================
@@ -498,6 +525,7 @@ TEST_RUNNER = 'core.utils.test_runner.EnterpriseTestRunner'
 #     All external service stubs live here — nowhere else.
 # ============================================================
 if _IS_TEST:
+    ALLOWED_HOSTS = list(dict.fromkeys(ALLOWED_HOSTS + ["testserver", "localhost"]))
 
     # -- Celery: run tasks synchronously, no broker required --
     CELERY_TASK_ALWAYS_EAGER    = True
@@ -533,6 +561,10 @@ if _IS_TEST:
     LEMON_SQUEEZY_STORE_ID           = os.environ.get('LEMON_SQUEEZY_STORE_ID',           '1')
     LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY   = os.environ.get('LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY',   'test-ls-webhook-secret')
     LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY = os.environ.get('LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY', '')
+    EMAIL_BACKEND = os.environ.get(
+        'EMAIL_BACKEND',
+        'django.core.mail.backends.locmem.EmailBackend',
+    )
 
     # -- Throttling --
     # Global throttling is left ON with LocMemCache so throttle-verification

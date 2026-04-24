@@ -1,6 +1,9 @@
 """
 conftest.py — Shared fixtures for the PhotoBox test suite.
 
+NOTE: This file was previously named confest.py (missing 'n') which caused
+pytest to silently ignore it. Renamed to conftest.py so pytest discovers it.
+
 Module map:
   gallery   — Photo & Scene models, upload tasks, Cloudinary service
   ingestion — Upload ingestion pipeline
@@ -43,7 +46,7 @@ CLOUDFLARE_WORKER_URL = os.environ.get(
 # This must match EXACTLY what you named the URL field in gallery/models.py
 # If it is 'url', 'image', or 'file', change it here.
 # ─────────────────────────────────────────────────────────────────────────────
-PHOTO_CDN_URL_FIELD = "image_url" 
+PHOTO_CDN_URL_FIELD = "image_url"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +125,7 @@ def make_zip_bomb(layers: int = 3) -> io.BytesIO:
             zf.writestr("bomb.bin", data)
         data = buf.getvalue()
     outer = io.BytesIO(data)
-    outer.name = "photo.jpg" 
+    outer.name = "photo.jpg"
     return outer
 
 
@@ -167,7 +170,7 @@ def make_gif_with_script() -> io.BytesIO:
     gif = (
         b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00"
         b"!\xf9\x04\x00\x00\x00\x00\x00"
-        b"!\xfe\x1a<script>alert(1)</script>\x00" 
+        b"!\xfe\x1a<script>alert(1)</script>\x00"
         b",\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
     )
     buf = io.BytesIO(gif)
@@ -179,13 +182,11 @@ def make_gif_with_script() -> io.BytesIO:
 # MODEL FACTORIES — Database Mocks
 # ─────────────────────────────────────────────────────────────────────────────
 
-# BUG FIX 2: Added SceneFactory to satisfy the Not-Null constraint
 class SceneFactory(DjangoModelFactory):
     class Meta:
         model = "gallery.Scene"
 
     id = factory.LazyFunction(uuid.uuid4)
-    # Adjust this if your Scene model requires a 'title' or 'name'
     title = factory.Sequence(lambda n: f"Automated Test Scene {n}")
 
 
@@ -194,10 +195,9 @@ class PhotoFactory(DjangoModelFactory):
         model = "gallery.Photo"
 
     id = factory.LazyFunction(uuid.uuid4)
-    
-    # BUG FIX 2: Link the Photo to the Scene
+
     scene = factory.SubFactory(SceneFactory)
-    
+
     file_size_bytes = factory.Faker("random_int", min=10_240, max=10_485_760)
     status = "pending"
     original_filename = factory.Sequence(lambda n: f"photo_{n:04d}.jpg")
@@ -231,7 +231,6 @@ def photographer_user(db):
     from django.contrib.auth import get_user_model
     User = get_user_model()
     return User.objects.create_user(
-        username=f"photographer_{uuid.uuid4().hex[:8]}",
         email=f"test_{uuid.uuid4().hex[:6]}@photostudio.test",
         password="StrongTestPass!99",
     )
@@ -242,7 +241,6 @@ def second_photographer_user(db):
     from django.contrib.auth import get_user_model
     User = get_user_model()
     return User.objects.create_user(
-        username=f"photographer_{uuid.uuid4().hex[:8]}",
         email=f"other_{uuid.uuid4().hex[:6]}@photostudio.test",
         password="AnotherStrongPass!77",
     )

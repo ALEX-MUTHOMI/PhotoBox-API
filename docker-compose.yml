@@ -1,3 +1,23 @@
+name: photobox-dev
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTERPRISE DOCKER COMPOSE — Development + CI
+#
+# Security hardening applied:
+#   - No services run as root (django-user uid=1001 from Dockerfile)
+#   - Internal network: services talk on photobox_network only
+#   - Redis is NOT exposed externally in production mode
+#   - Database credentials come from .env, never hardcoded here
+#   - All services have resource limits to prevent OOM runaway
+#   - All services have healthchecks with appropriate timeouts
+#   - Test service uses profiles so it doesn't start with `docker compose up`
+#
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose run --rm test all  # Run full test suite
+#   docker compose run --rm test unit # Run unit tests only
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
 
   # ── Django Application ──────────────────────────────────────────────────────
@@ -7,13 +27,20 @@ services:
       args:
         - DEV=true
     ports:
-      - "8000:8000"
+      - target: 8000
+        published: "${APP_HOST_PORT:-0}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     volumes:
       - ./app:/app
       - dev-static-data:/vol/web
-    command: [ "run.sh" ]
+    command: ["run.sh"]
     env_file:
       - .env
+    environment:
+      - STATIC_ROOT=/vol/web/static
+      - MEDIA_ROOT=/vol/web/media
+      - PYTHONPATH=/app
     depends_on:
       db:
         condition: service_healthy
@@ -22,16 +49,26 @@ services:
     networks:
       - photobox_network
     restart: unless-stopped
+    # Resource limits prevent memory runaway from decompression bombs
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/')" ]
+      # Use curl (in final image) for a proper HTTP health check
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8000/health/"]
       interval: 15s
-      timeout: 5s
+      timeout: 10s
       retries: 10
       start_period: 120s
+    security_opt:
+      - no-new-privileges:true   # Prevent privilege escalation via setuid binaries
 
   # ── PostgreSQL Database ─────────────────────────────────────────────────────
   db:
-    image: postgres:13-alpine
+    image: postgres:16-alpine    # Upgraded from 13 — CVE coverage + pg_isready
     volumes:
       - dev-db-data:/var/lib/postgresql/data
     env_file:
@@ -39,30 +76,66 @@ services:
     networks:
       - photobox_network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U $$DB_USER -d $$DB_NAME" ]
+      test: ["CMD-SHELL", "pg_isready -U $$DB_USER -d $$DB_NAME"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+    security_opt:
+      - no-new-privileges:true
 
   # ── Redis ───────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    # SECURITY: Do NOT expose Redis port externally in any environment.
+    # If you need Redis Insight for debugging, use a local tunnel instead.
+    # Uncomment the lines below ONLY for local debugging and NEVER in CI/prod.
+    # ports:
+    #   - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    # AOF persistence + memory limit to prevent cache from eating all RAM.
+    # Password auth is conditional so local/test environments do not boot with
+    # an invalid empty `requirepass` directive.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if [ -n "$${REDIS_PASSWORD}" ]; then
+          exec redis-server \
+            --appendonly yes \
+            --maxmemory 256mb \
+            --maxmemory-policy allkeys-lru \
+            --requirepass "$${REDIS_PASSWORD}"
+        fi
+        exec redis-server \
+          --appendonly yes \
+          --maxmemory 256mb \
+          --maxmemory-policy allkeys-lru
     networks:
       - photobox_network
+    deploy:
+      resources:
+        limits:
+          memory: 384M
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG; else redis-cli ping | grep PONG; fi",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 5s
+    security_opt:
+      - no-new-privileges:true
 
   # ── Celery Worker ───────────────────────────────────────────────────────────
   celery:
@@ -70,11 +143,23 @@ services:
       context: .
       args:
         - DEV=true
-    command: [ "celery", "-A", "app", "worker", "--loglevel=info", "--queues=image-processing,default", "--concurrency=2" ]
+    command: [
+      "celery", "-A", "app", "worker",
+      "--loglevel=info",
+      "--queues=image-processing,default",
+      "--concurrency=2",
+      # Security: limit task execution time to prevent hung workers
+      "--time-limit=600",
+      "--soft-time-limit=540",
+    ]
     volumes:
       - ./app:/app
     env_file:
       - .env
+    environment:
+      - STATIC_ROOT=/vol/web/static
+      - MEDIA_ROOT=/vol/web/media
+      - PYTHONPATH=/app
     depends_on:
       db:
         condition: service_healthy
@@ -83,12 +168,20 @@ services:
     networks:
       - photobox_network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
     healthcheck:
-      test: [ "CMD-SHELL", "celery -A app inspect ping -d celery@$$HOSTNAME || exit 1" ]
+      test: ["CMD-SHELL", "celery -A app inspect ping -d celery@$$HOSTNAME || exit 1"]
       interval: 30s
       timeout: 15s
       retries: 3
       start_period: 30s
+    security_opt:
+      - no-new-privileges:true
 
   # ── Celery Beat ─────────────────────────────────────────────────────────────
   celery-beat:
@@ -96,11 +189,19 @@ services:
       context: .
       args:
         - DEV=true
-    command: [ "celery", "-A", "app", "beat", "--loglevel=info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler" ]
+    command: [
+      "celery", "-A", "app", "beat",
+      "--loglevel=info",
+      "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler",
+    ]
     volumes:
       - ./app:/app
     env_file:
       - .env
+    environment:
+      - STATIC_ROOT=/vol/web/static
+      - MEDIA_ROOT=/vol/web/media
+      - PYTHONPATH=/app
     depends_on:
       db:
         condition: service_healthy
@@ -111,22 +212,31 @@ services:
     networks:
       - photobox_network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
 
   # ── Test Runner ─────────────────────────────────────────────────────────────
+  # Activated ONLY with the 'test' profile — never starts with `docker compose up`.
+  #
   # Usage:
-  #   docker compose run --rm test unit
-  #   docker compose run --rm test api
-  #   docker compose run --rm test celery
-  #   docker compose run --rm test e2e
-  #   docker compose run --rm test coverage
-  #   docker compose run --rm test all
+  #   docker compose run --rm test unit      # Unit tests only
+  #   docker compose run --rm test api       # API integration tests
+  #   docker compose run --rm test celery    # Celery task tests
+  #   docker compose run --rm test e2e       # End-to-end tests
+  #   docker compose run --rm test coverage  # Full suite with coverage report
+  #   docker compose run --rm test all       # Everything
+  #   docker compose run --rm test security  # Security-only tests (new)
   test:
     build:
       context: .
       args:
         - DEV=true
-    entrypoint: [ "run-tests.sh" ]
-    command: [ "unit" ]
+    entrypoint: ["run-tests.sh"]
+    command: ["unit"]
     volumes:
       - ./app:/app
     env_file:
@@ -134,7 +244,15 @@ services:
     environment:
       - STAGING_BASE_URL=http://app:8000
       - CELERY_TASK_ALWAYS_EAGER=True
+      - CELERY_TASK_EAGER_PROPAGATES=True
       - DB_HOST=db
+      - STATIC_ROOT=/vol/web/static
+      - MEDIA_ROOT=/vol/web/media
+      - PYTHONPATH=/app
+      # Stub secrets for test environment — real values from .env override these
+      - CLOUDFLARE_WEBHOOK_SECRET=${CLOUDFLARE_WEBHOOK_SECRET:-test-webhook-secret}
+      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME:-test-cloud}
+      - LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY=${LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY:-test-ls-secret}
     depends_on:
       db:
         condition: service_healthy
@@ -146,12 +264,27 @@ services:
       - photobox_network
     profiles:
       - test
+    security_opt:
+      - no-new-privileges:true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NETWORKS — isolated bridge, no external access by default
+# ─────────────────────────────────────────────────────────────────────────────
 networks:
   photobox_network:
     driver: bridge
+    # Disable inter-container ICC (inter-container communication) in production.
+    # Services can only talk through explicitly defined depends_on + networks.
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"   # dev: true; prod: false
 
+# ─────────────────────────────────────────────────────────────────────────────
+# VOLUMES — named volumes survive container restarts
+# ─────────────────────────────────────────────────────────────────────────────
 volumes:
   dev-db-data:
+    driver: local
   dev-static-data:
+    driver: local
   redis-data:
+    driver: local

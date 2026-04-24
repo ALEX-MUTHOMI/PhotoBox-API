@@ -10,10 +10,11 @@ from django.db.models.functions import Greatest
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from rest_framework import mixins, parsers, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from core.models import Workspace
@@ -26,6 +27,58 @@ from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
+CLIENT_GALLERY_ACCESS_SESSION_KEY = "client_gallery_access"
+
+
+def _client_session_allows_event(request, event) -> bool:
+    """
+    Fail-closed session contract for verified client gallery access.
+
+    The frontend can store a per-gallery access marker after the client passes
+    the gallery PIN or equivalent verification flow. Until then, anonymous
+    requests are denied and no download URL is minted.
+    """
+    session = getattr(request, "session", None)
+    if session is None:
+        return False
+
+    access_map = session.get(CLIENT_GALLERY_ACCESS_SESSION_KEY, {})
+    if not isinstance(access_map, dict):
+        return False
+
+    candidate = access_map.get(str(event.id))
+    if candidate is None:
+        candidate = access_map.get(event.slug)
+
+    if isinstance(candidate, dict):
+        if not candidate.get("verified", False):
+            return False
+        recorded_slug = candidate.get("slug")
+        return not recorded_slug or recorded_slug == event.slug
+
+    return bool(candidate)
+
+
+def _authorize_event_download_access(request, event) -> dict:
+    """
+    Unified download authorizer for photographer-owned and client-gallery flows.
+    """
+    user = getattr(request, "user", None)
+    if user and user.is_authenticated and event.workspace.user_id == user.id:
+        return {
+            "principal": "photographer",
+            "requested_by_user_id": str(user.id),
+        }
+
+    if event.is_published and _client_session_allows_event(request, event):
+        return {
+            "principal": "client",
+            "requested_by_user_id": None,
+        }
+
+    raise PermissionDenied(
+        "You do not have permission to access downloads for this gallery."
+    )
 
 
 # ==========================================
@@ -64,6 +117,11 @@ class EventViewSet(viewsets.ModelViewSet):
 
     # RATE LIMITING: Prevent Denial of Database Rows (No infinite bot creation)
     throttle_classes = [FastLaneUploadThrottle]
+
+    def get_permissions(self):
+        if getattr(self, 'action', None) == 'bulk_download':
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
 
     def get_queryset(self):
         """TENANT ISOLATION: Only retrieve Events owned by the authenticated user."""
@@ -105,6 +163,41 @@ class EventViewSet(viewsets.ModelViewSet):
                 f"[PUBLISH] Gallery-ready email queued for Event {event.id} "
                 f"to {event.client_email}"
             )
+
+    @action(detail=True, methods=['post'], url_path='bulk-download')
+    def bulk_download(self, request, pk=None):
+        """
+        Queue the high-resolution gallery archive flow.
+
+        The actual ZIP assembly remains asynchronous by design so the API never
+        streams a large archive from the Django worker thread.
+        """
+        from gallery.tasks import prepare_gallery_bulk_download
+
+        event = Event.objects.select_related('workspace__user').filter(pk=pk).first()
+        if event is None:
+            raise NotFound("Event not found.")
+
+        access = _authorize_event_download_access(request, event)
+        async_result = prepare_gallery_bulk_download.delay(
+            str(event.id),
+            requested_by_user_id=access['requested_by_user_id'],
+            requester_kind=access['principal'],
+        )
+
+        return Response(
+            {
+                "status": "queued",
+                "task_id": async_result.id,
+                "event_id": str(event.id),
+                "delivery_mode": "async_bulk_zip",
+                "message": (
+                    "Bulk gallery download accepted. The archive will be prepared "
+                    "asynchronously so large downloads never run on the request thread."
+                ),
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 # ==========================================
@@ -193,6 +286,11 @@ class PhotoFastLaneViewSet(
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
     pagination_class = FastLanePhotoPagination
 
+    def get_permissions(self):
+        if getattr(self, 'action', None) == 'download_url':
+            return [AllowAny()]
+        return [permission() for permission in self.permission_classes]
+
     def get_queryset(self):
         """
         TENANT ISOLATION AUDIT (Phase 4):
@@ -215,7 +313,9 @@ class PhotoFastLaneViewSet(
         Return a short-lived presigned R2 download URL for a single photo.
 
         This endpoint performs an explicit ownership check so cross-tenant access
-        attempts fail closed before a signed URL can ever be minted.
+        attempts fail closed before a signed URL can ever be minted. It also
+        supports verified client-gallery sessions so mobile users can tap
+        Download inside the frontend without exposing long-lived URLs in email.
         """
         photo = Photo.objects.select_related(
             'scene__event__workspace__user'
@@ -224,9 +324,11 @@ class PhotoFastLaneViewSet(
         if photo is None:
             raise NotFound("Photo not found.")
 
-        if photo.scene.event.workspace.user_id != request.user.id:
-            raise PermissionDenied(
-                "You do not have permission to generate a download URL for this photo."
+        access = _authorize_event_download_access(request, photo.scene.event)
+
+        if photo.status != 'READY' or not photo.is_processed:
+            raise ValidationError(
+                "Download URL unavailable. The asset is not ready for download."
             )
 
         download_url = photo.download_url
@@ -235,7 +337,15 @@ class PhotoFastLaneViewSet(
                 "Download URL unavailable. The asset is not ready for download."
             )
 
-        return Response({"download_url": download_url}, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "download_url": download_url,
+                "expires_in_seconds": 60,
+                "delivery_mode": "direct_r2_presigned_get",
+                "requester_kind": access["principal"],
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def perform_create(self, serializer):
         """
