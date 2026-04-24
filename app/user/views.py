@@ -131,7 +131,25 @@ class CookieTokenRefreshView(TokenRefreshView):
             if hasattr(request.data, '_mutable'):
                 request.data._mutable = True
             request.data['refresh'] = refresh_cookie
-        return super().post(request, *args, **kwargs)
+        response = super().post(request, *args, **kwargs)
+
+        if response.status_code == 200:
+            rotated_refresh = response.data.get('refresh')
+            if rotated_refresh:
+                del response.data['refresh']
+
+                seven_days_in_seconds = 60 * 60 * 24 * 7
+                response.set_cookie(
+                    key='refresh',
+                    value=rotated_refresh,
+                    max_age=seven_days_in_seconds,
+                    expires=seven_days_in_seconds,
+                    secure=True,
+                    httponly=True,
+                    samesite='Lax'
+                )
+
+        return response
 
 
 # ==========================================

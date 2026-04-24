@@ -2,12 +2,14 @@ import json
 import hmac
 import hashlib
 import logging
+from datetime import timedelta
+
 from django.conf import settings
+from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
-from datetime import timedelta
 
 # Import the aliased MediaAsset from gallery
 from gallery.models import MediaAsset
@@ -66,17 +68,21 @@ class CloudflareWebhookView(APIView):
         r2_object_key = payload.get('r2_object_key')
         size = payload.get('size')
         
-        # 6. Replay Protection (Graceful fallback for test compatibility)
+        # 6. Replay Protection (fail closed)
         webhook_timestamp_str = request.META.get('HTTP_Webhook-Timestamp') or request.META.get('HTTP_WEBHOOK_TIMESTAMP')
-        if webhook_timestamp_str:
-            try:
-                # Assuming unix timestamp in seconds
-                webhook_dt = timezone.datetime.fromtimestamp(int(webhook_timestamp_str), tz=timezone.utc)
-                if timezone.now() - webhook_dt > timedelta(minutes=5):
-                    logger.warning(f"Replay attack detected. Timestamp: {webhook_timestamp_str}")
-                    return Response({"error": "Webhook expired"}, status=status.HTTP_403_FORBIDDEN)
-            except ValueError:
-                pass
+        if not webhook_timestamp_str:
+            logger.warning("Missing webhook timestamp.")
+            return Response({"error": "Missing timestamp"}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            webhook_dt = timezone.datetime.fromtimestamp(int(webhook_timestamp_str), tz=timezone.utc)
+        except ValueError:
+            logger.warning("Invalid webhook timestamp: %s", webhook_timestamp_str)
+            return Response({"error": "Invalid timestamp"}, status=status.HTTP_403_FORBIDDEN)
+
+        if timezone.now() - webhook_dt > timedelta(minutes=5):
+            logger.warning("Replay attack detected. Timestamp: %s", webhook_timestamp_str)
+            return Response({"error": "Webhook expired"}, status=status.HTTP_403_FORBIDDEN)
 
         # 7. Action Filter
         if action != 'PutObject':
@@ -100,15 +106,18 @@ class CloudflareWebhookView(APIView):
             asset.save(update_fields=['status'])
             return Response({"status": "quarantined"}, status=status.HTTP_200_OK)
 
-        # 10. Update state 
-        # In a purely EDA architecture, this would publish to a queue (e.g. SQS)
-        # For now, keeping idempotency and synchrony as implied by the tests:
-        if asset.status != "UPLOADED":
-            asset.status = "UPLOADED"
-            asset.save(update_fields=['status'])
-            
-            # FUTURE: Trigger downstream async processing
-            # e.g., trigger_image_processing.delay(asset.id)
-            
-        logger.info(f"Asset {r2_object_key} successfully marked as UPLOADED")
+        # 10. Update state atomically
+        with transaction.atomic():
+            locked_asset = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+
+            if locked_asset.status == "READY" and locked_asset.is_processed:
+                logger.info("Asset %s already READY. Idempotent skip.", r2_object_key)
+                return Response({"status": "already_ready"}, status=status.HTTP_200_OK)
+
+            if locked_asset.status != "QUARANTINED":
+                locked_asset.status = "READY"
+                locked_asset.is_processed = True
+                locked_asset.save(update_fields=['status', 'is_processed'])
+
+        logger.info("Asset %s successfully marked as READY", r2_object_key)
         return Response({"status": "success"}, status=status.HTTP_200_OK)

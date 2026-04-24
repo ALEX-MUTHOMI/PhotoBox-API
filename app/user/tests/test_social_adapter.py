@@ -17,20 +17,56 @@ class HardenedSocialAccountAdapterTests(TestCase):
         self.adapter = HardenedSocialAccountAdapter()
         self.request = RequestFactory().get("/api/user/google/")
 
-    def _sociallogin(self, email, verified=True, uid="google-uid-1"):
-        email_address = SimpleNamespace(email=email, verified=verified)
+    def _sociallogin(self, email, verified=True, uid="google-uid-1", provider="google"):
+        email_address = None
+        if email is not None:
+            email_address = SimpleNamespace(email=email, verified=verified)
         return SimpleNamespace(
             user=SimpleNamespace(email=email),
             account=SimpleNamespace(
-                provider="google",
+                provider=provider,
                 uid=uid,
                 extra_data={"email_verified": verified},
             ),
-            email_addresses=[email_address],
+            email_addresses=[email_address] if email_address else [],
         )
 
     def test_unverified_google_email_is_rejected(self):
         sociallogin = self._sociallogin("victim@example.com", verified=False)
+
+        with self.assertRaises(ImmediateHttpResponse) as ctx:
+            self.adapter.pre_social_login(self.request, sociallogin)
+
+        self.assertEqual(ctx.exception.response.status_code, 400)
+
+    def test_unverified_apple_email_is_rejected(self):
+        sociallogin = self._sociallogin(
+            "victim@example.com",
+            verified=False,
+            uid="apple-uid-1",
+            provider="apple",
+        )
+
+        with self.assertRaises(ImmediateHttpResponse) as ctx:
+            self.adapter.pre_social_login(self.request, sociallogin)
+
+        self.assertEqual(ctx.exception.response.status_code, 400)
+
+    def test_unverified_microsoft_email_is_rejected(self):
+        sociallogin = self._sociallogin(
+            "victim@example.com",
+            verified=False,
+            uid="microsoft-uid-1",
+            provider="microsoft",
+        )
+
+        with self.assertRaises(ImmediateHttpResponse) as ctx:
+            self.adapter.pre_social_login(self.request, sociallogin)
+
+        self.assertEqual(ctx.exception.response.status_code, 400)
+
+    def test_missing_email_is_rejected(self):
+        sociallogin = self._sociallogin(None, verified=True, uid="google-uid-2")
 
         with self.assertRaises(ImmediateHttpResponse) as ctx:
             self.adapter.pre_social_login(self.request, sociallogin)
@@ -63,5 +99,15 @@ class HardenedSocialAccountAdapterTests(TestCase):
             extra_data={"email": "linked@example.com", "email_verified": True},
         )
         sociallogin = self._sociallogin("linked@example.com", verified=True, uid="known-google-uid")
+
+        self.adapter.pre_social_login(self.request, sociallogin)
+
+    def test_new_verified_social_user_is_allowed(self):
+        sociallogin = self._sociallogin(
+            "newuser@example.com",
+            verified=True,
+            uid="google-uid-3",
+            provider="google",
+        )
 
         self.adapter.pre_social_login(self.request, sociallogin)

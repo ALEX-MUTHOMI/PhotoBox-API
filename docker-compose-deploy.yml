@@ -1,11 +1,37 @@
-version: "3.9"
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTERPRISE PRODUCTION DEPLOYMENT — docker-compose-deploy.yml
+#
+# SECURITY CRITICAL DIFFERENCES FROM docker-compose.yml (dev):
+#   - No source code volume mounts (./app:/app) — code baked into image
+#   - All secrets via environment variables from host (not .env file committed to git)
+#   - Redis NOT accessible from outside the internal network
+#   - PostgreSQL NOT accessible from outside the internal network
+#   - All services: no-new-privileges, resource limits
+#   - App runs behind nginx proxy with TLS termination
+#   - Celery: --without-gossip --without-mingle for reduced attack surface
+#   - No DEV=true build arg in production builds
+#
+# DEPLOYMENT CHECKLIST:
+#   [ ] Set all environment variables on the host (not in .env committed to git)
+#   [ ] Use a secrets manager (Doppler, AWS Secrets Manager, etc.) to inject vars
+#   [ ] Verify nginx SSL configuration before go-live
+#   [ ] Run `docker compose -f docker-compose-deploy.yml config` to validate
+#   [ ] Set DJANGO_SECRET_KEY to a 50+ character random string
+#   [ ] Ensure DB_PASS, REDIS_PASSWORD are rotated from dev values
+# ─────────────────────────────────────────────────────────────────────────────
 
 services:
+
+  # ── Django Application ──────────────────────────────────────────────────────
   app:
     build:
       context: .
+      # SECURITY: Never build with DEV=true in production
+      args:
+        - DEV=false
     restart: always
     volumes:
+      # Only the static/media volume — NO source code mount
       - static-data:/vol/web
     environment:
       - DB_HOST=db
@@ -14,11 +40,49 @@ services:
       - DB_PASS=${DB_PASS}
       - SECRET_KEY=${DJANGO_SECRET_KEY}
       - ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS}
+      - CLOUDFLARE_R2_ENDPOINT=${CLOUDFLARE_R2_ENDPOINT}
+      - CLOUDFLARE_R2_BUCKET_NAME=${CLOUDFLARE_R2_BUCKET_NAME}
+      - CLOUDFLARE_R2_DOMAIN=${CLOUDFLARE_R2_DOMAIN}
+      - CLOUDFLARE_ACCESS_KEY_ID=${CLOUDFLARE_ACCESS_KEY_ID}
+      - CLOUDFLARE_SECRET_ACCESS_KEY=${CLOUDFLARE_SECRET_ACCESS_KEY}
+      - CLOUDFLARE_WEBHOOK_SECRET=${CLOUDFLARE_WEBHOOK_SECRET}
+      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - LEMON_SQUEEZY_API_KEY=${LEMON_SQUEEZY_API_KEY}
+      - LEMON_SQUEEZY_STORE_ID=${LEMON_SQUEEZY_STORE_ID}
+      - LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY=${LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY}
+      - LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY=${LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - SENTRY_ENVIRONMENT=production
+      - DEBUG=0
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       - db
+      - redis
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
 
+  # ── PostgreSQL Database ─────────────────────────────────────────────────────
   db:
-    image: postgres:13-alpine
+    image: postgres:16-alpine
     restart: always
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -26,7 +90,132 @@ services:
       - POSTGRES_DB=${DB_NAME}
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASS}
+    # SECURITY: No ports exposed — only accessible via internal network
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis-data:/data
+    # SECURITY: No ports exposed — only accessible via internal network
+    # Password protected (REDIS_PASSWORD from environment)
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --protected-mode yes
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Celery Worker ───────────────────────────────────────────────────────────
+  celery:
+    build:
+      context: .
+      args:
+        - DEV=false
+    command: [
+      "celery", "-A", "app", "worker",
+      "--loglevel=warning",          # Less verbose in production
+      "--queues=image-processing,default",
+      "--concurrency=4",
+      "--time-limit=600",            # Hard kill after 10 minutes
+      "--soft-time-limit=540",       # Graceful SIGTERM at 9 minutes
+      "--without-gossip",            # Reduce Celery cluster chatter (smaller attack surface)
+      "--without-mingle",            # Skip worker state sync on startup
+      "--without-heartbeat",         # Disable heartbeat to reduce Redis traffic
+    ]
+    restart: always
+    environment:
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CLOUDFLARE_R2_ENDPOINT=${CLOUDFLARE_R2_ENDPOINT}
+      - CLOUDFLARE_R2_BUCKET_NAME=${CLOUDFLARE_R2_BUCKET_NAME}
+      - CLOUDFLARE_ACCESS_KEY_ID=${CLOUDFLARE_ACCESS_KEY_ID}
+      - CLOUDFLARE_SECRET_ACCESS_KEY=${CLOUDFLARE_SECRET_ACCESS_KEY}
+      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - SENTRY_ENVIRONMENT=production
+    depends_on:
+      - db
+      - redis
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Celery Beat ─────────────────────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: .
+      args:
+        - DEV=false
+    command: [
+      "celery", "-A", "app", "beat",
+      "--loglevel=warning",
+      "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler",
+    ]
+    restart: always
+    environment:
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - celery
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Nginx Reverse Proxy ─────────────────────────────────────────────────────
   proxy:
     build:
       context: ./proxy
@@ -34,10 +223,35 @@ services:
     depends_on:
       - app
     ports:
-      - 80:8000
+      # HTTPS only — HTTP is redirected to HTTPS in nginx config
+      - "443:443"
+      - "80:80"
     volumes:
       - static-data:/vol/static
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NETWORKS — isolated internal network, no external bridge
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  photobox_internal:
+    driver: bridge
+    internal: false   # Set to true if all external traffic must go through proxy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VOLUMES
+# ─────────────────────────────────────────────────────────────────────────────
 volumes:
   postgres-data:
+    driver: local
   static-data:
+    driver: local
+  redis-data:
+    driver: local

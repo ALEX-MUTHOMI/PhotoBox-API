@@ -10,7 +10,9 @@ EMAIL POLICY:
   - Only sends if Event.client_email is set.
   - Idempotent: repeated publishes will re-send (photographers may re-notify).
   - Uses Django's email backend (configured in settings.py).
-  - Renders a branded HTML template with photographer logo + gallery URL.
+  - Renders a branded HTML template with photographer logo + frontend gallery URL.
+  - Never sends a raw presigned R2 URL by email. Download links are minted on demand
+    inside the client gallery so the 60-second TTL is evaluated at click time.
 """
 import logging
 from celery import shared_task
@@ -69,7 +71,7 @@ def send_gallery_ready_email(self, event_id: str):
     # Retrieve subscription tier from workspace owner
     tier = 'FREE'
     if hasattr(workspace.user, 'subscription'):
-        tier = getattr(workspace.user.subscription, 'plan', 'FREE').upper()
+        tier = 'PRO' if getattr(workspace.user.subscription, 'is_pro', False) else 'FREE'
 
     ttl_days = ttl_map.get(tier, 30)
 

@@ -28,7 +28,8 @@ from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
 from django.db import OperationalError, transaction
-from django.db.models import F
+from django.db.models import F, Value
+from django.db.models.functions import Greatest
 from gallery.models import Photo
 logger = logging.getLogger(__name__)
 
@@ -357,17 +358,9 @@ def _handle_abandoned_upload(
         # GREATEST(storage_used_bytes - refund, 0)
         from core.models import Workspace  # noqa: PLC0415
         Workspace.objects.filter(id=workspace_id).update(
-            storage_used_bytes=F("storage_used_bytes")
-            - refund_bytes
-            + (
-                # Add back the overshoot if storage < refund
-                # Equivalent to: MAX(0, refund - storage_used_bytes) clamped
-                # This is the pure-SQL way to do GREATEST(x - n, 0)
-                # We use a conditional approach via annotate + Case in production,
-                # but the raw F() with a floor guard here is sufficient because
-                # storage_used_bytes is always >= the photo's size at this point
-                # (it was incremented atomically at upload time).
-                0
+            storage_used_bytes=Greatest(
+                Value(0),
+                F("storage_used_bytes") - refund_bytes,
             ),
         )
 
@@ -415,6 +408,68 @@ def _retry_or_fail(
             "reason": "max_retries_exceeded",
             "photo_id": photo_id,
         }
+
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+    name="gallery.tasks.prepare_gallery_bulk_download",
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def prepare_gallery_bulk_download(
+    self,
+    event_id: str,
+    *,
+    requested_by_user_id: Optional[str] = None,
+    requester_kind: str = "photographer",
+) -> Dict[str, Any]:
+    """
+    Queue a bulk gallery download job.
+
+    This is the enterprise-safe scaffold for the ZIP lane. The actual archive
+    assembly can be added later without changing the API contract:
+      1. The API returns 202 immediately.
+      2. Celery owns the heavy I/O and compression work.
+      3. Django never streams a gallery ZIP from the request thread.
+    """
+    from gallery.models import Event, Photo  # noqa: PLC0415
+
+    event = (
+        Event.objects
+        .select_related("workspace__user")
+        .filter(id=event_id)
+        .first()
+    )
+    if event is None:
+        logger.warning("[BULK DOWNLOAD] Event %s not found.", event_id)
+        return {"status": "missing", "event_id": event_id}
+
+    ready_assets = (
+        Photo.objects
+        .filter(scene__event_id=event.id, status="READY")
+        .exclude(r2_object_key__isnull=True)
+        .exclude(r2_object_key="")
+        .count()
+    )
+
+    logger.info(
+        "[BULK DOWNLOAD] Queued gallery archive scaffold for event=%s requester=%s user=%s ready_assets=%s",
+        event_id,
+        requester_kind,
+        requested_by_user_id,
+        ready_assets,
+    )
+
+    return {
+        "status": "queued",
+        "event_id": event_id,
+        "requester_kind": requester_kind,
+        "requested_by_user_id": requested_by_user_id,
+        "ready_assets": ready_assets,
+        "zip_strategy": "async_celery_stub",
+    }
 
 
 # ---------------------------------------------------------------------------
