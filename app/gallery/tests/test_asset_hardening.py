@@ -54,17 +54,23 @@ def _generate_valid_image(filename="hardening_test.jpg"):
     return SimpleUploadedFile(filename, buffer.read(), content_type="image/jpeg")
 
 
-def _sign_webhook(payload_bytes: bytes, secret: str = TEST_WEBHOOK_SECRET) -> str:
-    return hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+def _sign_webhook(timestamp: int, payload_bytes: bytes, secret: str = TEST_WEBHOOK_SECRET) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"{timestamp}.".encode("ascii") + payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _post_signed_webhook(client, payload: dict, *, timestamp: int | None = None):
-    payload_bytes = json.dumps(payload).encode("utf-8")
+    transmitted_ts = timestamp if timestamp is not None else None
+    signed_ts = int(time.time()) if transmitted_ts is None else int(transmitted_ts)
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
-        "HTTP_X_CLOUDFLARE_SIGNATURE": _sign_webhook(payload_bytes),
+        "HTTP_X_CLOUDFLARE_SIGNATURE": _sign_webhook(signed_ts, payload_bytes),
     }
-    if timestamp is not None:
-        headers["HTTP_WEBHOOK_TIMESTAMP"] = str(timestamp)
+    if transmitted_ts is not None:
+        headers["HTTP_WEBHOOK_TIMESTAMP"] = str(transmitted_ts)
     return client.post(
         R2_WEBHOOK_URL,
         data=payload_bytes,

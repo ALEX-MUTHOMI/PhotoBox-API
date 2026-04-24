@@ -51,10 +51,11 @@ class PipelineIntegrityTests(TestCase):
         self.scene = Scene.objects.create(event=self.event, title="Pipeline Scene")
 
     def _post_webhook(self, payload, timestamp=None):
-        payload_bytes = json.dumps(payload).encode("utf-8")
+        ts = timestamp or int(time.time())
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         signature = hmac.new(
             TEST_SECRET.encode("utf-8"),
-            payload_bytes,
+            f"{ts}.".encode("ascii") + payload_bytes,
             hashlib.sha256,
         ).hexdigest()
         return self.client.post(
@@ -62,7 +63,7 @@ class PipelineIntegrityTests(TestCase):
             data=payload_bytes,
             content_type="application/json",
             HTTP_X_CLOUDFLARE_SIGNATURE=signature,
-            HTTP_WEBHOOK_TIMESTAMP=str(timestamp or int(time.time())),
+            HTTP_WEBHOOK_TIMESTAMP=str(ts),
         )
 
     @patch("gallery.storage.get_r2_client")
@@ -168,4 +169,3 @@ class PipelineIntegrityTests(TestCase):
         photo.refresh_from_db()
         self.assertEqual(photo.status, "READY")
         self.assertTrue(photo.is_processed)
-

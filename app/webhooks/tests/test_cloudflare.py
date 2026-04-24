@@ -46,11 +46,15 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "test-webhook-secret",
         ).encode("utf-8")
 
-    def _generate_signature(self, payload_bytes):
-        return hmac.new(self.secret, payload_bytes, hashlib.sha256).hexdigest()
+    def _generate_signature(self, payload_bytes, timestamp):
+        return hmac.new(
+            self.secret,
+            f"{timestamp}.".encode("ascii") + payload_bytes,
+            hashlib.sha256,
+        ).hexdigest()
 
     def _post(self, payload, *, signature=None, timestamp=None):
-        payload_bytes = json.dumps(payload).encode("utf-8")
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         headers = {}
         if signature is not None:
             headers["HTTP_X_CLOUDFLARE_SIGNATURE"] = signature
@@ -69,10 +73,14 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 50000,
             "action": "PutObject",
         }
+        timestamp = int(time.time())
         response = self._post(
             payload,
-            signature=self._generate_signature(json.dumps(payload).encode("utf-8")),
-            timestamp=int(time.time()),
+            signature=self._generate_signature(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                timestamp,
+            ),
+            timestamp=timestamp,
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -98,9 +106,13 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 50000,
             "action": "PutObject",
         }
+        signed_timestamp = int(time.time())
         response = self._post(
             payload,
-            signature=self._generate_signature(json.dumps(payload).encode("utf-8")),
+            signature=self._generate_signature(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                signed_timestamp,
+            ),
             timestamp=None,
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -123,7 +135,11 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 50000,
             "action": "PutObject",
         }
-        signature = self._generate_signature(json.dumps(original_payload).encode("utf-8"))
+        timestamp = int(time.time())
+        signature = self._generate_signature(
+            json.dumps(original_payload, separators=(",", ":")).encode("utf-8"),
+            timestamp,
+        )
 
         tampered_payload = original_payload.copy()
         tampered_payload["size"] = 999999
@@ -131,7 +147,43 @@ class CloudflareWebhookSecurityTests(APITestCase):
         response = self._post(
             tampered_payload,
             signature=signature,
-            timestamp=int(time.time()),
+            timestamp=timestamp,
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_forged_timestamp_rejection(self):
+        payload = {
+            "r2_object_key": self.asset.r2_object_key,
+            "size": 50000,
+            "action": "PutObject",
+        }
+        signed_timestamp = int(time.time())
+        signature = self._generate_signature(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            signed_timestamp,
+        )
+
+        response = self._post(
+            payload,
+            signature=signature,
+            timestamp=signed_timestamp + 20,
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_expired_timestamp_rejection(self):
+        payload = {
+            "r2_object_key": self.asset.r2_object_key,
+            "size": 50000,
+            "action": "PutObject",
+        }
+        stale_timestamp = int(time.time()) - 600
+        response = self._post(
+            payload,
+            signature=self._generate_signature(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                stale_timestamp,
+            ),
+            timestamp=stale_timestamp,
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -141,8 +193,11 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 50000,
             "action": "PutObject",
         }
-        signature = self._generate_signature(json.dumps(payload).encode("utf-8"))
         timestamp = int(time.time())
+        signature = self._generate_signature(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            timestamp,
+        )
 
         self._post(payload, signature=signature, timestamp=timestamp)
         res2 = self._post(payload, signature=signature, timestamp=timestamp)
@@ -157,10 +212,14 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 5000000000,
             "action": "PutObject",
         }
+        timestamp = int(time.time())
         response = self._post(
             payload,
-            signature=self._generate_signature(json.dumps(payload).encode("utf-8")),
-            timestamp=int(time.time()),
+            signature=self._generate_signature(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                timestamp,
+            ),
+            timestamp=timestamp,
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -173,10 +232,14 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 50000,
             "action": "DeleteObject",
         }
+        timestamp = int(time.time())
         response = self._post(
             payload,
-            signature=self._generate_signature(json.dumps(payload).encode("utf-8")),
-            timestamp=int(time.time()),
+            signature=self._generate_signature(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                timestamp,
+            ),
+            timestamp=timestamp,
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -189,10 +252,14 @@ class CloudflareWebhookSecurityTests(APITestCase):
             "size": 50000,
             "action": "PutObject",
         }
+        timestamp = int(time.time())
         response = self._post(
             payload,
-            signature=self._generate_signature(json.dumps(payload).encode("utf-8")),
-            timestamp=int(time.time()),
+            signature=self._generate_signature(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                timestamp,
+            ),
+            timestamp=timestamp,
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)

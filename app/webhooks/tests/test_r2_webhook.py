@@ -17,8 +17,12 @@ User = get_user_model()
 TEST_SECRET = "test-webhook-secret-do-not-use-in-prod"
 
 
-def _sign(payload_bytes: bytes, secret: str = TEST_SECRET) -> str:
-    return hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+def _sign(timestamp: int, payload_bytes: bytes, secret: str = TEST_SECRET) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"{timestamp}.".encode("ascii") + payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
@@ -45,13 +49,31 @@ class R2WebhookSecurityTests(TestCase):
             is_processed=False,
         )
 
-    def _post(self, payload, *, timestamp=None, signature_secret=TEST_SECRET, include_signature=True):
-        payload_bytes = json.dumps(payload).encode("utf-8")
+    def _post(
+        self,
+        payload,
+        *,
+        timestamp=None,
+        signed_timestamp=None,
+        signature_secret=TEST_SECRET,
+        include_signature=True,
+    ):
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        transmitted_ts = timestamp if timestamp is not None else None
+        signed_ts = (
+            int(time.time())
+            if signed_timestamp is None and transmitted_ts is None
+            else (signed_timestamp if signed_timestamp is not None else transmitted_ts)
+        )
         headers = {}
         if include_signature:
-            headers["HTTP_X_CLOUDFLARE_SIGNATURE"] = _sign(payload_bytes, signature_secret)
-        if timestamp is not None:
-            headers["HTTP_WEBHOOK_TIMESTAMP"] = str(timestamp)
+            headers["HTTP_X_CLOUDFLARE_SIGNATURE"] = _sign(
+                signed_ts,
+                payload_bytes,
+                signature_secret,
+            )
+        if transmitted_ts is not None:
+            headers["HTTP_WEBHOOK_TIMESTAMP"] = str(transmitted_ts)
         return self.client.post(
             self.url,
             data=payload_bytes,
@@ -79,6 +101,26 @@ class R2WebhookSecurityTests(TestCase):
         response = self._post(
             {"action": "PutObject", "r2_object_key": self.asset.r2_object_key, "size": 2048},
             timestamp=None,
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "PENDING")
+
+    def test_forged_timestamp_returns_403(self):
+        signed_ts = int(time.time())
+        response = self._post(
+            {"action": "PutObject", "r2_object_key": self.asset.r2_object_key, "size": 2048},
+            timestamp=signed_ts + 15,
+            signed_timestamp=signed_ts,
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "PENDING")
+
+    def test_expired_timestamp_returns_403(self):
+        response = self._post(
+            {"action": "PutObject", "r2_object_key": self.asset.r2_object_key, "size": 2048},
+            timestamp=int(time.time()) - 600,
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.asset.refresh_from_db()
@@ -123,4 +165,3 @@ class R2WebhookSecurityTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "ignored")
-

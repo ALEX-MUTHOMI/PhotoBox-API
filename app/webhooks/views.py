@@ -1,25 +1,24 @@
 import json
-import hmac
-import hashlib
 import logging
-from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.utils import timezone
 
+from core.security import verify_webhook_signature, verify_webhook_timestamp
 # Import the aliased MediaAsset from gallery
 from gallery.models import MediaAsset
 
 logger = logging.getLogger(__name__)
+_MAX_WEBHOOK_PAYLOAD_BYTES = 5 * 1024 * 1024
+_WEBHOOK_REPLAY_WINDOW_SECONDS = getattr(settings, "WEBHOOK_REPLAY_WINDOW_SECONDS", 300)
 
 class CloudflareWebhookView(APIView):
     """
     Ingests Cloudflare R2 webhooks.
-    Validates HMAC signature and updates MediaAsset state asynchronously.
+    Validates timestamp-bound HMAC signatures and updates MediaAsset state.
     """
     authentication_classes = [] # Disable global auth
     permission_classes = []     # Disable global permissions
@@ -31,7 +30,7 @@ class CloudflareWebhookView(APIView):
     def post(self, request, *args, **kwargs):
         # 1. Size Limit before parsing (Memory Exhaustion DoS Protection)
         content_length = request.META.get('CONTENT_LENGTH')
-        if content_length and int(content_length) > 5 * 1024 * 1024: # 5MB limit
+        if content_length and int(content_length) > _MAX_WEBHOOK_PAYLOAD_BYTES:
             logger.warning("Webhook payload too large.")
             return Response({"error": "Payload too large"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -44,20 +43,38 @@ class CloudflareWebhookView(APIView):
             logger.warning("Missing Cloudflare Signature")
             return Response({"error": "Missing signature"}, status=status.HTTP_403_FORBIDDEN)
 
-        # 4. Validate HMAC Signature (Timing Attack Resistant)
-        # SECURITY FIX: Was previously using CLOUDFLARE_SECRET_ACCESS_KEY (the R2 IAM key!)
-        # Must use the dedicated webhook signing secret, NOT the storage credentials.
-        secret = getattr(settings, 'CLOUDFLARE_WEBHOOK_SECRET', '').encode('utf-8')
-        if not secret:
-            logger.critical("[WEBHOOK] CLOUDFLARE_WEBHOOK_SECRET is not configured!")
-            return Response({"error": "Server misconfiguration"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        expected_signature = hmac.new(secret, payload_bytes, hashlib.sha256).hexdigest()
-        
-        if not hmac.compare_digest(expected_signature, cloudflare_signature):
-            logger.warning("Invalid Cloudflare Signature")
+        # 4. Replay Protection (fail closed) with canonical timestamp validation
+        webhook_timestamp_str = (
+            request.META.get('HTTP_WEBHOOK_TIMESTAMP')
+            or request.META.get('HTTP_X_WEBHOOK_TIMESTAMP')
+        )
+        timestamp_valid, timestamp_reason, canonical_timestamp = verify_webhook_timestamp(
+            webhook_timestamp_str,
+            max_age_seconds=_WEBHOOK_REPLAY_WINDOW_SECONDS,
+        )
+        if not timestamp_valid:
+            logger.warning("Webhook timestamp rejected. reason=%s", timestamp_reason)
+            return Response({"error": "Invalid timestamp"}, status=status.HTTP_403_FORBIDDEN)
+
+        # 5. Validate HMAC over "<timestamp>.<raw_payload>"
+        signature_valid, signature_reason = verify_webhook_signature(
+            payload_bytes,
+            canonical_timestamp,
+            cloudflare_signature,
+            secret_setting="CLOUDFLARE_WEBHOOK_SECRET",
+        )
+        if not signature_valid:
+            if signature_reason in ("secret_not_configured", "secret_encoding_error"):
+                logger.critical(
+                    "[WEBHOOK] CLOUDFLARE_WEBHOOK_SECRET is not configured correctly. "
+                    "reason=%s",
+                    signature_reason,
+                )
+                return Response({"error": "Server misconfiguration"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.warning("Invalid Cloudflare Signature. reason=%s", signature_reason)
             return Response({"error": "Invalid signature"}, status=status.HTTP_403_FORBIDDEN)
 
-        # 5. Parse JSON Payload
+        # 6. Parse JSON Payload
         try:
             payload = json.loads(payload_bytes)
         except json.JSONDecodeError:
@@ -67,22 +84,6 @@ class CloudflareWebhookView(APIView):
         action = payload.get('action')
         r2_object_key = payload.get('r2_object_key')
         size = payload.get('size')
-        
-        # 6. Replay Protection (fail closed)
-        webhook_timestamp_str = request.META.get('HTTP_Webhook-Timestamp') or request.META.get('HTTP_WEBHOOK_TIMESTAMP')
-        if not webhook_timestamp_str:
-            logger.warning("Missing webhook timestamp.")
-            return Response({"error": "Missing timestamp"}, status=status.HTTP_403_FORBIDDEN)
-
-        try:
-            webhook_dt = timezone.datetime.fromtimestamp(int(webhook_timestamp_str), tz=timezone.utc)
-        except ValueError:
-            logger.warning("Invalid webhook timestamp: %s", webhook_timestamp_str)
-            return Response({"error": "Invalid timestamp"}, status=status.HTTP_403_FORBIDDEN)
-
-        if timezone.now() - webhook_dt > timedelta(minutes=5):
-            logger.warning("Replay attack detected. Timestamp: %s", webhook_timestamp_str)
-            return Response({"error": "Webhook expired"}, status=status.HTTP_403_FORBIDDEN)
 
         # 7. Action Filter
         if action != 'PutObject':
