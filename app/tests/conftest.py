@@ -13,6 +13,7 @@ Architecture note (post-refactor):
 import io
 import os
 import struct
+import tempfile
 import time
 import uuid
 import logging
@@ -32,8 +33,15 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-FIXTURES_DIR.mkdir(exist_ok=True)
+# Test runs can execute against a bind-mounted /app tree that is not writable
+# to the unprivileged container user, so generated artifacts live under /tmp.
+FIXTURES_DIR = Path(
+    os.environ.get(
+        "PHOTOBOX_TEST_FIXTURES_DIR",
+        str(Path(tempfile.gettempdir()) / "photobox_fixtures"),
+    )
+)
+FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
 
 TEST_CLOUDINARY_FOLDER = "test-automated"
 STAGING_BASE_URL = os.environ.get("STAGING_BASE_URL", "http://localhost:8000")
