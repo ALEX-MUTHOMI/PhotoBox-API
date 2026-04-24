@@ -157,7 +157,6 @@ class Photo(models.Model):
 
     @property
     def delivery_url(self):
-    # def delivery_url(self) -> str | None:
         """
         PHASE 3: Cloudinary Fetch Proxy URL.
 

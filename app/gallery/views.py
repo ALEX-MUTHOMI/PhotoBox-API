@@ -3,6 +3,8 @@ Views for the Gallery API (The Pixieset Standard).
 """
 import logging
 import os
+import struct
+from urllib.parse import unquote
 
 from django.db import transaction
 from django.db.models import F
@@ -28,6 +30,80 @@ from PIL import UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 CLIENT_GALLERY_ACCESS_SESSION_KEY = "client_gallery_access"
+_ALLOWED_TRAILING_BYTES = b"\x00\t\r\n "
+_MAX_ORIGINAL_FILENAME_LEN = Photo._meta.get_field("original_filename").max_length
+
+
+def _has_non_padding_trailing_bytes(payload: bytes) -> bool:
+    """Allow only inert padding after a well-formed image container terminator."""
+    return any(byte not in _ALLOWED_TRAILING_BYTES for byte in payload)
+
+
+def _assert_no_polyglot_payload(image_file, image_format: str) -> None:
+    """
+    Reject image files that append a second payload after the real image.
+
+    Pillow verifies the image container itself, but formats like JPEG can still
+    carry extra trailing bytes that turn the upload into a JPEG+ZIP polyglot.
+    """
+    image_file.seek(0)
+    raw = image_file.read()
+    image_file.seek(0)
+
+    normalized_format = (image_format or "").upper()
+
+    if normalized_format == "JPEG":
+        jpeg_eoi = raw.rfind(b"\xff\xd9")
+        if jpeg_eoi == -1:
+            raise ValidationError("Malware Shield: Uploaded JPEG is structurally corrupted.")
+        if _has_non_padding_trailing_bytes(raw[jpeg_eoi + 2:]):
+            raise ValidationError("Polyglot payload detected: JPEG contains trailing data.")
+        return
+
+    if normalized_format == "PNG":
+        png_iend = raw.rfind(b"\x49\x45\x4e\x44\xae\x42\x60\x82")
+        if png_iend == -1:
+            raise ValidationError("Malware Shield: Uploaded PNG is structurally corrupted.")
+        if _has_non_padding_trailing_bytes(raw[png_iend + 8:]):
+            raise ValidationError("Polyglot payload detected: PNG contains trailing data.")
+        return
+
+    if normalized_format == "WEBP":
+        if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
+            raise ValidationError("Malware Shield: Uploaded WEBP is structurally corrupted.")
+        declared_size = struct.unpack("<I", raw[4:8])[0] + 8
+        if declared_size <= len(raw) and _has_non_padding_trailing_bytes(raw[declared_size:]):
+            raise ValidationError("Polyglot payload detected: WEBP contains trailing data.")
+
+
+def _sanitize_original_filename(raw_name: str) -> str:
+    """
+    Normalize incoming upload filenames before they reach the database.
+
+    The stored name is metadata only, so we collapse traversal attempts down to
+    the basename and reject null bytes / control characters that Postgres or
+    downstream storage layers would interpret unsafely.
+    """
+    if not raw_name:
+        raise ValidationError("Filename is required.")
+
+    decoded_name = unquote(str(raw_name))
+    if "\x00" in decoded_name:
+        raise ValidationError("Filename contains invalid control characters.")
+
+    candidate = os.path.basename(decoded_name.replace("\\", "/")).strip()
+    if not candidate or candidate in {".", ".."}:
+        raise ValidationError("Filename is invalid.")
+
+    if any(ord(char) < 32 for char in candidate):
+        raise ValidationError("Filename contains invalid control characters.")
+
+    if len(candidate) > _MAX_ORIGINAL_FILENAME_LEN:
+        raise ValidationError(
+            f"Filename exceeds maximum length of {_MAX_ORIGINAL_FILENAME_LEN} characters."
+        )
+
+    return candidate
 
 
 def _client_session_allows_event(request, event) -> bool:
@@ -382,6 +458,7 @@ class PhotoFastLaneViewSet(
         #   Pass 2: Reopen the file to safely inspect metadata (dimensions, format).
         # Single-pass pattern (verify + metadata in one `with`) is a silent Pillow bug.
         try:
+            detected_format = None
             # PASS 1: Structural integrity — rejects corrupted files and disguised executables
             image_file.seek(0)
             probe = PILImage.open(image_file)
@@ -394,6 +471,8 @@ class PhotoFastLaneViewSet(
                     raise ValidationError("Decompression Bomb detected: image pixel count exceeds 100MP.")
                 if img.format not in ['JPEG', 'PNG', 'WEBP']:
                     raise ValidationError("Invalid Magic Bytes. Not a genuine JPEG, PNG, or WEBP.")
+                detected_format = img.format
+            _assert_no_polyglot_payload(image_file, detected_format)
         except UnidentifiedImageError:
             raise ValidationError("Malware Shield: Uploaded file is disguised or structurally corrupted.")
 
@@ -415,7 +494,7 @@ class PhotoFastLaneViewSet(
                 storage_used_bytes=F('storage_used_bytes') + image_file.size
             )
 
-            safe_filename = os.path.basename(image_file.name)
+            safe_filename = _sanitize_original_filename(image_file.name)
 
             # 5. DB WRITE — is_processed=False (the Celery task will flip this to True)
             # This is the LAST thing the web thread does. No Cloudinary. No external I/O.

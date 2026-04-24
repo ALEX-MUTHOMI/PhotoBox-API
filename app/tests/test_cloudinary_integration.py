@@ -8,7 +8,6 @@ Run with: docker compose run --rm test cloudinary
 Requires: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET in .env
 """
 
-import io
 import requests
 import pytest
 import cloudinary

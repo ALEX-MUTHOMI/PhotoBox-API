@@ -9,7 +9,7 @@ These tests are intentionally pure unit tests:
 
 import datetime
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -69,6 +69,7 @@ class TestProcessFastLaneAsset:
         photo = PhotoFactory(
             r2_object_key=f"fast-lane/tenant_1/{uuid.uuid4()}/hero.jpg",
         )
+        r2_client_stub.head_object.side_effect = None
         r2_client_stub.head_object.return_value = {"ContentLength": photo.file_size_bytes}
 
         result = process_fast_lane_asset.apply(args=[str(photo.pk)])
@@ -87,6 +88,7 @@ class TestProcessFastLaneAsset:
             original_filename="hero.jpg",
             r2_object_key="",
         )
+        r2_client_stub.head_object.side_effect = None
         r2_client_stub.head_object.return_value = {"ContentLength": photo.file_size_bytes}
 
         result = process_fast_lane_asset.apply(args=[str(photo.pk)])
@@ -123,16 +125,15 @@ class TestProcessFastLaneAsset:
         workspace.refresh_from_db()
         assert workspace.storage_used_bytes == 512
 
-    def test_task_marks_failed_after_retry_budget_is_exhausted(self, mocker, r2_client_stub):
+    def test_task_marks_failed_after_retry_budget_is_exhausted(self, r2_client_stub):
         photo = PhotoFactory(r2_object_key=f"fast-lane/tenant_1/{uuid.uuid4()}/retry.jpg")
         r2_client_stub.head_object.side_effect = OSError("ssl handshake failure")
-        mocker.patch.object(
+        with patch.object(
             process_fast_lane_asset,
             "retry",
             side_effect=MaxRetriesExceededError(),
-        )
-
-        result = process_fast_lane_asset.apply(args=[str(photo.pk)])
+        ):
+            result = process_fast_lane_asset.apply(args=[str(photo.pk)])
 
         assert result.successful()
         assert result.get()["reason"] == "max_retries_exceeded"

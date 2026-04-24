@@ -17,7 +17,6 @@ import tempfile
 import time
 import uuid
 import logging
-import zlib
 import zipfile
 from pathlib import Path
 
