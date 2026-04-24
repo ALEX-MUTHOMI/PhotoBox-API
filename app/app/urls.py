@@ -8,12 +8,10 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf.urls.static import static
 from django.conf import settings
-from core.views import health_check
 
 from core import views as core_views
 
 urlpatterns = [
-    path('health/', health_check),
     path('admin/', admin.site.urls),
     path('api/health-check/', core_views.health_check, name='health-check'),
     path('api/schema/', SpectacularAPIView.as_view(), name='api-schema'),
@@ -26,6 +24,7 @@ urlpatterns = [
 
     # --- PHOTOBOX SAAS ROUTING ---
     path('api/gallery/', include('gallery.urls')),
+    path('api/galleries/', include('gallery.client_urls')),
 
     path('api/billing/', include('billing.urls')),
 
