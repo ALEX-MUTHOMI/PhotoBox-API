@@ -291,6 +291,9 @@ REST_FRAMEWORK = {
         'user': '1000/day',
         'fast_lane_upload': '30/minute',
         'heavy_lane_ticket': '10/minute',
+        'magic_link_send': '3/minute',
+        'guest_access': '10/minute',
+        'password_reset_request': '3/minute',
     },
 }
 
@@ -312,6 +315,12 @@ SIMPLE_JWT = {
     # from a too-short SECRET_KEY in test/CI environments.
     'SIGNING_KEY': os.environ.get('JWT_SIGNING_KEY', SECRET_KEY),
 }
+
+GALLERY_ACCESS_COOKIE_NAME = os.environ.get('GALLERY_ACCESS_COOKIE_NAME', 'gallery_access')
+GALLERY_ACCESS_COOKIE_SAMESITE = os.environ.get('GALLERY_ACCESS_COOKIE_SAMESITE', 'Lax')
+GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS = int(
+    os.environ.get('GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS', 3600)
+)
 
 
 # ============================================================
@@ -375,6 +384,10 @@ CLOUDFLARE_R2_DOMAIN            = os.environ.get('CLOUDFLARE_R2_DOMAIN', '')
 CLOUDFLARE_ACCESS_KEY_ID        = os.environ.get('CLOUDFLARE_ACCESS_KEY_ID', '')
 CLOUDFLARE_SECRET_ACCESS_KEY    = os.environ.get('CLOUDFLARE_SECRET_ACCESS_KEY', '')
 CLOUDFLARE_WEBHOOK_SECRET       = os.environ.get('CLOUDFLARE_WEBHOOK_SECRET', '')
+CLOUDFLARE_R2_DELETE_ENDPOINT   = os.environ.get('CLOUDFLARE_R2_DELETE_ENDPOINT', '')
+CLOUDFLARE_R2_DELETE_BUCKET_NAME = os.environ.get('CLOUDFLARE_R2_DELETE_BUCKET_NAME', '')
+CLOUDFLARE_R2_DELETE_ACCESS_KEY_ID = os.environ.get('CLOUDFLARE_R2_DELETE_ACCESS_KEY_ID', '')
+CLOUDFLARE_R2_DELETE_SECRET_ACCESS_KEY = os.environ.get('CLOUDFLARE_R2_DELETE_SECRET_ACCESS_KEY', '')
 
 
 # ============================================================
@@ -430,6 +443,8 @@ GALLERY_TTL_DAYS = {
     'PRO':        365,
     'ENTERPRISE': 0,
 }
+GALLERY_ARCHIVE_TTL_HOURS = int(os.environ.get('GALLERY_ARCHIVE_TTL_HOURS', 24))
+CURRENT_TOS_VERSION = os.environ.get('CURRENT_TOS_VERSION', '2026-04')
 
 # GDPR: soft-delete on expiry, then hard-delete from R2 after this grace period.
 GALLERY_HARD_DELETE_GRACE_DAYS = 30

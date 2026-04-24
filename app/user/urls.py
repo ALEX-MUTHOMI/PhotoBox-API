@@ -23,6 +23,8 @@ urlpatterns = [
 
     # SECURITY: Identity Federation (Google) with Account Takeover protection
     path('google/', views.GoogleLoginView.as_view(), name='google_login'),
+    path('password-reset/', views.PasswordResetRequestView.as_view(), name='password_reset'),
+    path('password-reset/confirm/', views.PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
 
     # ==========================================
     # 3. THE VIP SECTION (Profile Management)

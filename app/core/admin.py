@@ -32,7 +32,7 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ['email', 'name']
     list_filter = ['is_active', 'is_staff']
     ordering = ['email']
-    list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb']
+    list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb', 'accepted_terms', 'tos_version']
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
@@ -41,7 +41,9 @@ class UserAdmin(BaseUserAdmin):
             'fields': (
                 'storage_limit_gb',
                 # Assuming accepted_terms exists on your User model based on earlier migrations
-                'accepted_terms'
+                'accepted_terms',
+                'tos_accepted_at',
+                'tos_version',
             )
         }),
         (
@@ -57,7 +59,7 @@ class UserAdmin(BaseUserAdmin):
         (_('Important dates'), {'fields': ('last_login',)}),
     )
 
-    readonly_fields = ['last_login']
+    readonly_fields = ['last_login', 'tos_accepted_at', 'tos_version']
 
     # ENGINEER FIX 4: Activate the bridge. This displays the SubscriptionInline we built above.
     inlines = [SubscriptionInline]

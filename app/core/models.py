@@ -65,6 +65,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
 
     accepted_terms = models.BooleanField(default=False)
+    tos_accepted_at = models.DateTimeField(blank=True, null=True)
+    tos_version = models.CharField(max_length=64, blank=True)
 
     # Billing State
     stripe_customer_id = models.CharField(max_length=255, blank=True)

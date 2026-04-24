@@ -69,7 +69,7 @@ class SceneSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Scene
-        fields = ['id', 'event', 'title', 'display_order']
+        fields = ['id', 'event', 'title', 'display_order', 'visibility']
         read_only_fields = ['id']
 
     def update(self, instance, validated_data):
@@ -113,7 +113,7 @@ class PhotoFastLaneSerializer(serializers.ModelSerializer):
     class Meta:
         model = Photo
         fields = [
-            'id', 'scene', 'image_file', 'original_filename', 'file_size_bytes',
+            'id', 'scene', 'visibility', 'image_file', 'original_filename', 'file_size_bytes',
             'is_processed', 'status', 'blurhash',
             # Delivery layer
             'delivery_url', 'download_url', 'aspect_ratio',

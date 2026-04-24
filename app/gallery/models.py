@@ -1,7 +1,7 @@
 import uuid
 import logging
-from django.db import models
 from django.conf import settings
+from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth.hashers import make_password, check_password
 
@@ -9,6 +9,16 @@ from django.contrib.auth.hashers import make_password, check_password
 from core.models import Workspace
 
 logger = logging.getLogger(__name__)
+
+
+class VisibilityChoices(models.TextChoices):
+    PUBLIC = 'PUBLIC', 'Public'
+    CLIENT_ONLY = 'CLIENT_ONLY', 'Client Only'
+
+
+class GalleryAccessRole(models.TextChoices):
+    CLIENT = 'CLIENT', 'Client'
+    GUEST = 'GUEST', 'Guest'
 
 class Event(models.Model):
     """
@@ -89,6 +99,12 @@ class Scene(models.Model):
 
     title = models.CharField(max_length=100)
     display_order = models.IntegerField(default=0)
+    visibility = models.CharField(
+        max_length=20,
+        choices=VisibilityChoices.choices,
+        default=VisibilityChoices.PUBLIC,
+        db_index=True,
+    )
 
     class Meta:
         ordering = ['display_order', 'title']
@@ -116,6 +132,12 @@ class Photo(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     scene = models.ForeignKey(Scene, on_delete=models.CASCADE, related_name='photos')
+    visibility = models.CharField(
+        max_length=20,
+        choices=VisibilityChoices.choices,
+        default=VisibilityChoices.PUBLIC,
+        db_index=True,
+    )
 
     # --- PILLAR 1: THE EDA UPGRADE (Asynchronous State Machine) ---
     # These fields allow the Ingestion App and Celery Workers to track files without downloading them.
@@ -157,6 +179,7 @@ class Photo(models.Model):
 
     @property
     def delivery_url(self):
+    # def delivery_url(self) -> str | None:
         """
         PHASE 3: Cloudinary Fetch Proxy URL.
 
@@ -255,4 +278,103 @@ class Photo(models.Model):
 # By aliasing it here, the ingestion tests pass instantly, the database remains a single table,
 # and we don't have to rewrite thousands of lines of your legacy frontend code.
 MediaAsset = Photo
+Gallery = Event
+
+
+class ClientAllowlist(models.Model):
+    """
+    Approved main-client email addresses for a gallery.
+
+    These entries define who is allowed to receive single-use magic links.
+    """
+    gallery = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='client_allowlist')
+    email = models.EmailField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['gallery', 'email'],
+                name='unique_allowlisted_client_per_gallery',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['gallery', 'email']),
+        ]
+
+    def __str__(self):
+        return f"{self.gallery.title} -> {self.email}"
+
+
+class GalleryMagicLink(models.Model):
+    """
+    Stores only the SHA-256 hash of an opaque client-access token.
+
+    Raw tokens are never persisted in the database, which sharply reduces the
+    blast radius of a database leak.
+    """
+    gallery = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='magic_links')
+    email = models.EmailField()
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['gallery', 'email']),
+        ]
+
+    def __str__(self):
+        return f"Magic link for {self.email} ({self.gallery.title})"
+
+
+class GalleryAccessSession(models.Model):
+    """
+    Audit trail for passwordless gallery access.
+
+    Clients and guests are not full Django users; this table records who
+    authenticated into which gallery and with which scope.
+    """
+    gallery = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='access_sessions')
+    email = models.EmailField()
+    role = models.CharField(max_length=20, choices=GalleryAccessRole.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['gallery', 'email']),
+            models.Index(fields=['gallery', 'role']),
+        ]
+
+    def __str__(self):
+        return f"{self.gallery.title} [{self.role}] {self.email}"
+
+
+class GalleryArchiveJob(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        PROCESSING = 'PROCESSING', 'Processing'
+        COMPLETED = 'COMPLETED', 'Completed'
+        FAILED = 'FAILED', 'Failed'
+
+    gallery = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='archive_jobs')
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    r2_zip_key = models.CharField(max_length=1024, blank=True, null=True)
+    expires_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['gallery', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.gallery.title} archive [{self.status}]"
 
