@@ -103,13 +103,13 @@ class PhotoFastLaneSerializer(serializers.ModelSerializer):
     image_file = serializers.FileField(required=True)
 
     # PHASE 3: Delivery layer — all read-only, derived from model properties
-    delivery_url   = serializers.ReadOnlyField()
-    download_url   = serializers.ReadOnlyField()
-    aspect_ratio   = serializers.ReadOnlyField()
+    delivery_url = serializers.ReadOnlyField()
+    download_url = serializers.ReadOnlyField()
+    aspect_ratio = serializers.ReadOnlyField()
 
     # Backward compat aliases (deprecated — will be removed in v2)
-    r2_download_url           = serializers.ReadOnlyField()
-    cloudinary_thumbnail_url  = serializers.ReadOnlyField()
+    r2_download_url = serializers.ReadOnlyField()
+    cloudinary_thumbnail_url = serializers.ReadOnlyField()
 
     class Meta:
         model = Photo

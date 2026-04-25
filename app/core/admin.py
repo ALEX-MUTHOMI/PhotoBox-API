@@ -95,7 +95,7 @@ class UserAdmin(BaseUserAdmin):
             # Revoke API keys and passwords
             user.set_unusable_password()
             user.save()
-        
+
         self.message_user(request, f"Successfully anonymized {queryset.count()} user(s) in accordance with GDPR.")
 
     actions = [gdpr_scrub_user]
@@ -110,4 +110,3 @@ class WorkspaceAdmin(admin.ModelAdmin):
 # Register the core models
 admin.site.register(models.User, UserAdmin)
 admin.site.register(models.Workspace, WorkspaceAdmin)
-
