@@ -464,7 +464,7 @@ def _get_archive_photos_queryset(job: GalleryArchiveJob):
     reject_on_worker_lost=True,
 )
 def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
-    from gallery.models import GalleryArchiveJob, Photo  # noqa: PLC0415
+    from gallery.models import GalleryArchiveJob  # noqa: PLC0415
     from gallery.storage import get_r2_client, upload_local_file_to_r2  # noqa: PLC0415
 
     try:
