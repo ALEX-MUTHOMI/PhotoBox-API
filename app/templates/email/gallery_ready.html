@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Your Photos are Ready</title>
+  <style>
+    /* Reset */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0f0f0f;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+
+    .wrapper {
+      width: 100%;
+      background-color: #0f0f0f;
+      padding: 40px 0;
+    }
+
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #1a1a1a;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #2a2a2a;
+    }
+
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      padding: 40px 40px 30px;
+      text-align: center;
+    }
+
+    .logo {
+      max-height: 60px;
+      max-width: 200px;
+      margin-bottom: 20px;
+    }
+
+    .photographer-name {
+      color: #a0aec0;
+      font-size: 13px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+    }
+
+    .event-title {
+      color: #ffffff;
+      font-size: 28px;
+      font-weight: 700;
+      margin: 0;
+      line-height: 1.2;
+    }
+
+    /* Body */
+    .body {
+      padding: 40px;
+    }
+
+    .greeting {
+      color: #e2e8f0;
+      font-size: 16px;
+      margin: 0 0 20px;
+    }
+
+    .message {
+      color: #a0aec0;
+      font-size: 15px;
+      line-height: 1.7;
+      margin: 0 0 30px;
+    }
+
+    /* CTA Button */
+    .cta-wrapper {
+      text-align: center;
+      margin: 30px 0;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #ffffff !important;
+      text-decoration: none;
+      padding: 16px 40px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    /* Details Card */
+    .details-card {
+      background-color: #252525;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 20px 24px;
+      margin: 24px 0;
+    }
+
+    .details-label {
+      color: #718096;
+      font-size: 11px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      margin: 0 0 6px;
+    }
+
+    .details-value {
+      color: #e2e8f0;
+      font-size: 14px;
+      margin: 0 0 16px;
+    }
+
+    .details-value:last-child { margin-bottom: 0; }
+
+    /* Download note */
+    .download-note {
+      background-color: #1a2744;
+      border-left: 3px solid #667eea;
+      border-radius: 0 6px 6px 0;
+      padding: 14px 18px;
+      margin: 20px 0;
+    }
+
+    .download-note p {
+      color: #a0aec0;
+      font-size: 13px;
+      margin: 0;
+      line-height: 1.6;
+    }
+
+    /* Footer */
+    .footer {
+      border-top: 1px solid #2a2a2a;
+      padding: 24px 40px;
+      text-align: center;
+    }
+
+    .footer p {
+      color: #4a5568;
+      font-size: 12px;
+      line-height: 1.6;
+      margin: 0 0 6px;
+    }
+
+    .footer a {
+      color: #667eea;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+
+      <!-- HEADER: Photographer branding -->
+      <div class="header">
+        {% if photographer_logo %}
+          <img src="{{ photographer_logo }}" alt="{{ photographer_name }}" class="logo">
+        {% endif %}
+        <p class="photographer-name">{{ photographer_name }}</p>
+        <h1 class="event-title">{{ event_title }}</h1>
+      </div>
+
+      <!-- BODY -->
+      <div class="body">
+        <p class="greeting">Hi {{ client_name }},</p>
+
+        <p class="message">
+          Your photos are ready to view and download! We've put care into curating
+          this gallery just for you. Click the button below to access your private
+          gallery — no download limits, no watermarks.
+        </p>
+
+        <div class="cta-wrapper">
+          <a href="{{ gallery_url }}" class="cta-button">
+            View My Gallery →
+          </a>
+        </div>
+
+        <div class="details-card">
+          <p class="details-label">Gallery Access</p>
+          <p class="details-value">{{ gallery_url }}</p>
+
+          <p class="details-label">Availability</p>
+          <p class="details-value">{{ expiry_text }}</p>
+        </div>
+
+        <div class="download-note">
+          <p>
+            💡 <strong>Downloading on mobile?</strong> Open the gallery above and use the
+            built-in download controls. PhotoBox generates secure high-resolution download
+            links only when you tap Download, so expired links can be refreshed instantly
+            without resending this email.
+          </p>
+        </div>
+
+        <p class="message">
+          If you have any questions, reply to this email and {{ photographer_name }}
+          will be in touch.
+        </p>
+      </div>
+
+      <!-- FOOTER -->
+      <div class="footer">
+        <p>
+          Delivered by <a href="https://photobox.app">PhotoBox</a> on behalf of
+          {{ photographer_name }}.
+        </p>
+        <p>
+          This gallery link is private. Please do not share it publicly.
+        </p>
+        <p>
+          Receiving this by mistake? <a href="mailto:{{ support_email }}">Contact support</a>.
+        </p>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

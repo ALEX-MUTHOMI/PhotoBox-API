@@ -1,7 +1,52 @@
-
 [flake8]
+# PhotoBox Flake8 Configuration
+#
+# This repo currently carries a large amount of historical spacing / wrapping
+# debt. We keep flake8 focused on correctness issues and egregious line length,
+# while relaxing legacy formatting noise that does not affect runtime behavior.
+
+max-line-length = 140
+
 exclude =
-  migrations,
-  __pycache__,
-  manage.py,
-  settings.py
+    */migrations/*,
+    __pycache__,
+    .git,
+    .venv,
+    venv,
+    env,
+    dist,
+    build,
+    static,
+    static_root,
+    media_root,
+    fixtures,
+    htmlcov,
+    .pytest_cache,
+    manage.py
+
+per-file-ignores =
+    */tests/*.py: S101, PLR2004
+    */settings.py: F401, F403
+    */__init__.py: F401
+    */gallery/management/commands/seed_db.py: F541
+
+extend-ignore =
+    E111,
+    E114,
+    E117,
+    E203,
+    E221,
+    E231,
+    E261,
+    E301,
+    E302,
+    E303,
+    E304,
+    E305,
+    W291,
+    W292,
+    W293,
+    W391,
+    F541,
+    W503,
+    W504
