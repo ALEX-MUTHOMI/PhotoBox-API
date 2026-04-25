@@ -1,11 +1,9 @@
 """
 Core views for app.
 """
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
+from django.http import JsonResponse
 
 
-@api_view(['GET'])
 def health_check(request):
-    """Returns successful response."""
-    return Response({'healthy': True})
+    """Lightweight liveness probe for load balancers and Docker health checks."""
+    return JsonResponse({'healthy': True})

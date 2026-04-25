@@ -2,7 +2,7 @@
 
 > **Version:** 2.0 (Unified Vault / EDA)  
 > **Last Updated:** April 2026  
-> **Maintainer:** Principal Backend Engineering
+> **Maintainer:**  ALEX MPUTHIA
 
 ---
 

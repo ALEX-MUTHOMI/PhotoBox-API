@@ -1,11 +1,72 @@
+x-app-environment: &app-environment
+  DB_HOST: db
+  DB_NAME: devdb
+  DB_USER: devuser
+  DB_PASS: changeme
+  DEBUG: "1"
+  TESTING: "1"
+  SECRET_KEY: your-secret-key-here
+  JWT_SIGNING_KEY: test-signing-key-that-is-at-least-32-bytes-long!!
+  PYTHONPATH: /app
+  PYTHONDONTWRITEBYTECODE: "1"
+  REDIS_URL: redis://redis:6379/1
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  CLOUDFLARE_R2_ENDPOINT: https://placeholder.r2.cloudflarestorage.com
+  CLOUDFLARE_R2_BUCKET_NAME: test-bucket
+  CLOUDFLARE_ACCESS_KEY_ID: test-access-key
+  CLOUDFLARE_SECRET_ACCESS_KEY: test-secret-key
+  CLOUDFLARE_R2_DOMAIN: placeholder.r2.cloudflarestorage.com
+  CLOUDFLARE_WEBHOOK_SECRET: test-webhook-secret
+  CLOUDINARY_CLOUD_NAME: photobox-app
+  FRONTEND_URL: http://localhost:3000
+  EMAIL_BACKEND: django.core.mail.backends.locmem.EmailBackend
+  LEMON_SQUEEZY_API_KEY: test-key
+  LEMON_SQUEEZY_STORE_ID: "1"
+  LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY: test-ls-secret
+  LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY: ""
+
+x-app-build: &app-build
+  context: .
+  args:
+    DEV: "true"
+    APP_UID: ${APP_UID:-1000}
+    APP_GID: ${APP_GID:-1000}
+
 services:
+  db:
+    image: postgres:13-alpine
+    volumes:
+      - dev-db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: devdb
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: changeme
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devuser -d devdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   app:
-    build:
-      context: .
-      args:
-        - DEV=true
+    build: *app-build
+    working_dir: /app
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8001}:8000"
     volumes:
       - ./app:/app
       - dev-static-data:/vol/web
@@ -14,34 +75,68 @@ services:
              python manage.py migrate &&
              python manage.py runserver 0.0.0.0:8000"
     environment:
-      - DB_HOST=db
-      - DB_NAME=devdb
-      - DB_USER=devuser
-      - DB_PASS=changeme
-      - DEBUG=1
-      - SECRET_KEY=your-secret-key-here
-      - CLOUDFLARE_R2_ENDPOINT=https://placeholder.r2.cloudflarestorage.com
-      - CLOUDFLARE_R2_BUCKET_NAME=test-bucket
-      - CLOUDFLARE_ACCESS_KEY_ID=test-access-key
-      - CLOUDFLARE_SECRET_ACCESS_KEY=test-secret-key
-      - CLOUDFLARE_R2_DOMAIN=placeholder.r2.cloudflarestorage.com
-      - CLOUDFLARE_WEBHOOK_SECRET=test-webhook-secret
-      - CLOUDINARY_CLOUD_NAME=photobox-app
-      - LEMON_SQUEEZY_API_KEY=test-key
-      - LEMON_SQUEEZY_STORE_ID=1
-      - LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY=test-ls-secret
+      <<: *app-environment
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health-check/', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 1024m
 
-  db:
-    image: postgres:13-alpine
+  celery:
+    build: *app-build
+    working_dir: /app
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes:
-      - dev-db-data:/var/lib/postgresql/data
+      - ./app:/app
+      - dev-static-data:/vol/web
+    command: >
+      sh -c "python manage.py wait_for_db &&
+             python manage.py migrate &&
+             celery -A app worker --loglevel=info --concurrency=1"
     environment:
-      - POSTGRES_DB=devdb
-      - POSTGRES_USER=devuser
-      - POSTGRES_PASSWORD=changeme
+      <<: *app-environment
+      TESTING: "0"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app inspect ping -d celery@$$HOSTNAME --timeout=5 | grep -q OK"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    mem_limit: 1024m
+
+  test:
+    profiles: ["test"]
+    build: *app-build
+    working_dir: /app
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    volumes:
+      - ./app:/app
+      - dev-static-data:/vol/web
+    entrypoint: ["/scripts/run-tests.sh"]
+    command: ["unit"]
+    environment:
+      <<: *app-environment
+      PYTEST_ADDOPTS: --tb=short -v
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 1024m
 
 volumes:
   dev-db-data:
   dev-static-data:
+  redis-data:

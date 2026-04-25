@@ -69,7 +69,7 @@ def send_gallery_ready_email(self, event_id: str):
     # Retrieve subscription tier from workspace owner
     tier = 'FREE'
     if hasattr(workspace.user, 'subscription'):
-        tier = getattr(workspace.user.subscription, 'plan', 'FREE').upper()
+        tier = 'PRO' if getattr(workspace.user.subscription, 'is_pro', False) else 'FREE'
 
     ttl_days = ttl_map.get(tier, 30)
 

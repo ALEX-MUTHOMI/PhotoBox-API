@@ -1,8 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
-from django.test import TransactionTestCase, Client, override_settings
+from django.test import TransactionTestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
+from rest_framework.test import APIClient
 
 User = get_user_model()
 
@@ -17,8 +18,8 @@ class SubscriptionQuotaTests(TransactionTestCase):
 
         # Updated to match the exact URL routing of your billing app
         self.upload_url = '/api/billing/gallery/upload/'
-        self.client = Client()
-        self.client.force_login(self.user)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
 
     def test_race_condition_upload_defense(self):
         """
@@ -29,13 +30,13 @@ class SubscriptionQuotaTests(TransactionTestCase):
 
         def fire_request(_):
             # THE ENGINEER FIX: Thread-safe isolated client for the botnet simulation
-            thread_client = Client()
-            thread_client.force_login(self.user)
+            thread_client = APIClient()
+            thread_client.force_authenticate(self.user)
 
             return thread_client.post(
                 self.upload_url,
                 data={'file_size': upload_size},
-                content_type='application/json'
+                format='json',
             )
 
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -61,7 +62,7 @@ class SubscriptionQuotaTests(TransactionTestCase):
         response = self.client.post(
             self.upload_url,
             data={'file_size': -500000},
-            content_type='application/json'
+            format='json',
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

@@ -1,7 +1,8 @@
+import logging
 from django.apps import AppConfig
-from django.core.exceptions import ImproperlyConfigured
 from django.conf import settings
 
+logger = logging.getLogger(__name__)
 
 class GalleryConfig(AppConfig):
     name = 'gallery'
@@ -9,12 +10,14 @@ class GalleryConfig(AppConfig):
 
     def ready(self):
         """
-        Validate required R2 credentials at startup, not at first request.
+        Validate required R2 credentials at startup.
 
-        PRODUCTION GRADE:
-        No test bypasses or OS-level hacks here. The application fiercely 
-        demands credentials. If this runs in CI/CD, the test runner MUST 
-        provide placeholder values via test_settings.py or a .env.test file.
+        PRODUCTION GRADE (Graceful Degradation):
+        Instead of a hard crash (ImproperlyConfigured) that takes down the 
+        entire Django server and ALL Celery workers, we log a critical warning. 
+        This ensures that if R2 keys are missing, expire, or are omitted in a CI/CD 
+        test pipeline, unrelated queues (like billing webhooks or emails) stay alive. 
+        R2-dependent tasks will fail safely at the point of execution.
         """
         required = [
             'CLOUDFLARE_R2_ENDPOINT',
@@ -25,7 +28,7 @@ class GalleryConfig(AppConfig):
         
         missing = [k for k in required if not getattr(settings, k, None)]
         if missing:
-            raise ImproperlyConfigured(
+            logger.critical(
                 f"R2 storage is misconfigured. Missing settings: {missing}. "
-                f"Set them as environment variables before starting the server."
+                f"Gallery uploads will safely fail until these are provided in the environment."
             )

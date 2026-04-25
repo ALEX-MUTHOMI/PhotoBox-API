@@ -42,17 +42,18 @@ def _make_payload(**kwargs) -> dict:
     return base
 
 
-def _sign(payload_bytes: bytes, secret: str = TEST_SECRET) -> str:
-    """Compute HMAC-SHA256 signature — mirrors the view's verification logic."""
+def _sign(timestamp: int, payload_bytes: bytes, secret: str = TEST_SECRET) -> str:
+    """Compute HMAC-SHA256 over '<timestamp>.<raw_body>'."""
     return hmac.new(
         secret.encode('utf-8'),
-        payload_bytes,
+        f"{timestamp}.".encode("ascii") + payload_bytes,
         hashlib.sha256,
     ).hexdigest()
 
 
 def _post_webhook(client, payload: dict, secret: str = TEST_SECRET,
-                  timestamp: int = None, extra_headers: dict = None):
+                  timestamp: int = None, signed_timestamp: int = None,
+                  extra_headers: dict = None):
     """
     Helper: POST a signed webhook to the API.
 
@@ -60,14 +61,17 @@ def _post_webhook(client, payload: dict, secret: str = TEST_SECRET,
     when you pass `content_type`. We only need to manually set the custom
     Cloudflare headers via HTTP_ prefixed kwargs.
     """
-    payload_bytes = json.dumps(payload).encode('utf-8')
-    sig = _sign(payload_bytes, secret)
-    ts = timestamp if timestamp is not None else int(time.time())
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode('utf-8')
+    transmitted_ts = int(time.time()) if timestamp is None else int(timestamp)
+    signed_ts = (
+        transmitted_ts if signed_timestamp is None else int(signed_timestamp)
+    )
+    sig = _sign(signed_ts, payload_bytes, secret)
 
     # Django test client kwargs for custom headers use the HTTP_ prefix
     kwargs = {
         'HTTP_X_CLOUDFLARE_SIGNATURE': sig,
-        'HTTP_WEBHOOK_TIMESTAMP':      str(ts),
+        'HTTP_WEBHOOK_TIMESTAMP':      str(transmitted_ts),
     }
     if extra_headers:
         kwargs.update(extra_headers)
@@ -209,13 +213,30 @@ class R2WebhookSecurityTests(TestCase):
         """SECURITY: Freshness proof is mandatory for signed R2 webhooks."""
         payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1234)
         payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        sig = _sign(payload_bytes)
+        sig = _sign(int(time.time()), payload_bytes)
 
         res = self.client.post(
             WEBHOOK_URL,
             data=payload_bytes,
             content_type="application/json",
             HTTP_X_CLOUDFLARE_SIGNATURE=sig,
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "PENDING")
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    def test_timestamp_tampering_invalidates_signature(self):
+        """SECURITY: Changing the timestamp header without re-signing must fail closed."""
+        original_ts = int(time.time())
+        forged_ts = original_ts + 30
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1234)
+        res = _post_webhook(
+            self.client,
+            payload,
+            timestamp=forged_ts,
+            signed_timestamp=original_ts,
         )
 
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
@@ -322,13 +343,14 @@ class R2WebhookSecurityTests(TestCase):
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
     def test_invalid_json_returns_400(self):
         """CONTRACT: Structurally broken JSON must return 400, not crash the server."""
-        sig = _sign(b'not json at all')
+        ts = int(time.time())
+        sig = _sign(ts, b'not json at all')
         res = self.client.post(
             WEBHOOK_URL,
             data=b'not json at all',
             content_type='application/json',
             HTTP_X_CLOUDFLARE_SIGNATURE=sig,
-            HTTP_WEBHOOK_TIMESTAMP=str(int(time.time())),
+            HTTP_WEBHOOK_TIMESTAMP=str(ts),
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 

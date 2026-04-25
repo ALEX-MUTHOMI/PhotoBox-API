@@ -4,7 +4,7 @@ psycopg2>=2.9.3,<2.10
 drf-spectacular>=0.22.1,<0.23
 Pillow>=10.2.0
 python-dotenv>=1.0.0
-#UWISGI CODE WAS HERE...REMEMBER TO ADD IT IN PROD
+uwsgi>=2.0.23
 djangorestframework-simplejwt>=5.3.0
 argon2-cffi>=23.1.0
 

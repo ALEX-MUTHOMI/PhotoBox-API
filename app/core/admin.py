@@ -32,7 +32,7 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ['email', 'name']
     list_filter = ['is_active', 'is_staff']
     ordering = ['email']
-    list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb']
+    list_display = ['email', 'name', 'subscription_tier', 'storage_limit_gb', 'accepted_terms', 'tos_version']
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
@@ -41,7 +41,9 @@ class UserAdmin(BaseUserAdmin):
             'fields': (
                 'storage_limit_gb',
                 # Assuming accepted_terms exists on your User model based on earlier migrations
-                'accepted_terms'
+                'accepted_terms',
+                'tos_accepted_at',
+                'tos_version',
             )
         }),
         (
@@ -57,7 +59,7 @@ class UserAdmin(BaseUserAdmin):
         (_('Important dates'), {'fields': ('last_login',)}),
     )
 
-    readonly_fields = ['last_login']
+    readonly_fields = ['last_login', 'tos_accepted_at', 'tos_version']
 
     # ENGINEER FIX 4: Activate the bridge. This displays the SubscriptionInline we built above.
     inlines = [SubscriptionInline]
@@ -93,14 +95,14 @@ class UserAdmin(BaseUserAdmin):
             # Revoke API keys and passwords
             user.set_unusable_password()
             user.save()
-        
+
         self.message_user(request, f"Successfully anonymized {queryset.count()} user(s) in accordance with GDPR.")
 
     actions = [gdpr_scrub_user]
 
 class WorkspaceAdmin(admin.ModelAdmin):
     """Define the admin pages for photographer workspaces."""
-    list_display = ['business_name', 'user', 'custom_domain', 'created_at']
+    list_display = ['business_name', 'user', 'custom_domain', 'brand_color', 'watermark_opacity', 'created_at']
     search_fields = ['business_name', 'custom_domain', 'user__email']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['-created_at']
@@ -108,4 +110,3 @@ class WorkspaceAdmin(admin.ModelAdmin):
 # Register the core models
 admin.site.register(models.User, UserAdmin)
 admin.site.register(models.Workspace, WorkspaceAdmin)
-
