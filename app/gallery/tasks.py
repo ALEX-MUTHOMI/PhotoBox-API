@@ -4,12 +4,12 @@ Async processing for gallery assets and gallery archives.
 """
 import logging
 import os
-import re
 import tempfile
 import zipfile
 from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Any, Dict, Optional
+from uuid import UUID
 
 from botocore.exceptions import BotoCoreError, ClientError
 from celery import shared_task
@@ -24,6 +24,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 from PIL import UnidentifiedImageError
 
+from gallery.filename_utils import sanitize_gallery_filename
 from gallery.models import GalleryArchiveJob, GalleryArchiveType, Photo, VisibilityChoices
 
 logger = logging.getLogger(__name__)
@@ -35,32 +36,18 @@ WEB_DERIVATIVE_MAX_DIMENSION = int(getattr(settings, "PHOTO_WEB_MAX_DIMENSION", 
 WEB_DERIVATIVE_QUALITY = int(getattr(settings, "PHOTO_WEB_QUALITY", 86))
 WATERMARK_SCALE_RATIO = float(getattr(settings, "PHOTO_WATERMARK_SCALE_RATIO", 0.22))
 
-_MAX_FILENAME_LEN = 255
-_SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_\-. ]+$")
-
-
 def _sanitise_filename(raw: Optional[str]) -> Optional[str]:
-    if not raw:
-        return None
+    safe_filename = sanitize_gallery_filename(raw)
+    if safe_filename is None and raw:
+        logger.warning("[FAST LANE] Unsafe filename rejected: %s", raw)
+    return safe_filename
 
-    if "\x00" in raw:
-        logger.warning("[FAST LANE] Null byte in filename, rejecting.")
-        return None
 
-    cleaned = raw.strip()
-    if len(cleaned) > _MAX_FILENAME_LEN:
-        logger.warning("[FAST LANE] Filename exceeds max length, rejecting.")
+def _normalise_photo_id(photo_id: Any) -> Optional[str]:
+    try:
+        return str(UUID(str(photo_id)))
+    except (AttributeError, TypeError, ValueError):
         return None
-
-    if ".." in cleaned or "/" in cleaned or "\\" in cleaned:
-        logger.warning("[FAST LANE] Path traversal attempt in filename: %s", cleaned)
-        return None
-
-    if not _SAFE_FILENAME_RE.match(cleaned):
-        logger.warning("[FAST LANE] Unsafe characters in filename: %s", cleaned)
-        return None
-
-    return cleaned
 
 
 def _build_expected_r2_key(
@@ -123,6 +110,7 @@ def _apply_workspace_watermark(base_image: PILImage.Image, workspace) -> PILImag
     name="gallery.tasks.process_fast_lane_asset",
     acks_late=True,
     reject_on_worker_lost=True,
+    queue="image-processing",
 )
 def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     from gallery.models import Photo  # noqa: PLC0415
@@ -130,20 +118,32 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
 
     logger.info("[FAST LANE MONITOR] Checking vault status for photo_id=%s", photo_id)
 
+    normalized_photo_id = _normalise_photo_id(photo_id)
+    if normalized_photo_id is None:
+        logger.warning(
+            "[FAST LANE MONITOR] Rejecting invalid photo_id before ORM lookup: %s",
+            photo_id,
+        )
+        return {
+            "status": "skipped",
+            "reason": "invalid_photo_id",
+            "photo_id": str(photo_id),
+        }
+
     try:
         photo = (
             Photo.objects
             .select_related("scene__event__workspace")
-            .get(id=photo_id)
+            .get(id=normalized_photo_id)
         )
 
         if photo.status in ("READY", "QUARANTINED") or photo.is_processed:
             logger.info(
                 "[FAST LANE MONITOR] Photo %s already processed (status=%s).",
-                photo_id,
+                normalized_photo_id,
                 photo.status,
             )
-            return {"status": "already_processed", "photo_id": photo_id}
+            return {"status": "already_processed", "photo_id": normalized_photo_id}
 
         workspace = photo.scene.event.workspace
         file_size_bytes: int = photo.file_size_bytes or 0
@@ -151,23 +151,23 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     except Photo.DoesNotExist:
         logger.warning(
             "[FAST LANE MONITOR] Photo %s not found, already deleted.",
-            photo_id,
+            normalized_photo_id,
         )
         return {"status": "skipped", "reason": "not_found"}
 
     probe_key = stored_key or _build_expected_r2_key(
         workspace.id,
-        photo_id,
+        normalized_photo_id,
         photo.original_filename,
     )
 
     if not probe_key:
         logger.error(
             "[FAST LANE MONITOR] Cannot determine R2 key for photo %s. Marking FAILED.",
-            photo_id,
+            normalized_photo_id,
         )
-        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
-        return {"status": "error", "reason": "no_safe_r2_key", "photo_id": photo_id}
+        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
+        return {"status": "error", "reason": "no_safe_r2_key", "photo_id": normalized_photo_id}
 
     try:
         r2 = get_r2_client()
@@ -178,7 +178,7 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code", "")
         if error_code in ("404", "NoSuchKey", "Not Found"):
-            return _handle_abandoned_upload(photo_id, workspace.id, file_size_bytes)
+            return _handle_abandoned_upload(normalized_photo_id, workspace.id, file_size_bytes)
 
         logger.error(
             "[FAST LANE MONITOR] R2 API error probing photo %s (code=%s): %s",
@@ -193,13 +193,16 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.exception(
             "[FAST LANE MONITOR] Unexpected error probing photo %s: %s",
-            photo_id,
+            normalized_photo_id,
             exc,
         )
-        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
-        return {"status": "error", "reason": "unexpected", "photo_id": photo_id}
+        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
+        return {"status": "error", "reason": "unexpected", "photo_id": normalized_photo_id}
 
-    return _handle_self_heal(photo_id, probe_key)
+    return _handle_self_heal(normalized_photo_id, probe_key)
+
+
+process_fast_lane_asset.queue = "image-processing"
 
 
 def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:

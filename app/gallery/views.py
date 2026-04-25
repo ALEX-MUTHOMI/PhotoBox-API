@@ -1,8 +1,8 @@
 """
 Views for the Gallery API (The Pixieset Standard).
 """
+import io
 import logging
-import os
 
 from django.db import transaction
 from django.db.models import F
@@ -18,7 +18,22 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.models import Workspace
-from gallery.models import Event, FavoriteSelection, Photo, Scene
+from gallery.client_auth import (
+    GalleryCookieJWTAuthentication,
+    get_gallery_access_session_id,
+    normalize_gallery_email,
+)
+from gallery.filename_utils import sanitize_gallery_filename
+from gallery.models import (
+    Event,
+    FavoriteSelection,
+    GalleryAccessRole,
+    GalleryAccessSession,
+    Photo,
+    Scene,
+    VisibilityChoices,
+)
+from gallery.storage import DOWNLOAD_URL_TTL_SECONDS
 from gallery import serializers
 from gallery.throttles import FastLaneUploadThrottle
 
@@ -27,6 +42,48 @@ from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
+FAST_LANE_ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+
+
+def _image_payload_end_offset(image_format: str, image_bytes: bytes) -> int | None:
+    if image_format == "JPEG":
+        end_marker = image_bytes.rfind(b"\xff\xd9")
+        if end_marker == -1:
+            return None
+        return end_marker + 2
+
+    if image_format == "PNG":
+        end_marker = image_bytes.rfind(b"IEND\xaeB`\x82")
+        if end_marker == -1:
+            return None
+        return end_marker + 8
+
+    if image_format == "WEBP":
+        if len(image_bytes) < 12 or image_bytes[:4] != b"RIFF" or image_bytes[8:12] != b"WEBP":
+            return None
+        return int.from_bytes(image_bytes[4:8], "little") + 8
+
+    return None
+
+
+def _assert_no_trailing_payload(image_format: str, image_bytes: bytes) -> None:
+    payload_end = _image_payload_end_offset(image_format, image_bytes)
+    if payload_end is None or payload_end > len(image_bytes):
+        raise ValidationError("Malware Shield: Uploaded file is structurally corrupted.")
+
+    trailing_bytes = image_bytes[payload_end:]
+    if trailing_bytes.strip(b"\x00 \t\r\n"):
+        raise ValidationError(
+            "Malware Shield: Uploaded file contains trailing payload data."
+        )
+
+
+class IsPhotographerUser(IsAuthenticated):
+    def has_permission(self, request, view):
+        if not super().has_permission(request, view):
+            return False
+
+        return getattr(request.user, "gallery_id", None) is None
 
 
 # ==========================================
@@ -239,8 +296,8 @@ class PhotoFastLaneViewSet(
     serializer_class = serializers.PhotoFastLaneSerializer
     queryset = Photo.objects.all()
 
-    authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [JWTAuthentication, GalleryCookieJWTAuthentication]
+    permission_classes = [IsPhotographerUser]
 
     # PHASE 4: 30 uploads per minute — independent bucket from the global 'user' throttle
     throttle_classes = [FastLaneUploadThrottle]
@@ -248,6 +305,11 @@ class PhotoFastLaneViewSet(
     # DRF native Multipart parser for binary
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
     pagination_class = FastLanePhotoPagination
+
+    def get_permissions(self):
+        if getattr(self, "action", None) == "download_url":
+            return [IsAuthenticated()]
+        return [permission() for permission in self.permission_classes]
 
     def get_queryset(self):
         """
@@ -280,9 +342,47 @@ class PhotoFastLaneViewSet(
         if photo is None:
             raise NotFound("Photo not found.")
 
-        if photo.scene.event.workspace.user_id != request.user.id:
+        requester_kind = "photographer"
+        if getattr(request.user, "gallery_id", None) is not None:
+            if str(request.user.gallery_id) != str(photo.scene.event_id):
+                raise PermissionDenied("Gallery scope mismatch.")
+
+            session_id = get_gallery_access_session_id(request)
+            if session_id is None:
+                raise PermissionDenied("Gallery session missing.")
+
+            access_session = (
+                GalleryAccessSession.objects
+                .filter(
+                    id=session_id,
+                    gallery_id=photo.scene.event_id,
+                    email=normalize_gallery_email(getattr(request.user, "email", "")),
+                    role=getattr(request.user, "role", ""),
+                )
+                .first()
+            )
+            if access_session is None:
+                raise PermissionDenied("Gallery session invalid.")
+
+            allowed_visibility = [VisibilityChoices.PUBLIC]
+            if request.user.role == GalleryAccessRole.CLIENT:
+                allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
+                requester_kind = "client"
+            else:
+                requester_kind = "guest"
+
+            if photo.visibility not in allowed_visibility:
+                raise PermissionDenied(
+                    "You do not have permission to generate a download URL for this photo."
+                )
+        elif photo.scene.event.workspace.user_id != request.user.id:
             raise PermissionDenied(
                 "You do not have permission to generate a download URL for this photo."
+            )
+
+        if photo.status != "READY" or not photo.is_processed:
+            raise ValidationError(
+                "Download URL unavailable. The asset is not ready for download."
             )
 
         download_url = photo.download_url
@@ -291,7 +391,15 @@ class PhotoFastLaneViewSet(
                 "Download URL unavailable. The asset is not ready for download."
             )
 
-        return Response({"download_url": download_url}, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "download_url": download_url,
+                "delivery_mode": "direct_r2_presigned_get",
+                "expires_in_seconds": DOWNLOAD_URL_TTL_SECONDS,
+                "requester_kind": requester_kind,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def perform_create(self, serializer):
         """
@@ -314,6 +422,12 @@ class PhotoFastLaneViewSet(
         if not image_file:
             raise ValidationError("Fast Lane requires an 'image_file' binary payload.")
 
+        safe_filename = sanitize_gallery_filename(image_file.name)
+        if not safe_filename:
+            raise ValidationError(
+                "Unsafe filename. Use only letters, numbers, spaces, dots, dashes, and underscores."
+            )
+
         # 2. PAYLOAD SIZE GATE (5MB ceiling — blocks Slowloris & OOM)
         MAX_FAST_LANE_BYTES = 5 * 1024 * 1024
         if image_file.size > MAX_FAST_LANE_BYTES:
@@ -330,17 +444,18 @@ class PhotoFastLaneViewSet(
         try:
             # PASS 1: Structural integrity — rejects corrupted files and disguised executables
             image_file.seek(0)
-            probe = PILImage.open(image_file)
+            image_bytes = image_file.read()
+            probe = PILImage.open(io.BytesIO(image_bytes))
             probe.verify()  # raises UnidentifiedImageError or Error on structural failure
 
             # PASS 2: Metadata inspection — reopen because verify() destroys the object
-            image_file.seek(0)
-            with PILImage.open(image_file) as img:
+            with PILImage.open(io.BytesIO(image_bytes)) as img:
                 if img.width * img.height > (10000 * 10000):
                     raise ValidationError("Decompression Bomb detected: image pixel count exceeds 100MP.")
-                if img.format not in ['JPEG', 'PNG', 'WEBP']:
+                if img.format not in FAST_LANE_ALLOWED_IMAGE_FORMATS:
                     raise ValidationError("Invalid Magic Bytes. Not a genuine JPEG, PNG, or WEBP.")
-        except UnidentifiedImageError:
+                _assert_no_trailing_payload(img.format, image_bytes)
+        except (OSError, UnidentifiedImageError):
             raise ValidationError("Malware Shield: Uploaded file is disguised or structurally corrupted.")
 
         # Reset file pointer so Django's storage backend can write it to disk
@@ -361,7 +476,6 @@ class PhotoFastLaneViewSet(
                 storage_used_bytes=F('storage_used_bytes') + image_file.size
             )
 
-            safe_filename = os.path.basename(image_file.name)
 
             # 5. DB WRITE — is_processed=False (the Celery task will flip this to True)
             # This is the LAST thing the web thread does. No Cloudinary. No external I/O.
