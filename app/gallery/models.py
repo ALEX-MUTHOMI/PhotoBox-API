@@ -309,7 +309,10 @@ class ClientAllowlist(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['gallery', 'email']),
+            models.Index(
+                fields=['gallery', 'email'],
+                name='gal_allow_gallery_email_idx',
+            ),
         ]
 
     def __str__(self):
@@ -331,7 +334,10 @@ class GalleryMagicLink(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=['gallery', 'email']),
+            models.Index(
+                fields=['gallery', 'email'],
+                name='gal_magic_gallery_email_idx',
+            ),
         ]
 
     def __str__(self):
@@ -352,8 +358,14 @@ class GalleryAccessSession(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=['gallery', 'email']),
-            models.Index(fields=['gallery', 'role']),
+            models.Index(
+                fields=['gallery', 'email'],
+                name='gal_access_gallery_email_idx',
+            ),
+            models.Index(
+                fields=['gallery', 'role'],
+                name='gal_access_gallery_role_idx',
+            ),
         ]
 
     def __str__(self):
@@ -389,8 +401,14 @@ class FavoriteSelection(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['session', 'created_at']),
-            models.Index(fields=['photo', 'created_at']),
+            models.Index(
+                fields=['session', 'created_at'],
+                name='gal_fav_session_created_idx',
+            ),
+            models.Index(
+                fields=['photo', 'created_at'],
+                name='gallery_favo_photo_8930d4_idx',
+            ),
         ]
 
     def __str__(self):
@@ -441,8 +459,14 @@ class GalleryArchiveJob(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['gallery', 'status']),
-            models.Index(fields=['gallery', 'archive_type', 'status']),
+            models.Index(
+                fields=['gallery', 'status'],
+                name='gal_archive_gallery_status_idx',
+            ),
+            models.Index(
+                fields=['gallery', 'archive_type', 'status'],
+                name='gallery_gal_gallery_e48be8_idx',
+            ),
         ]
 
     def __str__(self):
