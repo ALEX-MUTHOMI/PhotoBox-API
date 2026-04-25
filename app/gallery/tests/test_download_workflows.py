@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -8,7 +7,18 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Workspace
-from gallery.models import Event, Photo, Scene
+from gallery.client_auth import (
+    encode_gallery_access_session_cookie,
+    issue_gallery_access_token,
+)
+from gallery.models import (
+    Event,
+    GalleryAccessRole,
+    GalleryAccessSession,
+    GalleryArchiveJob,
+    Photo,
+    Scene,
+)
 
 
 User = get_user_model()
@@ -19,6 +29,7 @@ User = get_user_model()
     CLOUDFLARE_R2_BUCKET_NAME="test-bucket",
     CLOUDFLARE_ACCESS_KEY_ID="test-key",
     CLOUDFLARE_SECRET_ACCESS_KEY="test-secret",
+    JWT_SIGNING_KEY="test-signing-key-that-is-at-least-32-bytes-long!!",
 )
 class DownloadWorkflowTests(TestCase):
     def setUp(self):
@@ -54,14 +65,20 @@ class DownloadWorkflowTests(TestCase):
         self.anonymous_client = APIClient()
 
     def _grant_client_gallery_session(self):
-        session = self.client_gallery_client.session
-        session["client_gallery_access"] = {
-            str(self.event.id): {
-                "verified": True,
-                "slug": self.event.slug,
-            }
-        }
-        session.save()
+        session = GalleryAccessSession.objects.create(
+            gallery=self.event,
+            email="client@example.com",
+            role=GalleryAccessRole.CLIENT,
+        )
+        self.client_gallery_client.cookies["gallery_access"] = issue_gallery_access_token(
+            gallery_id=self.event.id,
+            email=session.email,
+            role=session.role,
+        )
+        self.client_gallery_client.cookies["gallery_session"] = (
+            encode_gallery_access_session_cookie(session.id)
+        )
+        return session
 
     @patch("gallery.storage.get_r2_client")
     def test_owner_can_generate_single_asset_download_url(self, mock_get_r2_client):
@@ -105,21 +122,21 @@ class DownloadWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    @patch("gallery.tasks.prepare_gallery_bulk_download.delay")
-    def test_bulk_download_requires_verified_access_and_returns_task_id(self, mock_delay):
-        mock_delay.return_value = SimpleNamespace(id="task-123")
-
+    @patch("gallery.client_views.build_gallery_archive.delay")
+    def test_bulk_download_requires_verified_access_and_returns_archive_job(self, mock_delay):
         denied = self.anonymous_client.post(
-            reverse("gallery:event-bulk-download", kwargs={"pk": self.event.id})
+            reverse("gallery_public:archive-request", args=[self.event.id])
         )
         self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
         mock_delay.assert_not_called()
 
         self._grant_client_gallery_session()
         allowed = self.client_gallery_client.post(
-            reverse("gallery:event-bulk-download", kwargs={"pk": self.event.id})
+            reverse("gallery_public:archive-request", args=[self.event.id])
         )
 
         self.assertEqual(allowed.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(allowed.data["task_id"], "task-123")
-        self.assertEqual(allowed.data["delivery_mode"], "async_bulk_zip")
+        self.assertEqual(allowed.data["status"], GalleryArchiveJob.Status.PENDING)
+        self.assertIn("archive_job_id", allowed.data)
+        archive_job = GalleryArchiveJob.objects.get(id=allowed.data["archive_job_id"])
+        mock_delay.assert_called_once_with(str(archive_job.id))
