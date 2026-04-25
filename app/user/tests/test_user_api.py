@@ -159,7 +159,16 @@ class AntiFraudSecurityTests(TransactionTestCase):
 
     def test_blocks_missing_turnstile_token(self):
         headers = {'HTTP_CF_CONNECTING_IP': self.hacker_ip}
-        response = self.client.post(REGISTER_USER_URL, data={"email": "bot@botnet.com", "password": "password123", "name": "Bot", "accepted_terms": True}, **headers)
+        response = self.client.post(
+            REGISTER_USER_URL,
+            data={
+                "email": "bot@botnet.com",
+                "password": "password123",
+                "name": "Bot",
+                "accepted_terms": True,
+            },
+            **headers,
+        )
         # Serializer enforces required turnstile response, returning 400 Bad Request directly
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 

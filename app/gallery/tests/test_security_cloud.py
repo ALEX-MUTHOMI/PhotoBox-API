@@ -129,7 +129,16 @@ class CloudinaryEgressDefenseTests(TestCase):
         REGRESSION GUARD: Proves the Cloudinary SDK upload path is completely dead.
         Any regression that re-introduces SDK uploads would fail this test.
         """
-        from unittest.mock import patch
-        with patch('cloudinary.uploader.upload') as mock_upload:
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        mock_upload = Mock()
+        with patch.dict(
+            'sys.modules',
+            {
+                'cloudinary': SimpleNamespace(uploader=SimpleNamespace(upload=mock_upload)),
+                'cloudinary.uploader': SimpleNamespace(upload=mock_upload),
+            },
+        ):
             _ = self.photo.cloudinary_thumbnail_url
             mock_upload.assert_not_called()

@@ -74,8 +74,20 @@ class IngestionDatabaseIntegrityTests(TestCase):
             "post_fields": {},
         }
 
-        payload_5 = {"scene_id": str(self.scene.id), "files": [{"filename": f"{i}.jpg", "file_size": 100, "client_reference_id": str(i)} for i in range(5)]}
-        payload_50 = {"scene_id": str(self.scene.id), "files": [{"filename": f"{i}.jpg", "file_size": 100, "client_reference_id": str(i)} for i in range(50)]}
+        payload_5 = {
+            "scene_id": str(self.scene.id),
+            "files": [
+                {"filename": f"{i}.jpg", "file_size": 100, "client_reference_id": str(i)}
+                for i in range(5)
+            ],
+        }
+        payload_50 = {
+            "scene_id": str(self.scene.id),
+            "files": [
+                {"filename": f"{i}.jpg", "file_size": 100, "client_reference_id": str(i)}
+                for i in range(50)
+            ],
+        }
 
         # Step 1: Capture the baseline query count for a small payload
         with CaptureQueriesContext(connection) as baseline_ctx:

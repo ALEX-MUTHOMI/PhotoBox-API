@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+import time
 from unittest.mock import patch
 from django.conf import settings
 from django.test import TestCase, override_settings
@@ -113,12 +114,34 @@ class WebhookSecurityAuditTests(TestCase):
             media_type="IMAGE"
         )
 
-    def _generate_valid_signature(self, payload_bytes):
-        """Helper to simulate Cloudflare's HMAC generation."""
+    def _generate_valid_signature(self, payload_bytes, timestamp):
+        """Helper to simulate Cloudflare's timestamp-bound HMAC generation."""
         # Must use CLOUDFLARE_WEBHOOK_SECRET — the dedicated signing secret.
         # CLOUDFLARE_SECRET_ACCESS_KEY is the R2 IAM key and is NEVER used for HMAC.
         secret = getattr(settings, 'CLOUDFLARE_WEBHOOK_SECRET', 'test-webhook-secret').encode('utf-8')
-        return hmac.new(secret, payload_bytes, hashlib.sha256).hexdigest()
+        return hmac.new(
+            secret,
+            f"{timestamp}.".encode("ascii") + payload_bytes,
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _post_signed_webhook(self, payload, *, timestamp=None, signed_timestamp=None):
+        """
+        Post a webhook using the current production contract:
+        signed JSON body + replay-window timestamp header.
+        """
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        transmitted_ts = int(time.time()) if timestamp is None else int(timestamp)
+        signature_ts = transmitted_ts if signed_timestamp is None else int(signed_timestamp)
+        valid_sig = self._generate_valid_signature(payload_bytes, signature_ts)
+
+        return self.client.post(
+            self.webhook_url,
+            payload_bytes,
+            content_type="application/json",
+            HTTP_X_CLOUDFLARE_SIGNATURE=valid_sig,
+            HTTP_WEBHOOK_TIMESTAMP=str(transmitted_ts),
+        )
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET="super-secret-cloudflare-key")
     def test_event_state_hijacking_spoofed_signature(self):
@@ -141,27 +164,53 @@ class WebhookSecurityAuditTests(TestCase):
     def test_event_replay_attack_idempotency(self):
         """
         THE THREAT: Intercepted valid webhook replayed 500 times to DDoS Celery.
-        THE TEST: Proves DB state locks prevent duplicate Celery task triggers.
+        THE TEST: Proves a valid PutObject event is accepted once, then
+        replays are idempotently acknowledged after the asset is already READY.
         """
-        payload = {"asset_id": "uuid-1234", "status": "uploaded", "size": 5000}
-        payload_bytes = json.dumps(payload).encode('utf-8')
-        valid_sig = self._generate_valid_signature(payload_bytes)
-
-        self.client.credentials(HTTP_X_CLOUDFLARE_SIGNATURE=valid_sig)
+        replay_ts = int(time.time())
+        payload = {
+            "action": "PutObject",
+            "r2_object_key": self.asset.r2_object_key,
+            "size": 4096,
+        }
 
         # First webhook arrival (Happy Path)
-        res_first = self.client.post(self.webhook_url, payload_bytes, content_type='application/json')
+        res_first = self._post_signed_webhook(payload, timestamp=replay_ts)
         self.assertEqual(res_first.status_code, status.HTTP_200_OK)
-
-        # Simulate DB state change that your view would do
-        # self.asset.status = 'UPLOADED'
-        # self.asset.save()
+        self.assertEqual(res_first.data["status"], "success")
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "READY")
+        self.assertTrue(self.asset.is_processed)
 
         # Hacker replays the exact same payload a second later
-        res_replay = self.client.post(self.webhook_url, payload_bytes, content_type='application/json')
+        res_replay = self._post_signed_webhook(payload, timestamp=replay_ts)
 
         # We MUST return 200 OK so Cloudflare doesn't retry
         self.assertEqual(res_replay.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_replay.data["status"], "already_ready")
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET="super-secret-cloudflare-key")
+    def test_forged_timestamp_is_rejected(self):
+        """
+        THE THREAT: Attacker swaps in a different timestamp header after capture.
+        THE TEST: Timestamp/body binding in the HMAC must fail closed with 403.
+        """
+        signed_ts = int(time.time())
+        payload = {
+            "action": "PutObject",
+            "r2_object_key": self.asset.r2_object_key,
+            "size": 4096,
+        }
+
+        res = self._post_signed_webhook(
+            payload,
+            timestamp=signed_ts + 20,
+            signed_timestamp=signed_ts,
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "PENDING")
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET="super-secret-cloudflare-key")
     def test_payload_size_mismatch_quarantine(self):
@@ -174,15 +223,11 @@ class WebhookSecurityAuditTests(TestCase):
             "action": "PutObject", 
             "size": 5 * 1024 * 1024 * 1024
         }
-        payload_bytes = json.dumps(payload).encode('utf-8')
-        valid_sig = self._generate_valid_signature(payload_bytes)
-
-        self.client.credentials(HTTP_X_CLOUDFLARE_SIGNATURE=valid_sig)
-
-        res = self.client.post(self.webhook_url, payload_bytes, content_type='application/json')
+        res = self._post_signed_webhook(payload)
 
         # The view should return 200 so R2 stops sending it
         self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["status"], "quarantined")
 
         # Assert DB state moved to QUARANTINED
         self.asset.refresh_from_db()

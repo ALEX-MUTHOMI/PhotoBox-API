@@ -30,8 +30,14 @@ from checkout.models import PricingPlan, CheckoutSession
 User = get_user_model()
 
 # Realistic Lemon Squeezy webhook payload factory
-def _make_ls_payload(event_name, user_id, session_token, sub_id='sub_100',
-                      status='active', variant_id='var_pro_50gb'):
+def _make_ls_payload(
+    event_name,
+    user_id,
+    session_token,
+    sub_id='sub_100',
+    status='active',
+    variant_id='var_pro_50gb',
+):
     return {
         'meta': {
             'event_name': event_name,

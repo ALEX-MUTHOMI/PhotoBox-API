@@ -14,6 +14,8 @@ COPY ./scripts /scripts
 
 # 2. THE HEAVY LIFT (System Setup & Package Installation)
 ARG DEV=false
+ARG APP_UID=1000
+ARG APP_GID=1000
 RUN python -m venv /py && \
     /py/bin/pip install --upgrade pip && \
     apt-get update && \
@@ -30,21 +32,25 @@ RUN python -m venv /py && \
     apt-get purge -y --auto-remove build-essential libpq-dev && \
     rm -rf /var/lib/apt/lists/* && \
     rm -rf /tmp && \
-    # Create the unprivileged user (Debian syntax)
-    useradd --system --no-create-home django-user && \
+    # Create the unprivileged runtime user with a configurable UID/GID
+    groupadd --gid ${APP_GID} django-user && \
+    useradd --uid ${APP_UID} --gid ${APP_GID} --create-home --shell /usr/sbin/nologin django-user && \
     # Create runtime volume directories for collected static/media files
     mkdir -p /vol/web/media && \
     mkdir -p /vol/web/static && \
+    mkdir -p /home/django-user && \
     # Set strict ownership and execution permissions
-    chown -R django-user:django-user /vol && \
+    chown -R django-user:django-user /vol /home/django-user && \
     chmod -R 755 /vol && \
     chmod -R +x /scripts
 
 # 3. COPY THE CODE LAST
 # Now, when you edit views.py or models.py, Docker only rebuilds this specific layer.
 COPY ./app /app
+RUN chown -R django-user:django-user /app
 WORKDIR /app
 EXPOSE 8000
+ENV HOME="/home/django-user"
 
 # 4. DROP PRIVILEGES
 USER django-user

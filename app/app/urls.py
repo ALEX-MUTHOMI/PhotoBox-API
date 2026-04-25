@@ -24,6 +24,7 @@ urlpatterns = [
 
     # --- PHOTOBOX SAAS ROUTING ---
     path('api/gallery/', include('gallery.urls')),
+    path('api/galleries/', include('gallery.client_urls')),
 
     path('api/billing/', include('billing.urls')),
 

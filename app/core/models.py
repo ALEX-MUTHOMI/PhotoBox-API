@@ -5,18 +5,51 @@ import os
 import uuid
 from django.conf import settings
 from django.db import models
-from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.contrib.auth.hashers import make_password, check_password
+from PIL import Image as PILImage
+from PIL import UnidentifiedImageError
 
 # --- SECURE FILE PATH GENERATORS ---
 def workspace_logo_file_path(instance, filename):
     ext = os.path.splitext(filename)[1]
     return os.path.join('uploads', 'workspace', 'logos', f'{uuid.uuid4()}{ext}')
 
+def workspace_watermark_file_path(instance, filename):
+    ext = os.path.splitext(filename)[1]
+    return os.path.join('uploads', 'workspace', 'watermarks', f'{uuid.uuid4()}{ext}')
+
 def workspace_image_file_path(instance, filename):
     ext = os.path.splitext(filename)[1]
     return os.path.join('uploads', 'workspace', str(instance.gallery.workspace.id), f'{uuid.uuid4()}{ext}')
+
+
+def validate_png_watermark(uploaded_file):
+    if not uploaded_file:
+        return
+
+    filename = (getattr(uploaded_file, 'name', '') or '').lower()
+    if not filename.endswith('.png'):
+        raise ValidationError("Watermark logo must use the .png extension.")
+
+    position = None
+    if hasattr(uploaded_file, 'tell'):
+        position = uploaded_file.tell()
+
+    try:
+        if hasattr(uploaded_file, 'seek'):
+            uploaded_file.seek(0)
+        with PILImage.open(uploaded_file) as image:
+            if image.format != 'PNG':
+                raise ValidationError("Watermark logo must be a valid PNG image.")
+            image.verify()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValidationError("Watermark logo must be a valid PNG image.") from exc
+    finally:
+        if hasattr(uploaded_file, 'seek'):
+            uploaded_file.seek(position or 0)
 
 
 # ==========================================
@@ -65,6 +98,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
 
     accepted_terms = models.BooleanField(default=False)
+    tos_accepted_at = models.DateTimeField(blank=True, null=True)
+    tos_version = models.CharField(max_length=64, blank=True)
 
     # Billing State
     stripe_customer_id = models.CharField(max_length=255, blank=True)
@@ -106,6 +141,16 @@ class Workspace(SoftDeleteModel):
     # Frontend Branding
     logo = models.ImageField(upload_to=workspace_logo_file_path, null=True, blank=True)
     brand_color = models.CharField(max_length=7, default='#000000')
+    watermark_logo = models.ImageField(
+        upload_to=workspace_watermark_file_path,
+        null=True,
+        blank=True,
+        validators=[validate_png_watermark],
+    )
+    watermark_opacity = models.PositiveSmallIntegerField(
+        default=35,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
 
     # --- EDA UPGRADE: The Atomic Quota Ledger ---
     # MinValueValidator enforces database-level integrity against negative storage hacks

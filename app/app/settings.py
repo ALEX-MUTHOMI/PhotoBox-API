@@ -27,9 +27,45 @@ load_dotenv(dotenv_path=BASE_DIR / '.env')
 # ============================================================
 # 1. FAIL-FAST PERIMETER  —  halt before serving a broken app
 # ============================================================
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _detect_test_mode() -> bool:
+    """
+    Detect both Django's built-in test runner and pytest/pytest-django.
+
+    The previous exact-token check only matched `manage.py test`, which meant
+    `pytest gallery/tests/...` skipped the in-memory storage and eager Celery
+    safeguards. That made the suite behave differently in Docker/CI vs local
+    Django test runs.
+    """
+    if _env_flag("TESTING"):
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+
+    argv = [str(arg).lower() for arg in sys.argv]
+    if any(
+        arg in {"test", "pytest", "pytest.exe", "py.test"}
+        or arg.endswith("\\pytest.exe")
+        or arg.endswith("/pytest")
+        or arg.endswith("/pytest.exe")
+        or arg.endswith("\\pytest")
+        for arg in argv
+    ):
+        return True
+
+    return any("/tests/" in arg or "\\tests\\" in arg for arg in argv)
+
+
 # Skip credential checks when Django is only loading for the test runner.
 # The test block at the bottom injects safe stubs for all external services.
-_IS_TEST = 'test' in sys.argv
+_IS_TEST = _detect_test_mode()
+TESTING = _IS_TEST
 
 if not _IS_TEST:
     _missing = []
@@ -174,6 +210,12 @@ DATABASES = {
     }
 }
 
+if _IS_TEST and not os.environ.get('DB_NAME'):
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'test_db.sqlite3',
+    }
+
 
 # ============================================================
 # 8. PASSWORD VALIDATION & HASHING
@@ -211,7 +253,8 @@ mimetypes.add_type("text/css", ".css", True)
 
 STATIC_URL  = '/static/'
 STATIC_ROOT = BASE_DIR / 'static_root'
-STATICFILES_DIRS = [BASE_DIR / 'static']
+STATIC_DIR = BASE_DIR / 'static'
+STATICFILES_DIRS = [STATIC_DIR] if STATIC_DIR.exists() else []
 
 MEDIA_URL  = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media_root'
@@ -261,6 +304,10 @@ REST_FRAMEWORK = {
         'user': '1000/day',
         'fast_lane_upload': '30/minute',
         'heavy_lane_ticket': '10/minute',
+        'magic_link_send': '3/minute',
+        'guest_access': '10/minute',
+        'favorite_selection': '30/minute',
+        'password_reset_request': '3/minute',
     },
 }
 
@@ -282,6 +329,12 @@ SIMPLE_JWT = {
     # from a too-short SECRET_KEY in test/CI environments.
     'SIGNING_KEY': os.environ.get('JWT_SIGNING_KEY', SECRET_KEY),
 }
+
+GALLERY_ACCESS_COOKIE_NAME = os.environ.get('GALLERY_ACCESS_COOKIE_NAME', 'gallery_access')
+GALLERY_ACCESS_COOKIE_SAMESITE = os.environ.get('GALLERY_ACCESS_COOKIE_SAMESITE', 'Lax')
+GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS = int(
+    os.environ.get('GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS', 3600)
+)
 
 
 # ============================================================
@@ -345,6 +398,10 @@ CLOUDFLARE_R2_DOMAIN            = os.environ.get('CLOUDFLARE_R2_DOMAIN', '')
 CLOUDFLARE_ACCESS_KEY_ID        = os.environ.get('CLOUDFLARE_ACCESS_KEY_ID', '')
 CLOUDFLARE_SECRET_ACCESS_KEY    = os.environ.get('CLOUDFLARE_SECRET_ACCESS_KEY', '')
 CLOUDFLARE_WEBHOOK_SECRET       = os.environ.get('CLOUDFLARE_WEBHOOK_SECRET', '')
+CLOUDFLARE_R2_DELETE_ENDPOINT   = os.environ.get('CLOUDFLARE_R2_DELETE_ENDPOINT', '')
+CLOUDFLARE_R2_DELETE_BUCKET_NAME = os.environ.get('CLOUDFLARE_R2_DELETE_BUCKET_NAME', '')
+CLOUDFLARE_R2_DELETE_ACCESS_KEY_ID = os.environ.get('CLOUDFLARE_R2_DELETE_ACCESS_KEY_ID', '')
+CLOUDFLARE_R2_DELETE_SECRET_ACCESS_KEY = os.environ.get('CLOUDFLARE_R2_DELETE_SECRET_ACCESS_KEY', '')
 
 
 # ============================================================
@@ -400,6 +457,8 @@ GALLERY_TTL_DAYS = {
     'PRO':        365,
     'ENTERPRISE': 0,
 }
+GALLERY_ARCHIVE_TTL_HOURS = int(os.environ.get('GALLERY_ARCHIVE_TTL_HOURS', 24))
+CURRENT_TOS_VERSION = os.environ.get('CURRENT_TOS_VERSION', '2026-04')
 
 # GDPR: soft-delete on expiry, then hard-delete from R2 after this grace period.
 GALLERY_HARD_DELETE_GRACE_DAYS = 30
@@ -484,11 +543,17 @@ TEST_RUNNER = 'core.utils.test_runner.EnterpriseTestRunner'
 #     All external service stubs live here — nowhere else.
 # ============================================================
 if _IS_TEST:
+    ALLOWED_HOSTS = list(dict.fromkeys(ALLOWED_HOSTS + ["testserver", "localhost"]))
+    SECURE_SSL_REDIRECT = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
 
     # -- Celery: run tasks synchronously, no broker required --
+    CELERY_BROKER_URL = 'memory://'
+    CELERY_RESULT_BACKEND = 'cache+memory://'
     CELERY_TASK_ALWAYS_EAGER    = True
     CELERY_TASK_EAGER_PROPAGATES = True
-    CELERY_TASK_STORE_EAGER_RESULT = True
+    CELERY_TASK_STORE_EAGER_RESULT = False
 
     # Keep test uploads entirely off the repository filesystem.
     # Django<4.1 has no built-in InMemoryStorage, so we wire in a tiny
@@ -519,6 +584,10 @@ if _IS_TEST:
     LEMON_SQUEEZY_STORE_ID           = os.environ.get('LEMON_SQUEEZY_STORE_ID',           '1')
     LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY   = os.environ.get('LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY',   'test-ls-webhook-secret')
     LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY = os.environ.get('LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY', '')
+    EMAIL_BACKEND = os.environ.get(
+        'EMAIL_BACKEND',
+        'django.core.mail.backends.locmem.EmailBackend',
+    )
 
     # -- Throttling --
     # Global throttling is left ON with LocMemCache so throttle-verification

@@ -1,0 +1,6 @@
+# Force Linux line endings for scripts and config
+* text=auto
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.env text eol=lf

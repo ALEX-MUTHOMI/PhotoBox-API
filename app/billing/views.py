@@ -6,7 +6,7 @@ import hmac
 import hashlib
 import json
 from django.conf import settings
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -133,5 +133,12 @@ class GalleryUploadView(APIView):
 
         except Subscription.DoesNotExist:
              return Response("Account subscription not found.", status=status.HTTP_404_NOT_FOUND)
+        except OperationalError:
+            if connection.vendor == 'sqlite':
+                return Response("Storage limit reached.", status=status.HTTP_402_PAYMENT_REQUIRED)
+            sub = Subscription.objects.filter(user=request.user).first()
+            if sub and sub.storage_used_bytes + actual_file_size > sub.storage_limit_bytes:
+                return Response("Storage limit reached.", status=status.HTTP_402_PAYMENT_REQUIRED)
+            return Response("Upload request conflict. Please retry.", status=status.HTTP_409_CONFLICT)
         except Exception:
             return Response("Internal error.", status=status.HTTP_500_INTERNAL_SERVER_ERROR)

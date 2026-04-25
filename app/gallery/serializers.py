@@ -20,6 +20,7 @@ class EventSerializer(serializers.ModelSerializer):
         model = Event
         fields = [
             'id', 'title', 'event_type', 'event_date', 'cover_image_url',
+            'cover_photo', 'typography_theme', 'color_theme',
             'slug', 'is_published', 'expires_at', 'gallery_pin', 'created_at',
             'client_email', 'client_name',
         ]
@@ -69,7 +70,7 @@ class SceneSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Scene
-        fields = ['id', 'event', 'title', 'display_order']
+        fields = ['id', 'event', 'title', 'display_order', 'visibility']
         read_only_fields = ['id']
 
     def update(self, instance, validated_data):
@@ -102,18 +103,18 @@ class PhotoFastLaneSerializer(serializers.ModelSerializer):
     image_file = serializers.FileField(required=True)
 
     # PHASE 3: Delivery layer — all read-only, derived from model properties
-    delivery_url   = serializers.ReadOnlyField()
-    download_url   = serializers.ReadOnlyField()
-    aspect_ratio   = serializers.ReadOnlyField()
+    delivery_url = serializers.ReadOnlyField()
+    download_url = serializers.ReadOnlyField()
+    aspect_ratio = serializers.ReadOnlyField()
 
     # Backward compat aliases (deprecated — will be removed in v2)
-    r2_download_url           = serializers.ReadOnlyField()
-    cloudinary_thumbnail_url  = serializers.ReadOnlyField()
+    r2_download_url = serializers.ReadOnlyField()
+    cloudinary_thumbnail_url = serializers.ReadOnlyField()
 
     class Meta:
         model = Photo
         fields = [
-            'id', 'scene', 'image_file', 'original_filename', 'file_size_bytes',
+            'id', 'scene', 'visibility', 'image_file', 'original_filename', 'file_size_bytes',
             'is_processed', 'status', 'blurhash',
             # Delivery layer
             'delivery_url', 'download_url', 'aspect_ratio',
