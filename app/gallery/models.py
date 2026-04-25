@@ -1,5 +1,4 @@
 import uuid
-import logging
 from django.conf import settings
 from django.db import models
 from django.core.validators import MinValueValidator
@@ -7,8 +6,6 @@ from django.contrib.auth.hashers import make_password, check_password
 
 # Assuming Workspace is defined in core.models
 from core.models import Workspace
-
-logger = logging.getLogger(__name__)
 
 
 class VisibilityChoices(models.TextChoices):
@@ -221,7 +218,6 @@ class Photo(models.Model):
         return None
 
     @property
-
     def download_url(self) -> str | None:
         """
         PHASE 3: Presigned R2 GET URL for client download.
@@ -253,7 +249,6 @@ class Photo(models.Model):
         return None
 
     @property
-
     def aspect_ratio(self) -> float | None:
         """
         PHASE 3: Aspect ratio for zero-layout-shift masonry grids.
@@ -471,4 +466,3 @@ class GalleryArchiveJob(models.Model):
 
     def __str__(self):
         return f"{self.gallery.title} {self.archive_type.lower()} archive [{self.status}]"
-
