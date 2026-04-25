@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import tempfile
-import uuid
 import zipfile
 from datetime import timedelta
 from pathlib import PurePosixPath
@@ -21,14 +20,20 @@ from django.db.models import F, Value
 from django.db.models.functions import Greatest
 from django.utils import timezone
 from django.utils.text import slugify
+from PIL import Image as PILImage
+from PIL import ImageOps
+from PIL import UnidentifiedImageError
 
-from gallery.models import Event, GalleryArchiveJob, Photo, VisibilityChoices
+from gallery.models import GalleryArchiveJob, GalleryArchiveType, Photo, VisibilityChoices
 
 logger = logging.getLogger(__name__)
 
 FAST_LANE_PROBE_DELAY: int = getattr(settings, "FAST_LANE_MONITOR_DELAY_SECONDS", 900)
 ARCHIVE_STREAM_CHUNK_SIZE = 1024 * 1024
 ARCHIVE_TTL_HOURS = int(getattr(settings, "GALLERY_ARCHIVE_TTL_HOURS", 24))
+WEB_DERIVATIVE_MAX_DIMENSION = int(getattr(settings, "PHOTO_WEB_MAX_DIMENSION", 2400))
+WEB_DERIVATIVE_QUALITY = int(getattr(settings, "PHOTO_WEB_QUALITY", 86))
+WATERMARK_SCALE_RATIO = float(getattr(settings, "PHOTO_WATERMARK_SCALE_RATIO", 0.22))
 
 _MAX_FILENAME_LEN = 255
 _SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_\-. ]+$")
@@ -69,6 +74,48 @@ def _build_expected_r2_key(
     return f"fast-lane/tenant_{workspace_id}/{photo_id}/{safe_name}"
 
 
+def _build_web_derivative_r2_key(photo: Photo) -> str:
+    return (
+        f"web/tenant_{photo.scene.event.workspace_id}/"
+        f"gallery_{photo.scene.event_id}/photo_{photo.id}.webp"
+    )
+
+
+def _apply_workspace_watermark(base_image: PILImage.Image, workspace) -> PILImage.Image:
+    if not workspace.watermark_logo:
+        return base_image.convert("RGB")
+
+    with workspace.watermark_logo.open("rb") as watermark_file:
+        try:
+            with PILImage.open(watermark_file) as raw_logo:
+                if raw_logo.format != "PNG":
+                    raise RuntimeError("Watermark logo must be a valid PNG image.")
+                watermark_logo = raw_logo.convert("RGBA")
+        except (UnidentifiedImageError, OSError) as exc:
+            raise RuntimeError("Watermark logo could not be opened as PNG.") from exc
+
+    canvas = base_image.convert("RGBA")
+    max_width = max(120, int(canvas.width * WATERMARK_SCALE_RATIO))
+    max_height = max(80, int(canvas.height * WATERMARK_SCALE_RATIO))
+    watermark_logo.thumbnail((max_width, max_height), PILImage.Resampling.LANCZOS)
+
+    opacity = max(0, min(int(workspace.watermark_opacity or 0), 100))
+    if opacity < 100:
+        alpha_channel = watermark_logo.getchannel("A")
+        alpha_channel = alpha_channel.point(
+            lambda pixel: int(pixel * (opacity / 100))
+        )
+        watermark_logo.putalpha(alpha_channel)
+
+    margin = max(24, canvas.width // 40, canvas.height // 40)
+    position = (
+        max(margin, canvas.width - watermark_logo.width - margin),
+        max(margin, canvas.height - watermark_logo.height - margin),
+    )
+    canvas.alpha_composite(watermark_logo, dest=position)
+    return canvas.convert("RGB")
+
+
 @shared_task(
     bind=True,
     max_retries=3,
@@ -76,7 +123,6 @@ def _build_expected_r2_key(
     name="gallery.tasks.process_fast_lane_asset",
     acks_late=True,
     reject_on_worker_lost=True,
-    queue="image-processing",
 )
 def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     from gallery.models import Photo  # noqa: PLC0415
@@ -85,32 +131,19 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     logger.info("[FAST LANE MONITOR] Checking vault status for photo_id=%s", photo_id)
 
     try:
-        normalized_photo_id = str(uuid.UUID(str(photo_id)))
-    except (TypeError, ValueError, AttributeError):
-        logger.warning(
-            "[FAST LANE MONITOR] Rejected invalid photo identifier: %s",
-            photo_id,
-        )
-        return {
-            "status": "rejected",
-            "reason": "invalid_photo_id",
-            "photo_id": str(photo_id),
-        }
-
-    try:
         photo = (
             Photo.objects
             .select_related("scene__event__workspace")
-            .get(id=normalized_photo_id)
+            .get(id=photo_id)
         )
 
         if photo.status in ("READY", "QUARANTINED") or photo.is_processed:
             logger.info(
                 "[FAST LANE MONITOR] Photo %s already processed (status=%s).",
-                normalized_photo_id,
+                photo_id,
                 photo.status,
             )
-            return {"status": "already_processed", "photo_id": normalized_photo_id}
+            return {"status": "already_processed", "photo_id": photo_id}
 
         workspace = photo.scene.event.workspace
         file_size_bytes: int = photo.file_size_bytes or 0
@@ -118,27 +151,23 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     except Photo.DoesNotExist:
         logger.warning(
             "[FAST LANE MONITOR] Photo %s not found, already deleted.",
-            normalized_photo_id,
+            photo_id,
         )
         return {"status": "skipped", "reason": "not_found"}
 
     probe_key = stored_key or _build_expected_r2_key(
         workspace.id,
-        normalized_photo_id,
+        photo_id,
         photo.original_filename,
     )
 
     if not probe_key:
         logger.error(
             "[FAST LANE MONITOR] Cannot determine R2 key for photo %s. Marking FAILED.",
-            normalized_photo_id,
+            photo_id,
         )
-        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
-        return {
-            "status": "error",
-            "reason": "no_safe_r2_key",
-            "photo_id": normalized_photo_id,
-        }
+        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
+        return {"status": "error", "reason": "no_safe_r2_key", "photo_id": photo_id}
 
     try:
         r2 = get_r2_client()
@@ -153,32 +182,24 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
 
         logger.error(
             "[FAST LANE MONITOR] R2 API error probing photo %s (code=%s): %s",
-            normalized_photo_id,
+            photo_id,
             error_code,
             exc,
         )
-        return _retry_or_fail(self, normalized_photo_id, exc)
+        return _retry_or_fail(self, photo_id, exc)
     except (BotoCoreError, OSError) as exc:
-        logger.error(
-            "[FAST LANE MONITOR] Network error probing photo %s: %s",
-            normalized_photo_id,
-            exc,
-        )
-        return _retry_or_fail(self, normalized_photo_id, exc)
+        logger.error("[FAST LANE MONITOR] Network error probing photo %s: %s", photo_id, exc)
+        return _retry_or_fail(self, photo_id, exc)
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.exception(
             "[FAST LANE MONITOR] Unexpected error probing photo %s: %s",
-            normalized_photo_id,
+            photo_id,
             exc,
         )
-        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
-        return {
-            "status": "error",
-            "reason": "unexpected",
-            "photo_id": normalized_photo_id,
-        }
+        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
+        return {"status": "error", "reason": "unexpected", "photo_id": photo_id}
 
-    return _handle_self_heal(normalized_photo_id, probe_key)
+    return _handle_self_heal(photo_id, probe_key)
 
 
 def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:
@@ -204,7 +225,99 @@ def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:
             photo_id,
         )
 
+    generate_photo_web_derivative.delay(photo_id)
     return {"status": "self_healed", "photo_id": photo_id}
+
+
+@shared_task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    name="gallery.tasks.generate_photo_web_derivative",
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
+    from gallery.models import Photo  # noqa: PLC0415
+    from gallery.storage import get_r2_client, upload_local_file_to_r2  # noqa: PLC0415
+
+    try:
+        photo = (
+            Photo.objects
+            .select_related("scene__event__workspace")
+            .get(id=photo_id)
+        )
+    except Photo.DoesNotExist:
+        return {"status": "missing", "photo_id": photo_id}
+
+    if photo.media_type != "IMAGE":
+        return {"status": "skipped_non_image", "photo_id": photo_id}
+
+    workspace = photo.scene.event.workspace
+    if not workspace.watermark_logo:
+        return {"status": "skipped_no_watermark", "photo_id": photo_id}
+
+    if not photo.r2_object_key:
+        return {"status": "skipped_no_origin", "photo_id": photo_id}
+
+    web_key = _build_web_derivative_r2_key(photo)
+    if photo.web_r2_object_key == web_key:
+        return {"status": "already_generated", "photo_id": photo_id, "web_r2_object_key": web_key}
+
+    temp_source_path = None
+    temp_output_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".source") as temp_source:
+            temp_source_path = temp_source.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webp") as temp_output:
+            temp_output_path = temp_output.name
+
+        r2_client = get_r2_client()
+        response = r2_client.get_object(
+            Bucket=settings.CLOUDFLARE_R2_BUCKET_NAME,
+            Key=photo.r2_object_key,
+        )
+        with response["Body"] as source_stream, open(temp_source_path, "wb") as temp_source_file:
+            while True:
+                chunk = source_stream.read(ARCHIVE_STREAM_CHUNK_SIZE)
+                if not chunk:
+                    break
+                temp_source_file.write(chunk)
+
+        with PILImage.open(temp_source_path) as raw_image:
+            prepared = ImageOps.exif_transpose(raw_image)
+            prepared.thumbnail(
+                (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
+                PILImage.Resampling.LANCZOS,
+            )
+            watermarked = _apply_workspace_watermark(prepared, workspace)
+            watermarked.save(
+                temp_output_path,
+                format="WEBP",
+                quality=WEB_DERIVATIVE_QUALITY,
+                method=6,
+            )
+
+        uploaded = upload_local_file_to_r2(
+            temp_output_path,
+            web_key,
+            content_type="image/webp",
+        )
+        if not uploaded:
+            raise RuntimeError("Web derivative upload failed.")
+
+        Photo.objects.filter(id=photo.id).update(web_r2_object_key=web_key)
+        return {"status": "completed", "photo_id": photo_id, "web_r2_object_key": web_key}
+    except Exception as exc:
+        logger.exception("[WEB DERIVATIVE] Failed for photo %s: %s", photo_id, exc)
+        try:
+            raise self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            return {"status": "error", "photo_id": photo_id, "reason": "max_retries_exceeded"}
+    finally:
+        for temp_path in (temp_source_path, temp_output_path):
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
 
 def _handle_abandoned_upload(
@@ -294,10 +407,49 @@ def _build_archive_entry_name(photo: Photo) -> str:
 
 
 def _build_archive_r2_key(job: GalleryArchiveJob) -> str:
+    archive_scope = "full"
+    if job.archive_type == GalleryArchiveType.FAVORITES and job.access_session_id:
+        archive_scope = f"favorites/session_{job.access_session_id}"
+
     return (
         f"archives/tenant_{job.gallery.workspace_id}/"
-        f"gallery_{job.gallery_id}/{job.id}.zip"
+        f"gallery_{job.gallery_id}/{archive_scope}/{job.id}.zip"
     )
+
+
+def _get_archive_photos_queryset(job: GalleryArchiveJob):
+    queryset = (
+        Photo.objects
+        .select_related("scene")
+        .filter(
+            scene__event=job.gallery,
+            status="READY",
+        )
+        .exclude(r2_object_key__isnull=True)
+        .exclude(r2_object_key="")
+    )
+
+    if job.archive_type == GalleryArchiveType.FAVORITES:
+        if not job.access_session_id:
+            raise RuntimeError("Favorites archive requires an access session.")
+
+        allowed_visibility = [VisibilityChoices.PUBLIC]
+        if job.access_session.role == "CLIENT":
+            allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
+
+        queryset = queryset.filter(
+            favorite_selections__session_id=job.access_session_id,
+            visibility__in=allowed_visibility,
+        ).distinct()
+    else:
+        queryset = queryset.filter(
+            visibility__in=[
+                VisibilityChoices.PUBLIC,
+                VisibilityChoices.CLIENT_ONLY,
+            ],
+        )
+
+    return queryset.order_by("scene__display_order", "uploaded_at").iterator()
 
 
 @shared_task(
@@ -313,7 +465,10 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
     from gallery.storage import get_r2_client, upload_local_file_to_r2  # noqa: PLC0415
 
     try:
-        job = GalleryArchiveJob.objects.select_related("gallery__workspace").get(id=archive_job_id)
+        job = GalleryArchiveJob.objects.select_related(
+            "gallery__workspace",
+            "access_session",
+        ).get(id=archive_job_id)
     except GalleryArchiveJob.DoesNotExist:
         logger.warning("[ARCHIVE] Job %s does not exist.", archive_job_id)
         return {"status": "missing", "archive_job_id": archive_job_id}
@@ -344,22 +499,7 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             compression=zipfile.ZIP_DEFLATED,
             allowZip64=True,
         ) as archive_file:
-            photos = (
-                Photo.objects
-                .select_related("scene")
-                .filter(
-                    scene__event=job.gallery,
-                    status="READY",
-                    visibility__in=[
-                        VisibilityChoices.PUBLIC,
-                        VisibilityChoices.CLIENT_ONLY,
-                    ],
-                )
-                .exclude(r2_object_key__isnull=True)
-                .exclude(r2_object_key="")
-                .order_by("scene__display_order", "uploaded_at")
-                .iterator()
-            )
+            photos = _get_archive_photos_queryset(job)
 
             for photo in photos:
                 response = r2_client.get_object(
@@ -415,74 +555,4 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             os.remove(temp_zip_path)
 
 
-@shared_task(
-    bind=True,
-    max_retries=0,
-    name="gallery.tasks.prepare_gallery_bulk_download",
-)
-def prepare_gallery_bulk_download(
-    self,
-    event_id: str,
-    requested_by_user_id: Optional[str] = None,
-    requester_kind: Optional[str] = None,
-) -> Dict[str, Any]:
-    try:
-        gallery = Event.objects.get(id=event_id)
-    except Event.DoesNotExist:
-        logger.warning(
-            "[ARCHIVE] Bulk download requested for missing gallery %s by %s (%s).",
-            event_id,
-            requested_by_user_id,
-            requester_kind,
-        )
-        return {"status": "missing", "gallery_id": event_id}
-
-    active_job = (
-        GalleryArchiveJob.objects
-        .filter(gallery=gallery)
-        .order_by("-created_at")
-        .first()
-    )
-    if active_job and active_job.status in (
-        GalleryArchiveJob.Status.PENDING,
-        GalleryArchiveJob.Status.PROCESSING,
-    ):
-        return {
-            "status": active_job.status.lower(),
-            "gallery_id": str(gallery.id),
-            "archive_job_id": str(active_job.id),
-        }
-
-    if (
-        active_job
-        and active_job.status == GalleryArchiveJob.Status.COMPLETED
-        and active_job.r2_zip_key
-        and active_job.expires_at
-        and active_job.expires_at > timezone.now()
-    ):
-        return {
-            "status": "already_completed",
-            "gallery_id": str(gallery.id),
-            "archive_job_id": str(active_job.id),
-            "r2_zip_key": active_job.r2_zip_key,
-        }
-
-    archive_job = GalleryArchiveJob.objects.create(gallery=gallery)
-    build_result = build_gallery_archive.delay(str(archive_job.id))
-    logger.info(
-        "[ARCHIVE] Queued gallery archive job %s for gallery %s by %s (%s).",
-        archive_job.id,
-        gallery.id,
-        requested_by_user_id,
-        requester_kind,
-    )
-    return {
-        "status": "queued",
-        "gallery_id": str(gallery.id),
-        "archive_job_id": str(archive_job.id),
-        "build_task_id": getattr(build_result, "id", None),
-    }
-
-
-process_fast_lane_asset.queue = "image-processing"
 upload_photo_to_r2 = process_fast_lane_asset

@@ -35,3 +35,17 @@ class GuestAccessThrottle(SimpleRateThrottle):
             'scope': self.scope,
             'ident': f"{ident}:{gallery_id}",
         }
+
+
+class FavoriteSelectionThrottle(SimpleRateThrottle):
+    scope = 'favorite_selection'
+
+    def get_cache_key(self, request, view):
+        gallery_id = view.kwargs.get('gallery_id', '')
+        ident = self.get_ident(request)
+        email = getattr(request.user, 'email', '')
+        role = getattr(request.user, 'role', '')
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': f"{ident}:{gallery_id}:{email}:{role}",
+        }

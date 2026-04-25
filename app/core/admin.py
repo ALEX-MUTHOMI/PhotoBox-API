@@ -102,7 +102,7 @@ class UserAdmin(BaseUserAdmin):
 
 class WorkspaceAdmin(admin.ModelAdmin):
     """Define the admin pages for photographer workspaces."""
-    list_display = ['business_name', 'user', 'custom_domain', 'created_at']
+    list_display = ['business_name', 'user', 'custom_domain', 'brand_color', 'watermark_opacity', 'created_at']
     search_fields = ['business_name', 'custom_domain', 'user__email']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['-created_at']

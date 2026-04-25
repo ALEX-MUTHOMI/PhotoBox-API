@@ -10,6 +10,7 @@ from rest_framework import status
 from core.security import verify_webhook_signature, verify_webhook_timestamp
 # Import the aliased MediaAsset from gallery
 from gallery.models import MediaAsset
+from gallery.tasks import generate_photo_web_derivative
 
 logger = logging.getLogger(__name__)
 _MAX_WEBHOOK_PAYLOAD_BYTES = 5 * 1024 * 1024
@@ -113,6 +114,8 @@ class CloudflareWebhookView(APIView):
 
             if locked_asset.status == "READY" and locked_asset.is_processed:
                 logger.info("Asset %s already READY. Idempotent skip.", r2_object_key)
+                if locked_asset.media_type == "IMAGE":
+                    generate_photo_web_derivative.delay(str(locked_asset.id))
                 return Response({"status": "already_ready"}, status=status.HTTP_200_OK)
 
             if locked_asset.status != "QUARANTINED":
@@ -120,5 +123,7 @@ class CloudflareWebhookView(APIView):
                 locked_asset.is_processed = True
                 locked_asset.save(update_fields=['status', 'is_processed'])
 
+        if asset.media_type == "IMAGE":
+            generate_photo_web_derivative.delay(str(asset.id))
         logger.info("Asset %s successfully marked as READY", r2_object_key)
         return Response({"status": "success"}, status=status.HTTP_200_OK)

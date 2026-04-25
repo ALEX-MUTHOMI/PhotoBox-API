@@ -42,6 +42,7 @@ from gallery.storage import (
     generate_r2_presigned_post,
     validate_r2_key,
 )
+from gallery.tasks import generate_photo_web_derivative
 from gallery.throttles import HeavyLaneTicketThrottle
 from .serializers import (
     MAX_IMAGE_SIZE_BYTES,
@@ -696,6 +697,8 @@ class R2WebhookView(APIView):
                         "[R2-WEBHOOK] Already READY — idempotent skip. key=%r",
                         r2_object_key,
                     )
+                    if locked.media_type == "IMAGE":
+                        generate_photo_web_derivative.delay(str(locked.id))
                     return Response(
                         {"status": "already_ready"},
                         status=status.HTTP_200_OK,
@@ -763,5 +766,7 @@ class R2WebhookView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        if asset.media_type == "IMAGE":
+            generate_photo_web_derivative.delay(str(asset.id))
         logger.info("[R2-WEBHOOK] ✅ Asset marked READY. key=%r", r2_object_key)
         return Response({"status": "success"}, status=status.HTTP_200_OK)

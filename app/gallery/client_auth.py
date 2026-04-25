@@ -4,14 +4,17 @@ from datetime import timedelta
 
 import jwt
 from django.conf import settings
+from django.core import signing
 from django.utils import timezone
 from rest_framework import authentication
 from rest_framework.exceptions import AuthenticationFailed
 
 
 COOKIE_NAME = 'gallery_access'
+SESSION_COOKIE_NAME = 'gallery_session'
 DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
 COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SALT = 'gallery-access-session'
 
 
 def _cookie_name() -> str:
@@ -26,6 +29,10 @@ def _token_lifetime_seconds() -> int:
             DEFAULT_TOKEN_LIFETIME_SECONDS,
         )
     )
+
+
+def _session_cookie_name() -> str:
+    return getattr(settings, 'GALLERY_ACCESS_SESSION_COOKIE_NAME', SESSION_COOKIE_NAME)
 
 
 def normalize_gallery_email(email: str) -> str:
@@ -137,3 +144,49 @@ def clear_gallery_access_cookie(response):
         samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
     )
     return response
+
+
+def set_gallery_access_session_cookie(response, session_id: int):
+    max_age = _token_lifetime_seconds()
+    signed_value = encode_gallery_access_session_cookie(session_id)
+    response.set_cookie(
+        key=_session_cookie_name(),
+        value=signed_value,
+        max_age=max_age,
+        expires=max_age,
+        secure=True,
+        httponly=True,
+        samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
+    )
+    return response
+
+
+def encode_gallery_access_session_cookie(session_id: int) -> str:
+    return signing.dumps(
+        {'session_id': session_id},
+        salt=SESSION_COOKIE_SALT,
+        compress=True,
+    )
+
+
+def get_gallery_access_session_id(request) -> int | None:
+    raw_value = request.COOKIES.get(_session_cookie_name())
+    if not raw_value:
+        return None
+
+    try:
+        payload = signing.loads(
+            raw_value,
+            salt=SESSION_COOKIE_SALT,
+            max_age=_token_lifetime_seconds(),
+        )
+    except signing.SignatureExpired as exc:
+        raise AuthenticationFailed('Gallery session expired.') from exc
+    except signing.BadSignature as exc:
+        raise AuthenticationFailed('Invalid gallery session cookie.') from exc
+
+    session_id = payload.get('session_id')
+    if not isinstance(session_id, int):
+        raise AuthenticationFailed('Invalid gallery session cookie payload.')
+
+    return session_id

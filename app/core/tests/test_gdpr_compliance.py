@@ -6,7 +6,15 @@ from django.test import TestCase, override_settings
 
 from core.models import Workspace
 from gallery import storage as gallery_storage
-from gallery.models import Event, GalleryAccessSession, GalleryArchiveJob, Photo, Scene, VisibilityChoices
+from gallery.models import (
+    Event,
+    FavoriteSelection,
+    GalleryAccessSession,
+    GalleryArchiveJob,
+    Photo,
+    Scene,
+    VisibilityChoices,
+)
 from gallery.storage import delete_r2_objects, get_r2_delete_client
 from user.serializers import UserSerializer
 
@@ -65,6 +73,7 @@ class GDPRComplianceTests(TestCase):
             status="READY",
             is_processed=True,
             r2_object_key="tenant/photo.jpg",
+            web_r2_object_key="web/photo.webp",
         )
         GalleryArchiveJob.objects.create(
             gallery=gallery,
@@ -78,7 +87,7 @@ class GDPRComplianceTests(TestCase):
         mock_delay.assert_called_once()
         args = mock_delay.call_args.args
         self.assertEqual(args[0], str(user.id))
-        self.assertCountEqual(args[1], ["tenant/photo.jpg", "archives/gallery.zip"])
+        self.assertCountEqual(args[1], ["tenant/photo.jpg", "web/photo.webp", "archives/gallery.zip"])
 
     @patch("gallery.storage.get_r2_delete_client")
     def test_delete_r2_objects_uses_batch_delete(self, mock_get_delete_client):
@@ -110,3 +119,4 @@ class GDPRComplianceTests(TestCase):
         self.assertIn(Scene, admin.site._registry)
         self.assertIn(GalleryArchiveJob, admin.site._registry)
         self.assertIn(GalleryAccessSession, admin.site._registry)
+        self.assertIn(FavoriteSelection, admin.site._registry)
