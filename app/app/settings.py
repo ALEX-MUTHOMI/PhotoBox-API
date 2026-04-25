@@ -49,7 +49,14 @@ def _detect_test_mode() -> bool:
         return True
 
     argv = [str(arg).lower() for arg in sys.argv]
-    if any(arg in {"test", "pytest", "py.test"} for arg in argv):
+    if any(
+        arg in {"test", "pytest", "pytest.exe", "py.test"}
+        or arg.endswith("\\pytest.exe")
+        or arg.endswith("/pytest")
+        or arg.endswith("/pytest.exe")
+        or arg.endswith("\\pytest")
+        for arg in argv
+    ):
         return True
 
     return any("/tests/" in arg or "\\tests\\" in arg for arg in argv)
@@ -203,6 +210,12 @@ DATABASES = {
     }
 }
 
+if _IS_TEST and not os.environ.get('DB_NAME'):
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'test_db.sqlite3',
+    }
+
 
 # ============================================================
 # 8. PASSWORD VALIDATION & HASHING
@@ -293,6 +306,7 @@ REST_FRAMEWORK = {
         'heavy_lane_ticket': '10/minute',
         'magic_link_send': '3/minute',
         'guest_access': '10/minute',
+        'favorite_selection': '30/minute',
         'password_reset_request': '3/minute',
     },
 }
@@ -530,15 +544,16 @@ TEST_RUNNER = 'core.utils.test_runner.EnterpriseTestRunner'
 # ============================================================
 if _IS_TEST:
     ALLOWED_HOSTS = list(dict.fromkeys(ALLOWED_HOSTS + ["testserver", "localhost"]))
-
-    # Keep test database teardown deterministic by avoiding persistent
-    # PostgreSQL connections across test cases and container shutdown.
-    DATABASES["default"]["CONN_MAX_AGE"] = 0
+    SECURE_SSL_REDIRECT = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
 
     # -- Celery: run tasks synchronously, no broker required --
+    CELERY_BROKER_URL = 'memory://'
+    CELERY_RESULT_BACKEND = 'cache+memory://'
     CELERY_TASK_ALWAYS_EAGER    = True
     CELERY_TASK_EAGER_PROPAGATES = True
-    CELERY_TASK_STORE_EAGER_RESULT = True
+    CELERY_TASK_STORE_EAGER_RESULT = False
 
     # Keep test uploads entirely off the repository filesystem.
     # Django<4.1 has no built-in InMemoryStorage, so we wire in a tiny

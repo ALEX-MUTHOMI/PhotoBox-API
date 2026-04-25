@@ -5,6 +5,7 @@ from django.contrib import admin
 from .models import (
     ClientAllowlist,
     Event,
+    FavoriteSelection,
     GalleryAccessSession,
     GalleryArchiveJob,
     GalleryMagicLink,
@@ -30,7 +31,7 @@ class PhotoInline(admin.TabularInline):
 @admin.register(Event)
 class EventAdmin(admin.ModelAdmin):
     """Define the admin pages for Events."""
-    list_display = ['title', 'workspace', 'event_type', 'slug', 'is_published', 'created_at']
+    list_display = ['title', 'workspace', 'event_type', 'slug', 'typography_theme', 'color_theme', 'is_published', 'created_at']
     search_fields = ['title', 'slug', 'workspace__business_name']
     list_filter = ['is_published', 'event_type']
     readonly_fields = ['id', 'created_at']
@@ -63,7 +64,7 @@ class PhotoAdmin(admin.ModelAdmin):
     list_display = ['id', 'original_filename', 'scene', 'visibility', 'status', 'file_size_bytes', 'is_processed']
     search_fields = ['original_filename', 'scene__title']
     list_filter = ['visibility', 'status', 'is_processed']
-    readonly_fields = ['id', 'uploaded_at', 'file_size_bytes', 'r2_object_key', 'optimized_url', 'blurhash']
+    readonly_fields = ['id', 'uploaded_at', 'file_size_bytes', 'r2_object_key', 'web_r2_object_key', 'optimized_url', 'blurhash']
     ordering = ['-uploaded_at']
     
     # SCALE FIXES
@@ -87,6 +88,14 @@ class GalleryAccessSessionAdmin(admin.ModelAdmin):
     list_filter = ['role']
     readonly_fields = ['created_at']
     list_select_related = ['gallery']
+
+
+@admin.register(FavoriteSelection)
+class FavoriteSelectionAdmin(admin.ModelAdmin):
+    list_display = ['id', 'session', 'photo', 'created_at']
+    search_fields = ['session__email', 'photo__original_filename', 'session__gallery__title']
+    readonly_fields = ['created_at']
+    list_select_related = ['session', 'photo']
 
 
 @admin.register(ClientAllowlist)

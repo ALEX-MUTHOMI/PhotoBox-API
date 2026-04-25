@@ -107,8 +107,17 @@ class PhotoCloudinaryTests(TestCase):
         REGRESSION: The old architecture used cloudinary.uploader.upload().
         Proves the SDK upload path is completely removed.
         """
-        from unittest.mock import patch
-        with patch('cloudinary.uploader.upload') as mock_upload:
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        mock_upload = Mock()
+        with patch.dict(
+            'sys.modules',
+            {
+                'cloudinary': SimpleNamespace(uploader=SimpleNamespace(upload=mock_upload)),
+                'cloudinary.uploader': SimpleNamespace(upload=mock_upload),
+            },
+        ):
             _ = self.photo.cloudinary_thumbnail_url
             mock_upload.assert_not_called()
 

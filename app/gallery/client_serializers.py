@@ -1,7 +1,14 @@
 from rest_framework import serializers
 
 from gallery.client_auth import normalize_gallery_email
-from gallery.models import Event, Photo, Scene
+from gallery.models import (
+    Event,
+    FavoriteSelection,
+    GalleryAccessRole,
+    Photo,
+    Scene,
+    VisibilityChoices,
+)
 
 
 class MagicLinkRequestSerializer(serializers.Serializer):
@@ -59,7 +66,55 @@ class GalleryPublicSerializer(serializers.ModelSerializer):
             'event_type',
             'event_date',
             'cover_image_url',
+            'cover_photo',
+            'typography_theme',
+            'color_theme',
             'slug',
             'expires_at',
             'scenes',
         ]
+
+
+class FavoriteSelectionWriteSerializer(serializers.Serializer):
+    photo_id = serializers.UUIDField()
+    notes = serializers.CharField(
+        allow_blank=True,
+        max_length=2000,
+        required=False,
+    )
+
+    def validate(self, attrs):
+        gallery = self.context['gallery']
+        role = self.context['role']
+
+        allowed_visibility = [VisibilityChoices.PUBLIC]
+        if role == GalleryAccessRole.CLIENT:
+            allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
+
+        photo = (
+            Photo.objects
+            .select_related('scene')
+            .filter(
+                id=attrs['photo_id'],
+                scene__event=gallery,
+                status='READY',
+                visibility__in=allowed_visibility,
+            )
+            .first()
+        )
+        if photo is None:
+            raise serializers.ValidationError(
+                {'photo_id': 'Photo not found in this gallery.'}
+            )
+
+        attrs['photo'] = photo
+        attrs.setdefault('notes', '')
+        return attrs
+
+
+class FavoriteSelectionSerializer(serializers.ModelSerializer):
+    photo_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = FavoriteSelection
+        fields = ['id', 'photo_id', 'notes', 'created_at']

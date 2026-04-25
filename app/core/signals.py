@@ -15,13 +15,19 @@ def collect_photographer_asset_keys(sender, instance, **kwargs):
         .exclude(r2_object_key="")
         .values_list("r2_object_key", flat=True)
     )
+    web_photo_keys = list(
+        Photo.objects.filter(scene__event__workspace__user=instance)
+        .exclude(web_r2_object_key__isnull=True)
+        .exclude(web_r2_object_key="")
+        .values_list("web_r2_object_key", flat=True)
+    )
     archive_keys = list(
         GalleryArchiveJob.objects.filter(gallery__workspace__user=instance)
         .exclude(r2_zip_key__isnull=True)
         .exclude(r2_zip_key="")
         .values_list("r2_zip_key", flat=True)
     )
-    instance._gdpr_r2_keys = sorted(set(photo_keys + archive_keys))
+    instance._gdpr_r2_keys = sorted(set(photo_keys + web_photo_keys + archive_keys))
 
 
 @receiver(post_delete, sender=User)

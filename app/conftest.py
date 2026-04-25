@@ -4,6 +4,7 @@ import os
 import django
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from PIL import Image as PILImage
 from rest_framework.test import APIClient
@@ -11,6 +12,13 @@ from rest_framework.test import APIClient
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "app.settings")
 django.setup()
+
+
+@pytest.fixture(autouse=True)
+def clear_shared_cache():
+    cache.clear()
+    yield
+    cache.clear()
 
 
 @pytest.fixture

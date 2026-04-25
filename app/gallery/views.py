@@ -3,8 +3,6 @@ Views for the Gallery API (The Pixieset Standard).
 """
 import logging
 import os
-import struct
-from urllib.parse import unquote
 
 from django.db import transaction
 from django.db.models import F
@@ -12,15 +10,15 @@ from django.db.models.functions import Greatest
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from rest_framework import mixins, parsers, status, viewsets
-from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.models import Workspace
-from gallery.models import Event, Scene, Photo
+from gallery.models import Event, FavoriteSelection, Photo, Scene
 from gallery import serializers
 from gallery.throttles import FastLaneUploadThrottle
 
@@ -29,132 +27,6 @@ from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
-CLIENT_GALLERY_ACCESS_SESSION_KEY = "client_gallery_access"
-_ALLOWED_TRAILING_BYTES = b"\x00\t\r\n "
-_MAX_ORIGINAL_FILENAME_LEN = Photo._meta.get_field("original_filename").max_length
-
-
-def _has_non_padding_trailing_bytes(payload: bytes) -> bool:
-    """Allow only inert padding after a well-formed image container terminator."""
-    return any(byte not in _ALLOWED_TRAILING_BYTES for byte in payload)
-
-
-def _assert_no_polyglot_payload(image_file, image_format: str) -> None:
-    """
-    Reject image files that append a second payload after the real image.
-
-    Pillow verifies the image container itself, but formats like JPEG can still
-    carry extra trailing bytes that turn the upload into a JPEG+ZIP polyglot.
-    """
-    image_file.seek(0)
-    raw = image_file.read()
-    image_file.seek(0)
-
-    normalized_format = (image_format or "").upper()
-
-    if normalized_format == "JPEG":
-        jpeg_eoi = raw.rfind(b"\xff\xd9")
-        if jpeg_eoi == -1:
-            raise ValidationError("Malware Shield: Uploaded JPEG is structurally corrupted.")
-        if _has_non_padding_trailing_bytes(raw[jpeg_eoi + 2:]):
-            raise ValidationError("Polyglot payload detected: JPEG contains trailing data.")
-        return
-
-    if normalized_format == "PNG":
-        png_iend = raw.rfind(b"\x49\x45\x4e\x44\xae\x42\x60\x82")
-        if png_iend == -1:
-            raise ValidationError("Malware Shield: Uploaded PNG is structurally corrupted.")
-        if _has_non_padding_trailing_bytes(raw[png_iend + 8:]):
-            raise ValidationError("Polyglot payload detected: PNG contains trailing data.")
-        return
-
-    if normalized_format == "WEBP":
-        if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
-            raise ValidationError("Malware Shield: Uploaded WEBP is structurally corrupted.")
-        declared_size = struct.unpack("<I", raw[4:8])[0] + 8
-        if declared_size <= len(raw) and _has_non_padding_trailing_bytes(raw[declared_size:]):
-            raise ValidationError("Polyglot payload detected: WEBP contains trailing data.")
-
-
-def _sanitize_original_filename(raw_name: str) -> str:
-    """
-    Normalize incoming upload filenames before they reach the database.
-
-    The stored name is metadata only, so we collapse traversal attempts down to
-    the basename and reject null bytes / control characters that Postgres or
-    downstream storage layers would interpret unsafely.
-    """
-    if not raw_name:
-        raise ValidationError("Filename is required.")
-
-    decoded_name = unquote(str(raw_name))
-    if "\x00" in decoded_name:
-        raise ValidationError("Filename contains invalid control characters.")
-
-    candidate = os.path.basename(decoded_name.replace("\\", "/")).strip()
-    if not candidate or candidate in {".", ".."}:
-        raise ValidationError("Filename is invalid.")
-
-    if any(ord(char) < 32 for char in candidate):
-        raise ValidationError("Filename contains invalid control characters.")
-
-    if len(candidate) > _MAX_ORIGINAL_FILENAME_LEN:
-        raise ValidationError(
-            f"Filename exceeds maximum length of {_MAX_ORIGINAL_FILENAME_LEN} characters."
-        )
-
-    return candidate
-
-
-def _client_session_allows_event(request, event) -> bool:
-    """
-    Fail-closed session contract for verified client gallery access.
-
-    The frontend can store a per-gallery access marker after the client passes
-    the gallery PIN or equivalent verification flow. Until then, anonymous
-    requests are denied and no download URL is minted.
-    """
-    session = getattr(request, "session", None)
-    if session is None:
-        return False
-
-    access_map = session.get(CLIENT_GALLERY_ACCESS_SESSION_KEY, {})
-    if not isinstance(access_map, dict):
-        return False
-
-    candidate = access_map.get(str(event.id))
-    if candidate is None:
-        candidate = access_map.get(event.slug)
-
-    if isinstance(candidate, dict):
-        if not candidate.get("verified", False):
-            return False
-        recorded_slug = candidate.get("slug")
-        return not recorded_slug or recorded_slug == event.slug
-
-    return bool(candidate)
-
-
-def _authorize_event_download_access(request, event) -> dict:
-    """
-    Unified download authorizer for photographer-owned and client-gallery flows.
-    """
-    user = getattr(request, "user", None)
-    if user and user.is_authenticated and event.workspace.user_id == user.id:
-        return {
-            "principal": "photographer",
-            "requested_by_user_id": str(user.id),
-        }
-
-    if event.is_published and _client_session_allows_event(request, event):
-        return {
-            "principal": "client",
-            "requested_by_user_id": None,
-        }
-
-    raise PermissionDenied(
-        "You do not have permission to access downloads for this gallery."
-    )
 
 
 # ==========================================
@@ -193,11 +65,6 @@ class EventViewSet(viewsets.ModelViewSet):
 
     # RATE LIMITING: Prevent Denial of Database Rows (No infinite bot creation)
     throttle_classes = [FastLaneUploadThrottle]
-
-    def get_permissions(self):
-        if getattr(self, 'action', None) == 'bulk_download':
-            return [AllowAny()]
-        return [permission() for permission in self.permission_classes]
 
     def get_queryset(self):
         """TENANT ISOLATION: Only retrieve Events owned by the authenticated user."""
@@ -240,39 +107,59 @@ class EventViewSet(viewsets.ModelViewSet):
                 f"to {event.client_email}"
             )
 
-    @action(detail=True, methods=['post'], url_path='bulk-download')
-    def bulk_download(self, request, pk=None):
-        """
-        Queue the high-resolution gallery archive flow.
 
-        The actual ZIP assembly remains asynchronous by design so the API never
-        streams a large archive from the Django worker thread.
-        """
-        from gallery.tasks import prepare_gallery_bulk_download
+class PhotographerFavoritesSummaryView(APIView):
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
 
-        event = Event.objects.select_related('workspace__user').filter(pk=pk).first()
-        if event is None:
-            raise NotFound("Event not found.")
-
-        access = _authorize_event_download_access(request, event)
-        async_result = prepare_gallery_bulk_download.delay(
-            str(event.id),
-            requested_by_user_id=access['requested_by_user_id'],
-            requester_kind=access['principal'],
+    def get(self, request, gallery_id, *args, **kwargs):
+        gallery = (
+            Event.objects
+            .filter(
+                id=gallery_id,
+                workspace__user=request.user,
+            )
+            .first()
         )
+        if gallery is None:
+            raise NotFound("Gallery not found.")
+
+        selections = (
+            FavoriteSelection.objects
+            .select_related("session", "photo__scene")
+            .filter(session__gallery=gallery)
+            .order_by("photo__scene__display_order", "photo__uploaded_at", "created_at")
+        )
+
+        grouped = {}
+        for selection in selections:
+            photo_key = str(selection.photo_id)
+            if photo_key not in grouped:
+                grouped[photo_key] = {
+                    "photo_id": photo_key,
+                    "original_filename": selection.photo.original_filename,
+                    "scene_id": str(selection.photo.scene_id),
+                    "scene_title": selection.photo.scene.title,
+                    "favorite_count": 0,
+                    "selections": [],
+                }
+
+            grouped[photo_key]["favorite_count"] += 1
+            grouped[photo_key]["selections"].append(
+                {
+                    "email": selection.session.email,
+                    "role": selection.session.role,
+                    "notes": selection.notes,
+                    "selected_at": selection.created_at,
+                }
+            )
 
         return Response(
             {
-                "status": "queued",
-                "task_id": async_result.id,
-                "event_id": str(event.id),
-                "delivery_mode": "async_bulk_zip",
-                "message": (
-                    "Bulk gallery download accepted. The archive will be prepared "
-                    "asynchronously so large downloads never run on the request thread."
-                ),
+                "gallery_id": str(gallery.id),
+                "favorites": list(grouped.values()),
             },
-            status=status.HTTP_202_ACCEPTED,
+            status=status.HTTP_200_OK,
         )
 
 
@@ -362,11 +249,6 @@ class PhotoFastLaneViewSet(
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
     pagination_class = FastLanePhotoPagination
 
-    def get_permissions(self):
-        if getattr(self, 'action', None) == 'download_url':
-            return [AllowAny()]
-        return [permission() for permission in self.permission_classes]
-
     def get_queryset(self):
         """
         TENANT ISOLATION AUDIT (Phase 4):
@@ -389,9 +271,7 @@ class PhotoFastLaneViewSet(
         Return a short-lived presigned R2 download URL for a single photo.
 
         This endpoint performs an explicit ownership check so cross-tenant access
-        attempts fail closed before a signed URL can ever be minted. It also
-        supports verified client-gallery sessions so mobile users can tap
-        Download inside the frontend without exposing long-lived URLs in email.
+        attempts fail closed before a signed URL can ever be minted.
         """
         photo = Photo.objects.select_related(
             'scene__event__workspace__user'
@@ -400,11 +280,9 @@ class PhotoFastLaneViewSet(
         if photo is None:
             raise NotFound("Photo not found.")
 
-        access = _authorize_event_download_access(request, photo.scene.event)
-
-        if photo.status != 'READY' or not photo.is_processed:
-            raise ValidationError(
-                "Download URL unavailable. The asset is not ready for download."
+        if photo.scene.event.workspace.user_id != request.user.id:
+            raise PermissionDenied(
+                "You do not have permission to generate a download URL for this photo."
             )
 
         download_url = photo.download_url
@@ -413,15 +291,7 @@ class PhotoFastLaneViewSet(
                 "Download URL unavailable. The asset is not ready for download."
             )
 
-        return Response(
-            {
-                "download_url": download_url,
-                "expires_in_seconds": 60,
-                "delivery_mode": "direct_r2_presigned_get",
-                "requester_kind": access["principal"],
-            },
-            status=status.HTTP_200_OK,
-        )
+        return Response({"download_url": download_url}, status=status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         """
@@ -458,7 +328,6 @@ class PhotoFastLaneViewSet(
         #   Pass 2: Reopen the file to safely inspect metadata (dimensions, format).
         # Single-pass pattern (verify + metadata in one `with`) is a silent Pillow bug.
         try:
-            detected_format = None
             # PASS 1: Structural integrity — rejects corrupted files and disguised executables
             image_file.seek(0)
             probe = PILImage.open(image_file)
@@ -471,8 +340,6 @@ class PhotoFastLaneViewSet(
                     raise ValidationError("Decompression Bomb detected: image pixel count exceeds 100MP.")
                 if img.format not in ['JPEG', 'PNG', 'WEBP']:
                     raise ValidationError("Invalid Magic Bytes. Not a genuine JPEG, PNG, or WEBP.")
-                detected_format = img.format
-            _assert_no_polyglot_payload(image_file, detected_format)
         except UnidentifiedImageError:
             raise ValidationError("Malware Shield: Uploaded file is disguised or structurally corrupted.")
 
@@ -494,7 +361,7 @@ class PhotoFastLaneViewSet(
                 storage_used_bytes=F('storage_used_bytes') + image_file.size
             )
 
-            safe_filename = _sanitize_original_filename(image_file.name)
+            safe_filename = os.path.basename(image_file.name)
 
             # 5. DB WRITE — is_processed=False (the Celery task will flip this to True)
             # This is the LAST thing the web thread does. No Cloudinary. No external I/O.

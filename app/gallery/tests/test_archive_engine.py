@@ -11,8 +11,21 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Workspace
-from gallery.client_auth import issue_gallery_access_token
-from gallery.models import Event, GalleryArchiveJob, Photo, Scene, VisibilityChoices
+from gallery.client_auth import (
+    encode_gallery_access_session_cookie,
+    issue_gallery_access_token,
+)
+from gallery.models import (
+    Event,
+    FavoriteSelection,
+    GalleryAccessRole,
+    GalleryAccessSession,
+    GalleryArchiveJob,
+    GalleryArchiveType,
+    Photo,
+    Scene,
+    VisibilityChoices,
+)
 from gallery.tasks import build_gallery_archive
 
 
@@ -109,6 +122,20 @@ class GalleryArchiveEngineTests(TestCase):
             role="CLIENT",
         )
 
+    def _set_gallery_session_cookie(self, role="CLIENT", email="bride@example.com"):
+        session = GalleryAccessSession.objects.create(
+            gallery=self.gallery,
+            email=email,
+            role=role,
+        )
+        self.client.cookies["gallery_access"] = issue_gallery_access_token(
+            gallery_id=self.gallery.id,
+            email=email,
+            role=role,
+        )
+        self.client.cookies["gallery_session"] = encode_gallery_access_session_cookie(session.id)
+        return session
+
     @patch("gallery.storage.upload_local_file_to_r2")
     @patch("gallery.storage.get_r2_client")
     def test_archive_task_streams_only_allowed_ready_assets(self, mock_get_r2_client, mock_upload):
@@ -156,7 +183,7 @@ class GalleryArchiveEngineTests(TestCase):
 
     @patch("gallery.client_views.generate_r2_presigned_get_url")
     def test_archive_status_returns_short_lived_url_for_matching_gallery_scope(self, mock_presign):
-        GalleryArchiveJob.objects.create(
+        job = GalleryArchiveJob.objects.create(
             gallery=self.gallery,
             status=GalleryArchiveJob.Status.COMPLETED,
             r2_zip_key="archives/test.zip",
@@ -204,3 +231,108 @@ class GalleryArchiveEngineTests(TestCase):
         self.assertEqual(GalleryArchiveJob.objects.filter(gallery=self.gallery).count(), 1)
         job = GalleryArchiveJob.objects.get(gallery=self.gallery)
         mock_delay.assert_called_once_with(str(job.id))
+
+    @patch("gallery.storage.upload_local_file_to_r2")
+    @patch("gallery.storage.get_r2_client")
+    def test_favorites_archive_task_streams_only_current_session_selections(
+        self,
+        mock_get_r2_client,
+        mock_upload,
+    ):
+        session = GalleryAccessSession.objects.create(
+            gallery=self.gallery,
+            email="guest@example.com",
+            role=GalleryAccessRole.GUEST,
+        )
+        FavoriteSelection.objects.create(session=session, photo=self.public_photo)
+        FavoriteSelection.objects.create(session=session, photo=self.client_only_photo)
+        job = GalleryArchiveJob.objects.create(
+            gallery=self.gallery,
+            access_session=session,
+            archive_type=GalleryArchiveType.FAVORITES,
+        )
+        archived_names = []
+
+        mock_client = MagicMock()
+        payloads = {
+            self.public_photo.r2_object_key: b"public-bytes",
+            self.client_only_photo.r2_object_key: b"client-bytes",
+        }
+
+        def fake_get_object(Bucket, Key):
+            return {"Body": _FakeStreamingBody(payloads[Key])}
+
+        def fake_upload(path, key, content_type="application/octet-stream"):
+            with zipfile.ZipFile(path, "r") as archive_file:
+                archived_names.extend(archive_file.namelist())
+            self.assertIn("favorites/session_", key)
+            self.assertEqual(content_type, "application/zip")
+            return True
+
+        mock_client.get_object.side_effect = fake_get_object
+        mock_get_r2_client.return_value = mock_client
+        mock_upload.side_effect = fake_upload
+
+        result = build_gallery_archive(archive_job_id=str(job.id))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(archived_names), 1)
+        self.assertTrue(any("public-" in name for name in archived_names))
+        self.assertFalse(any("client-" in name for name in archived_names))
+
+    @patch("gallery.client_views.build_gallery_archive.delay")
+    def test_favorites_archive_request_queues_job_for_scoped_session(self, mock_delay):
+        session = self._set_gallery_session_cookie(
+            role=GalleryAccessRole.CLIENT,
+            email="bride@example.com",
+        )
+        FavoriteSelection.objects.create(session=session, photo=self.public_photo)
+
+        response = self.client.post(
+            reverse("gallery_public:favorites-archive-request", args=[self.gallery.id]),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        job = GalleryArchiveJob.objects.get(
+            gallery=self.gallery,
+            archive_type=GalleryArchiveType.FAVORITES,
+            access_session=session,
+        )
+        mock_delay.assert_called_once_with(str(job.id))
+
+    @patch("gallery.client_views.generate_r2_presigned_get_url")
+    def test_favorites_archive_status_uses_matching_session_job(self, mock_presign):
+        session = self._set_gallery_session_cookie(
+            role=GalleryAccessRole.GUEST,
+            email="guest@example.com",
+        )
+        other_session = GalleryAccessSession.objects.create(
+            gallery=self.gallery,
+            email="other@example.com",
+            role=GalleryAccessRole.GUEST,
+        )
+        GalleryArchiveJob.objects.create(
+            gallery=self.gallery,
+            access_session=other_session,
+            archive_type=GalleryArchiveType.FAVORITES,
+            status=GalleryArchiveJob.Status.COMPLETED,
+            r2_zip_key="archives/other.zip",
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        GalleryArchiveJob.objects.create(
+            gallery=self.gallery,
+            access_session=session,
+            archive_type=GalleryArchiveType.FAVORITES,
+            status=GalleryArchiveJob.Status.COMPLETED,
+            r2_zip_key="archives/mine.zip",
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        mock_presign.return_value = "https://signed.example.com/favorites.zip"
+
+        response = self.client.get(
+            reverse("gallery_public:favorites-archive-status", args=[self.gallery.id]),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["download_url"], "https://signed.example.com/favorites.zip")
+        self.assertEqual(mock_presign.call_args.kwargs["key"], "archives/mine.zip")

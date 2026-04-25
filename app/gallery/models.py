@@ -20,6 +20,12 @@ class GalleryAccessRole(models.TextChoices):
     CLIENT = 'CLIENT', 'Client'
     GUEST = 'GUEST', 'Guest'
 
+
+class GalleryArchiveType(models.TextChoices):
+    FULL = 'FULL', 'Full Gallery'
+    FAVORITES = 'FAVORITES', 'Favorites Only'
+
+
 class Event(models.Model):
     """
     THE GIG: Top-level access control and tenant isolation.
@@ -44,6 +50,9 @@ class Event(models.Model):
     event_date = models.DateField(blank=True, null=True)
 
     cover_image_url = models.URLField(blank=True, null=True)
+    cover_photo = models.URLField(blank=True, null=True)
+    typography_theme = models.CharField(max_length=64, default='editorial-serif')
+    color_theme = models.CharField(max_length=64, default='linen-ink')
 
     # ENGINEER FIX: Removed global unique=True. Replaced with UniqueConstraint below.
     slug = models.SlugField(max_length=255, db_index=True)
@@ -145,6 +154,7 @@ class Photo(models.Model):
     media_type = models.CharField(max_length=10, choices=[('IMAGE', 'Image'), ('VIDEO', 'Video')], default='IMAGE')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     optimized_url = models.URLField(max_length=1024, blank=True, null=True)
+    web_r2_object_key = models.CharField(max_length=1024, blank=True, null=True)
 
     # --- PILLAR 2: YOUR LEGACY FIELDS (Backward Compatibility) ---
     # Made optional (blank/null=True) so the new EDA bulk ingestion doesn't crash on insert.
@@ -173,8 +183,8 @@ class Photo(models.Model):
     class Meta:
         ordering = ['uploaded_at']
         indexes = [
-            models.Index(fields=['scene', 'is_processed']),  # Legacy frontend query
-            models.Index(fields=['scene', 'status']),  # New EDA frontend polling query
+            models.Index(fields=['scene', 'is_processed']), # Legacy frontend query
+            models.Index(fields=['scene', 'status']),       # New EDA frontend polling query
         ]
 
     @property
@@ -196,8 +206,9 @@ class Photo(models.Model):
         cloud_name = getattr(settings, 'CLOUDINARY_CLOUD_NAME', '')
         r2_domain = getattr(settings, 'CLOUDFLARE_R2_DOMAIN', '').rstrip('/')
 
-        if self.r2_object_key and cloud_name and r2_domain:
-            r2_public_url = f"https://{r2_domain}/{self.r2_object_key}"
+        delivery_key = self.web_r2_object_key or self.r2_object_key
+        if delivery_key and cloud_name and r2_domain:
+            r2_public_url = f"https://{r2_domain}/{delivery_key}"
             return (
                 f"https://res.cloudinary.com/{cloud_name}"
                 f"/image/fetch/q_auto,f_webp/{r2_public_url}"
@@ -298,10 +309,7 @@ class ClientAllowlist(models.Model):
             ),
         ]
         indexes = [
-            models.Index(
-                fields=['gallery', 'email'],
-                name='gal_allow_gallery_email_idx',
-            ),
+            models.Index(fields=['gallery', 'email']),
         ]
 
     def __str__(self):
@@ -323,10 +331,7 @@ class GalleryMagicLink(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(
-                fields=['gallery', 'email'],
-                name='gal_magic_gallery_email_idx',
-            ),
+            models.Index(fields=['gallery', 'email']),
         ]
 
     def __str__(self):
@@ -347,18 +352,49 @@ class GalleryAccessSession(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(
-                fields=['gallery', 'email'],
-                name='gal_access_gallery_email_idx',
-            ),
-            models.Index(
-                fields=['gallery', 'role'],
-                name='gal_access_gallery_role_idx',
-            ),
+            models.Index(fields=['gallery', 'email']),
+            models.Index(fields=['gallery', 'role']),
         ]
 
     def __str__(self):
         return f"{self.gallery.title} [{self.role}] {self.email}"
+
+
+class FavoriteSelection(models.Model):
+    """
+    Proofing selections tied to a concrete authenticated gallery session.
+
+    The unique constraint prevents selection spam and race-condition dupes
+    where the same browser session submits the same photo twice.
+    """
+    session = models.ForeignKey(
+        GalleryAccessSession,
+        on_delete=models.CASCADE,
+        related_name='favorite_selections',
+    )
+    photo = models.ForeignKey(
+        Photo,
+        on_delete=models.CASCADE,
+        related_name='favorite_selections',
+    )
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session', 'photo'],
+                name='unique_favorite_per_session_photo',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['session', 'created_at']),
+            models.Index(fields=['photo', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.session.email} -> {self.photo.original_filename}"
 
 
 class GalleryArchiveJob(models.Model):
@@ -369,6 +405,19 @@ class GalleryArchiveJob(models.Model):
         FAILED = 'FAILED', 'Failed'
 
     gallery = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='archive_jobs')
+    access_session = models.ForeignKey(
+        GalleryAccessSession,
+        on_delete=models.CASCADE,
+        related_name='archive_jobs',
+        blank=True,
+        null=True,
+    )
+    archive_type = models.CharField(
+        max_length=20,
+        choices=GalleryArchiveType.choices,
+        default=GalleryArchiveType.FULL,
+        db_index=True,
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -382,13 +431,20 @@ class GalleryArchiveJob(models.Model):
 
     class Meta:
         ordering = ['-created_at']
-        indexes = [
-            models.Index(
-                fields=['gallery', 'status'],
-                name='gal_archive_gallery_status_idx',
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(archive_type=GalleryArchiveType.FULL)
+                    | models.Q(access_session__isnull=False)
+                ),
+                name='favorites_archives_require_access_session',
             ),
+        ]
+        indexes = [
+            models.Index(fields=['gallery', 'status']),
+            models.Index(fields=['gallery', 'archive_type', 'status']),
         ]
 
     def __str__(self):
-        return f"{self.gallery.title} archive [{self.status}]"
+        return f"{self.gallery.title} {self.archive_type.lower()} archive [{self.status}]"
 
