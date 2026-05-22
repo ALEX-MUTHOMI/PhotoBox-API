@@ -62,7 +62,7 @@ class CloudflareWebhookView(APIView):
             payload_bytes,
             canonical_timestamp,
             cloudflare_signature,
-            secret_setting="CLOUDFLARE_WEBHOOK_SECRET",
+            secret_setting="CLOUDFLARE_WEBHOOK_SECRET",  # nosec B106 - setting name, not a secret value.
         )
         if not signature_valid:
             if signature_reason in ("secret_not_configured", "secret_encoding_error"):

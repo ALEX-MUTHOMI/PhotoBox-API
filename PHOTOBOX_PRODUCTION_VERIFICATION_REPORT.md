@@ -691,3 +691,185 @@ Verification:
 Current status: base-engineering ready.
 
 Not production ready. The secure base-engineering gates now pass locally with Docker/Poetry using safe `.env.example` inputs, but production readiness still requires Dockerfile lockfile migration, CI execution on GitHub, secret rotation for any locally exposed value, and deployment environment validation with real secret-manager values.
+
+## Secure Base Hardening Phase
+
+Date: 2026-05-22
+
+Starting classification: base-engineering ready, not production ready.
+
+Safety constraints:
+
+- No PhotoBox product features.
+- No Darasa domain logic.
+- No weakened security gates.
+- No hidden failures or skipped tests.
+- No printed or committed secret values.
+- Preserve the already passing local base gates while hardening Docker, CI, Toxiproxy, secrets, and deployment readiness.
+
+Already passing local gates at phase start:
+
+| Gate | Result |
+|---|---|
+| secret-hygiene | pass |
+| env-sanity | pass |
+| validate | pass manual equivalent |
+| django-smoke | pass |
+| compose-config | pass |
+| lint | pass |
+| security | pass, 87 tests |
+| unit | pass, 286 tests |
+| celery | pass, 18 tests |
+| integration | pass, 2 tests |
+| toxiproxy | pass, 4 smoke tests |
+| docker-build | pass |
+
+Hardening targets:
+
+- Migrate Dockerfile to Poetry lockfile install.
+- Keep Windows dev/test free of Linux-only `uwsgi` while preserving deploy/Linux server coverage.
+- Close out local secret exposure handling without recording values.
+- Verify CI output redaction controls.
+- Verify or document remote GitHub Actions gate status.
+- Extend Toxiproxy from basic smoke to bounded failure and recovery invariants.
+- Reconfirm deployment health, production fail-closed behavior, and placeholder-only config.
+
+## Secure Base Hardening Phase Closeout
+
+Date: 2026-05-22
+
+This section supersedes earlier notes that described the Dockerfile as requirements-based. The Dockerfile now installs dependencies through Poetry from `pyproject.toml` and `poetry.lock`.
+
+### Secret Rotation and Hygiene Closeout
+
+- `.env` remains ignored and untracked; no `.env` values were recorded in this report.
+- `scripts/ci/secret_hygiene.py` passed and reported no tracked likely real secrets.
+- A local ignored `SECRET_KEY` value may have been exposed earlier in terminal output. Rotation is still recommended for the local value; if the same value was ever used outside local development, rotate it at the source provider.
+- CI scripts were hardened to avoid direct Compose reads from local `.env` by defaulting Compose wrappers to `--env-file .env.example`.
+- Bandit output is now redacted through `scripts/ci/bandit_redacted.py`; CI prints file, line, rule, severity, and confidence only, not source snippets or literal secret-like values.
+
+### Dockerfile Poetry Lockfile Migration
+
+- Dockerfile now copies `pyproject.toml` and `poetry.lock` before app source and installs dependencies with Poetry 2.4.1 from the lockfile.
+- Local/test images install `dev,test,lint,security` and explicitly exclude deploy-only dependencies.
+- Production/deploy Docker build installs the `deploy` group so Linux-only `uwsgi` remains covered without forcing Windows dev/test to build it.
+- Poetry is uninstalled after dependency installation and build packages are purged before runtime.
+- `requirements.txt` is retained only as legacy reference; it is no longer the Dockerfile dependency source of truth.
+
+### Dependency Security Hardening
+
+- `pip-audit` originally blocked on vulnerable versions of Django, django-allauth, Django REST Framework, SimpleJWT, and pytest.
+- Dependencies were upgraded through `pyproject.toml` and `poetry.lock` under Python 3.12 using an ephemeral Docker container because host Python 3.12 was not visible to the active Windows user.
+- Current verified runtime includes Django 4.2.30 and pytest 9.0.3.
+- `pip-audit` now reports no known vulnerabilities.
+
+### Toxiproxy Resilience Hardening
+
+Toxiproxy coverage was expanded from 4 smoke checks to 7 bounded resilience checks:
+
+- Normal Postgres proxy socket path.
+- Normal Redis proxy socket path.
+- Postgres latency, cut, and recovery bounded behavior.
+- Postgres cut during transaction with no partial commit invariant.
+- Redis latency, cut, and recovery bounded behavior.
+- Redis cut during status write does not mark work complete.
+- Celery broker cut is explicit and does not produce successful async state.
+
+Remaining P1 resilience work: add domain-specific quota/upload corruption checks around real PhotoBox upload workflows under toxic windows.
+
+### Deployment Sanity Hardening
+
+- `/api/health-check/` and `/health/` smoke routes remain verified.
+- Docker Compose base, Toxiproxy, and deploy configs validate with `.env.example`.
+- Django `manage.py check` reports no issues after adding required allauth middleware and updating deprecated allauth settings.
+- Production dependency path keeps `uwsgi` in the deploy group.
+- `.env.example`, Compose files, workflows, and this report do not contain real secret values.
+
+### GitHub Actions Remote CI Verification
+
+Remote GitHub Actions were not executed in this session because no commit/push was performed. Local Docker-backed gates now match the intended split CI gates, but remote CI status remains `not run`.
+
+### Full Gate Re-run
+
+| Gate | Local Result | CI Result | Notes |
+|---|---|---|---|
+| secret-hygiene | pass | not run | `python scripts\ci\secret_hygiene.py`; no values printed. |
+| env-sanity | pass | not run | Controlled placeholder env; no values printed. |
+| validate | pass | not run | Poetry lock validation passed in Python 3.12 Docker; Compose config passed. |
+| django-smoke | pass | not run | 5 smoke tests passed. |
+| compose-config | pass | not run | Base, Toxiproxy, and deploy compose configs passed with `.env.example`. |
+| lint | pass | not run | `flake8` passed. |
+| security | pass | not run | 87 security tests passed; Bandit 0 issues; pip-audit no known vulnerabilities. |
+| unit | pass | not run | 286 tests passed. |
+| celery | pass | not run | 18 tests passed. |
+| integration | pass | not run | 2 Django/Postgres/Redis tests passed. |
+| toxiproxy | pass | not run | 7 bounded resilience tests passed. |
+| docker-build | pass | not run | `docker build .`, `docker compose --env-file .env.example build`, and test image build passed. |
+
+### Files Changed
+
+- `Dockerfile`
+- `pyproject.toml`
+- `poetry.lock`
+- `docker-compose.yml`
+- `scripts/ci/bandit_redacted.py`
+- `scripts/ci/security.sh`
+- `scripts/ci/lint.sh`
+- `scripts/ci/unit.sh`
+- `scripts/ci/celery.sh`
+- `scripts/ci/integration.sh`
+- `scripts/ci/django_smoke.sh`
+- `scripts/ci/toxiproxy_smoke.sh`
+- `scripts/ci/docker_build.sh`
+- `tests/resilience/test_toxiproxy_smoke.py`
+- `app/app/settings.py`
+- `app/conftest.py`
+- `app/gallery/management/commands/seed_db.py`
+- `app/gallery/models.py`
+- `app/ingestion/views.py`
+- `app/user/serializers.py`
+- `app/user/views.py`
+- `app/webhooks/views.py`
+- `PHOTOBOX_PRODUCTION_VERIFICATION_REPORT.md`
+
+### Commands Run
+
+- `git -c safe.directory='C:/Project P/photobox-api' status --short`
+- `git -c safe.directory='C:/Project P/photobox-api' diff --stat`
+- `git -c safe.directory='C:/Project P/photobox-api' diff --check`
+- `docker run --rm -v "${PWD}:/repo" -w /repo python:3.12-slim-bookworm sh -c "pip install poetry==2.4.1 && poetry lock"`
+- `docker run --rm -v "${PWD}:/repo" -w /repo python:3.12-slim-bookworm sh -c "pip install poetry==2.4.1 >/tmp/poetry-install.log && poetry check --lock"`
+- `python scripts\ci\secret_hygiene.py`
+- `python scripts\ci\env_sanity.py` with controlled placeholder env
+- `docker compose --env-file .env.example config -q`
+- `docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q`
+- `docker compose --env-file .env.example -f docker-compose-deploy.yml config -q`
+- `docker compose --env-file .env.example --profile test build test`
+- `docker compose --env-file .env.example --profile test run --rm test python manage.py check`
+- `docker compose --env-file .env.example --profile test run --rm test flake8`
+- `docker compose --env-file .env.example --profile test run --rm test security`
+- `docker compose --env-file .env.example --profile test run --rm test python /scripts/ci/bandit_redacted.py -r . -c /repo-config/pyproject.toml`
+- `docker compose --env-file .env.example --profile test run --rm test python -m pip_audit`
+- `docker compose --env-file .env.example --profile test run --rm test unit`
+- `docker compose --env-file .env.example --profile test run --rm test celery`
+- `docker compose --env-file .env.example --profile test run --rm test python -m pytest /repo-tests/smoke --ds=app.settings -v --tb=short --timeout=30 -o cache_dir=/home/django-user/.pytest-cache`
+- `docker compose --env-file .env.example --profile test run --rm test python -m pytest /repo-tests/integration --ds=app.settings -v --tb=short --timeout=60 -o cache_dir=/home/django-user/.pytest-cache`
+- `docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.toxiproxy.yml run --rm test python -m pytest /repo-tests/resilience -vv -s --tb=short --timeout=30 --maxfail=1`
+- `docker build .`
+- `docker compose --env-file .env.example build`
+
+### Remaining Blockers
+
+1. Remote GitHub Actions have not been run for these changes.
+2. Local ignored `.env` `SECRET_KEY` rotation is still recommended; production rotation is required if that value was ever reused outside local development.
+3. Windows host Python 3.12 is not visible to the active user; Poetry lock validation was therefore performed in Python 3.12 Docker.
+4. Local Bash/WSL remains unavailable; Bash scripts are verified by Docker/Linux-compatible command equivalents locally and should be exercised by GitHub Actions.
+5. P1 domain resilience remains for quota/upload corruption invariants under real PhotoBox workflow toxics.
+
+### Final Classification
+
+Current classification: base-engineering ready with local production-base hardening implemented.
+
+Not yet `production-base ready` because remote GitHub Actions have not been executed and local secret rotation cannot be confirmed from this session.
+
+Not full `production ready`; product-level hardening still requires quota, webhook, billing, archive, signed URL, deployment-secret, and frontend-contract verification beyond base platform gates.

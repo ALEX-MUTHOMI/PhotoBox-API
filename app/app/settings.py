@@ -203,6 +203,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -343,7 +344,7 @@ REST_FRAMEWORK = {
         'magic_link_send': '3/minute',
         'guest_access': '10/minute',
         'favorite_selection': '30/minute',
-        'password_reset_request': '3/minute',
+        'password_reset_request': '3/minute',  # nosec B105 - throttle scope label, not a secret.
     },
 }
 
@@ -381,9 +382,8 @@ JWT_AUTH_COOKIE         = 'access'
 JWT_AUTH_REFRESH_COOKIE = 'refresh'
 
 ACCOUNT_USER_MODEL_USERNAME_FIELD  = None
-ACCOUNT_EMAIL_REQUIRED             = True
-ACCOUNT_USERNAME_REQUIRED          = False
-ACCOUNT_AUTHENTICATION_METHOD      = 'email'
+ACCOUNT_LOGIN_METHODS              = {'email'}
+ACCOUNT_SIGNUP_FIELDS              = ['email*', 'password1*', 'password2*']
 
 # Prevent blind social account takeovers:
 # Google login matching an existing email is blocked, not auto-linked.

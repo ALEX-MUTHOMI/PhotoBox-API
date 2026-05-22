@@ -69,8 +69,8 @@ services:
       - "${APP_PORT:-8001}:8000"
     volumes:
       - ./app:/app
-      - ./pyproject.toml:/app/pyproject.toml:ro
       - ./tests:/repo-tests:ro
+      - ./pyproject.toml:/repo-config/pyproject.toml:ro
       - dev-static-data:/vol/web
     command: >
       sh -c "python manage.py wait_for_db &&
@@ -97,8 +97,8 @@ services:
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes:
       - ./app:/app
-      - ./pyproject.toml:/app/pyproject.toml:ro
       - ./tests:/repo-tests:ro
+      - ./pyproject.toml:/repo-config/pyproject.toml:ro
       - dev-static-data:/vol/web
     command: >
       sh -c "python manage.py wait_for_db &&
@@ -127,8 +127,8 @@ services:
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes:
       - ./app:/app
-      - ./pyproject.toml:/app/pyproject.toml:ro
       - ./tests:/repo-tests:ro
+      - ./pyproject.toml:/repo-config/pyproject.toml:ro
       - dev-static-data:/vol/web
     entrypoint: ["/scripts/run-tests.sh"]
     command: ["unit"]

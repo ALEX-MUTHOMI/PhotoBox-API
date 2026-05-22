@@ -33,7 +33,7 @@ def user_factory(db):
     def create_user(**overrides):
         defaults = {
             "email": "photographer@example.com",
-            "password": "StrongPassword123!",
+            "password": "StrongPassword123!",  # nosec B105 - deterministic test fixture credential.
             "name": "PhotoBox User",
             "accepted_terms": True,
         }

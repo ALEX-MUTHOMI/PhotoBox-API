@@ -1,11 +1,16 @@
 import uuid
 from django.conf import settings
+import logging
+
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth.hashers import make_password, check_password
 
 # Assuming Workspace is defined in core.models
 from core.models import Workspace
+
+
+logger = logging.getLogger(__name__)
 
 
 class VisibilityChoices(models.TextChoices):
@@ -244,7 +249,7 @@ class Photo(models.Model):
             try:
                 return self.image_file.url
             except Exception:
-                pass
+                logger.debug("Legacy local image URL was unavailable.", exc_info=True)
 
         return None
 

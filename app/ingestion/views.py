@@ -383,7 +383,7 @@ def _verify_webhook_hmac(
         payload_bytes,
         timestamp,
         signature_header,
-        secret_setting="CLOUDFLARE_WEBHOOK_SECRET",
+        secret_setting="CLOUDFLARE_WEBHOOK_SECRET",  # nosec B106 - setting name, not a secret value.
     )
 
 
