@@ -1,0 +1,63 @@
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    profiles: ["toxiproxy"]
+    command: ["toxiproxy-server", "-host", "0.0.0.0", "-listen", "0.0.0.0:8474"]
+    environment:
+      LOG_LEVEL: info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  toxiproxy-test:
+    profiles: ["toxiproxy"]
+    build:
+      context: .
+      args:
+        DEV: "true"
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
+    working_dir: /app
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    network_mode: "service:toxiproxy"
+    volumes:
+      - ./app:/app
+      - dev-static-data:/vol/web
+    entrypoint: ["/scripts/ci/toxiproxy_smoke.sh"]
+    environment:
+      DB_HOST: 127.0.0.1
+      DB_NAME: devdb
+      DB_USER: devuser
+      DB_PASS: changeme
+      DEBUG: "0"
+      TESTING: "0"
+      SECRET_KEY: ci-toxiproxy-secret-key-do-not-use-in-prod-0123456789
+      JWT_SIGNING_KEY: test-signing-key-that-is-at-least-32-bytes-long!!
+      PYTHONPATH: /app
+      PYTHONDONTWRITEBYTECODE: "1"
+      REDIS_URL: redis://127.0.0.1:6379/1
+      CELERY_BROKER_URL: redis://127.0.0.1:6379/0
+      CELERY_RESULT_BACKEND: redis://127.0.0.1:6379/0
+      CLOUDFLARE_R2_ENDPOINT: https://placeholder.r2.cloudflarestorage.com
+      CLOUDFLARE_R2_BUCKET_NAME: test-bucket
+      CLOUDFLARE_ACCESS_KEY_ID: test-access-key
+      CLOUDFLARE_SECRET_ACCESS_KEY: test-secret-key
+      CLOUDFLARE_R2_DOMAIN: placeholder.r2.cloudflarestorage.com
+      CLOUDFLARE_WEBHOOK_SECRET: test-webhook-secret
+      CLOUDINARY_CLOUD_NAME: photobox-app
+      FRONTEND_URL: http://localhost:3000
+      EMAIL_BACKEND: django.core.mail.backends.locmem.EmailBackend
+      LEMON_SQUEEZY_API_KEY: test-key
+      LEMON_SQUEEZY_STORE_ID: "1"
+      LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY: test-ls-secret
+      LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY: ""
+      TOXIPROXY_URL: http://127.0.0.1:8474
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started

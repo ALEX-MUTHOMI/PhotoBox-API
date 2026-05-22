@@ -23,7 +23,7 @@
 #   E2E_PHOTOGRAPHER_PASSWORD
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: test-unit test-celery test-cloudinary test-cloudflare test-e2e test-all test-coverage
+.PHONY: test-unit test-celery test-cloudinary test-cloudflare test-e2e test-all test-coverage ci-validate ci-lint ci-security ci-django-smoke ci-unit ci-celery ci-toxiproxy
 
 # Unit tests only — no external services, no broker — safe for pre-commit hooks
 test-unit:
@@ -92,3 +92,25 @@ test-parallel:
 	pytest tests/ -m "unit" \
 		-n auto \
 		--timeout=30
+
+# Dockerized CI-aligned verification targets
+ci-validate:
+	docker compose config -q
+
+ci-lint:
+	docker compose run --rm test flake8
+
+ci-security:
+	docker compose run --rm test security -x
+
+ci-django-smoke:
+	docker compose run --rm -v "$$(pwd)/scripts:/scripts" --entrypoint sh test /scripts/ci/django_smoke.sh
+
+ci-unit:
+	docker compose run --rm test unit
+
+ci-celery:
+	docker compose run --rm test celery
+
+ci-toxiproxy:
+	docker compose -f docker-compose.yml -f docker-compose.toxiproxy.yml --profile toxiproxy run --rm -v "$$(pwd)/scripts:/scripts" toxiproxy-test

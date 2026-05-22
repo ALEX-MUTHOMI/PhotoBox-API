@@ -34,6 +34,29 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bool_strict(name: str, default: bool = False) -> bool:
+    """
+    Parse a boolean environment variable with explicit validation.
+
+    This avoids ambiguous crashes such as ValueError from int("release")
+    while still failing closed for unexpected values in production.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    raise ImproperlyConfigured(
+        f"Invalid boolean value for {name}: {value!r}. "
+        "Expected one of: 1, 0, true, false, yes, no, on, off."
+    )
+
+
 def _detect_test_mode() -> bool:
     """
     Detect both Django's built-in test runner and pytest/pytest-django.
@@ -88,7 +111,7 @@ if not _IS_TEST:
 # 2. CORE DJANGO SETTINGS
 # ============================================================
 SECRET_KEY = os.environ.get('SECRET_KEY', 'INSECURE-LOCAL-DEV-KEY-DO-NOT-USE-IN-PROD')
-DEBUG      = bool(int(os.environ.get('DEBUG', 0)))
+DEBUG      = _env_bool_strict('DEBUG', default=False)
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -112,6 +135,7 @@ SITE_ID            = 1
 # ============================================================
 if not DEBUG:
     SECURE_SSL_REDIRECT            = True
+    SECURE_PROXY_SSL_HEADER        = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_HSTS_SECONDS            = 31536000   # 1 year
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD            = True
