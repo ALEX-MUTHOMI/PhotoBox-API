@@ -74,7 +74,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "-H", "X-Forwarded-Proto: https", "http://127.0.0.1:8000/api/health-check/"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health-check/', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5

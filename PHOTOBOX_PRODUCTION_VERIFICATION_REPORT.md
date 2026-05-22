@@ -1,514 +1,498 @@
-# PHOTOBOX Production Verification Report
+# PhotoBox Production Verification Report
 
-## Phase 0 Baseline
+Date: 2026-05-22
+Branch inspected: `development`
+Remote inspected: `origin https://github.com/ALEX-MUTHOMI/PhotoBox-API.git`
 
-### Scope
+## 1. Base Engineering Scope Lock
 
-This report is based on local repository inspection and local/Dockerized execution only. Source code and executable results are treated as authoritative. The external assessment `.docx` file was not readable during this pass because the file was locked by another process.
+PhotoBox remains a photography SaaS. Its domain remains photographer accounts, workspaces, events, scenes, media uploads, public/client galleries, favorites, archive jobs, checkout, billing, webhooks, Cloudflare R2, Cloudinary delivery, Celery/Redis, PostgreSQL, and Lemon Squeezy.
 
-### Repository Layout
+No Darasa domain logic is being imported. This pass is infrastructure and base engineering only.
 
-- Backend root contains Django app code under `app/`, Docker assets, scripts, GitHub Actions, and two documentation sites.
-- Primary backend apps found in `INSTALLED_APPS`: `core`, `user`, `gallery`, `billing`, `checkout`, `ingestion`, `webhooks`.
-- Legacy/compatibility models also exist in `core` (`Gallery`, `Image`) beside the newer event/scene/photo model set.
+Product behavior changes are allowed only when required to make verification truthful.
 
-### Runtime Stack
+Allowed product-adjacent fixes in this pass:
 
-| Area | Actual Baseline | Evidence |
-|---|---|---|
-| Python | Local venv `3.13.7`; Docker test runtime `3.12.13` | `venv\Scripts\python.exe --version`; `docker compose run --rm test ...` |
-| Django | `4.0.10` | `venv\Scripts\python.exe -m pip show Django` |
-| DRF | `3.13.1` | `venv\Scripts\python.exe -m pip show djangorestframework` |
-| Celery | `5.6.3` locally; worker config from Django settings | `venv\Scripts\python.exe -m pip show celery`, [app/app/celery.py](/abs/path/c:/Project P/photobox-api/app/app/celery.py:1) |
-| Database | PostgreSQL in runtime config; SQLite fallback only for tests | [app/app/settings.py](/abs/path/c:/Project P/photobox-api/app/app/settings.py:202), [docker-compose.yml](/abs/path/c:/Project P/photobox-api/docker-compose.yml:25) |
-| Broker / cache | Redis | [app/app/settings.py](/abs/path/c:/Project P/photobox-api/app/app/settings.py:266), [docker-compose.yml](/abs/path/c:/Project P/photobox-api/docker-compose.yml:43) |
-| Object storage | Cloudflare R2 | [app/app/settings.py](/abs/path/c:/Project P/photobox-api/app/app/settings.py:395) |
-| CDN / delivery | Cloudinary fetch delivery | [app/app/settings.py](/abs/path/c:/Project P/photobox-api/app/app/settings.py:412), [app/gallery/models.py](/abs/path/c:/Project P/photobox-api/app/gallery/models.py:179) |
-| Billing provider | Lemon Squeezy | [app/app/settings.py](/abs/path/c:/Project P/photobox-api/app/app/settings.py:418) |
+- DEBUG parsing
+- health route alignment
+- missing dependency drift visibility
+- settings import failure prevention
+- deployment config mismatch
+- test environment instability visibility
 
-### Actual Django Apps
+Disallowed changes in this pass:
 
-- `core`: custom `User`, `Workspace`, legacy `Gallery` / `Image`, security helpers, signals, health check.
-- `user`: registration, JWT login/refresh, Google social login, password reset, throttling.
-- `gallery`: photographer event/scene/photo APIs, public/client gallery access, favorites, archive jobs, storage utilities, Celery tasks.
-- `billing`: Lemon Squeezy webhook handling, subscription/quota ledger, audit log, dead-letter queue.
-- `checkout`: plan listing and checkout session generation.
-- `ingestion`: heavy-lane bulk manifest flow and one R2 webhook path.
-- `webhooks`: second Cloudflare/R2 webhook path with separate tests.
+- new product features
+- broad refactors
+- Darasa domain concepts
+- unproven event backbone rewrites
+- hiding failing tests
 
-### Actual API Route Map
+## Repository Reconciliation
 
-| Area | Routes | Evidence |
-|---|---|---|
-| Health/docs | `/api/health-check/`, `/api/schema/`, `/api/docs/` | [app/app/urls.py](/abs/path/c:/Project P/photobox-api/app/app/urls.py:12) |
-| Photographer auth | `/api/user/create/`, `/api/user/token/`, `/api/user/token/refresh/`, `/api/user/google/`, `/api/user/password-reset/`, `/api/user/password-reset/confirm/`, `/api/user/me/` | [app/user/urls.py](/abs/path/c:/Project P/photobox-api/app/user/urls.py:9) |
-| Dashboard/event/scene | `/api/gallery/dashboard/`, router-backed `/api/gallery/events/`, `/api/gallery/scenes/` | [app/gallery/urls.py](/abs/path/c:/Project P/photobox-api/app/gallery/urls.py:35) |
-| Fast Lane uploads | router-backed `/api/gallery/fast-lane/photos/`, explicit `/api/gallery/fast-lane/photos/<uuid:pk>/download-url/` | [app/gallery/urls.py](/abs/path/c:/Project P/photobox-api/app/gallery/urls.py:24) |
-| Heavy Lane ingestion | `/api/v1/ingestion/bulk/` | [app/ingestion/urls.py](/abs/path/c:/Project P/photobox-api/app/ingestion/urls.py:4) |
-| R2 webhook paths | `/api/v1/ingestion/webhook/` and `/api/v1/webhooks/cloudflare/r2/` | [app/ingestion/urls.py](/abs/path/c:/Project P/photobox-api/app/ingestion/urls.py:9), [app/webhooks/urls.py](/abs/path/c:/Project P/photobox-api/app/webhooks/urls.py:4) |
-| Public/client gallery | `/api/galleries/<gallery_id>/`, magic link, guest access, favorites, archive, archive status, favorites archive/status | [app/gallery/client_urls.py](/abs/path/c:/Project P/photobox-api/app/gallery/client_urls.py:7) |
-| Favorites summary | `/api/galleries/<gallery_id>/favorites-summary/` | [app/gallery/client_urls.py](/abs/path/c:/Project P/photobox-api/app/gallery/client_urls.py:28) |
-| Billing/checkout | `/api/billing/webhook/`, `/api/billing/gallery/upload/`, `/api/checkout/plans/`, `/api/checkout/generate/` | [app/billing/urls.py](/abs/path/c:/Project P/photobox-api/app/billing/urls.py:7), [app/checkout/urls.py](/abs/path/c:/Project P/photobox-api/app/checkout/urls.py:4) |
+Canonical repo path: `C:\Project P\photobox-api`
 
-### Test / Tooling Baseline
+Codex implementation repo path: `C:\Users\PC\Documents\Codex\2026-05-21\alex-muthomi-photobox-api-https-github\repo`
 
-| Command | Result | Notes |
-|---|---|---|
-| `venv\Scripts\python.exe --version` | Passed | Local venv is Python `3.13.7`. |
-| `venv\Scripts\python.exe -m pip show Django djangorestframework celery` | Passed | Django `4.0.10`, DRF `3.13.1`, Celery `5.6.3`. |
-| `docker compose config -q` | Passed with warnings | Compose emitted repeated `The "iw" variable is not set` warnings; source still unknown. |
-| `python manage.py check` | Failed in raw local env | `DEBUG` shell env was `release`; [app/app/settings.py](/abs/path/c:/Project P/photobox-api/app/app/settings.py:91) hard-casts `DEBUG` with `int()`. |
-| `TESTING=1 DEBUG=0 ... python manage.py check` | Passed | `System check identified no issues (0 silenced).` |
-| `TESTING=1 DEBUG=0 ... python manage.py makemigrations --check --dry-run` | Passed | `No changes detected`. |
-| `venv\Scripts\python.exe -m pytest -q` | Failed | Local venv does not have `pytest` installed. |
-| `venv\Scripts\python.exe -m flake8 --config .flake8 .` | Failed | Local venv does not have `flake8` installed. |
-| `docker compose run --rm test flake8` | Passed | Lint output `0`. |
-| `docker compose run --rm test security -x` | Passed | `87 passed` in `75.38s`. |
-| `docker compose run --rm test celery` | Passed | `18 passed` in `78.69s`. |
-| `docker compose run --rm test unit` | Failed | `20 passed, 264 errors` in `260.08s`; visible failures manifested as per-test `Timeout >60.0s`. |
-| `docker compose run --rm test pytest core/tests/test_models.py::ModelTests::test_create_user_with_email_successful -x -vv` | Passed | Single isolated model test passed, which suggests the aggregate `unit` failure is order-dependent, cumulative, or environment-sensitive rather than universal breakage. |
+Same remote confirmed: yes, both repos point to `https://github.com/ALEX-MUTHOMI/PhotoBox-API.git`.
 
-### Immediate Baseline Findings
+Files copied from the Codex implementation repo:
 
-1. **Local environment boot is fragile**  
-   The app crashes if `DEBUG` is any non-numeric truthy/falsy string because settings use `bool(int(...))`. In this shell, `DEBUG=release`, which prevented a normal `manage.py check`.
+- `pyproject.toml`
+- `.github/workflows/ci.yml`
+- `.github/workflows/ci_env.sh`
+- `scripts/ci/`
+- `tests/smoke/`
+- `tests/integration/`
+- `tests/resilience/`
+- `docker-compose.toxiproxy.yml`
+- `toxiproxy.json`
 
-2. **Local dev tooling is incomplete**  
-   The checked-in `venv` lacks `pytest` and `flake8`, so the local non-Docker workflow cannot reproduce CI-grade validation without additional setup.
+Files merged by applying the secure-base implementation over the canonical tracked baseline:
 
-3. **Dockerized quality gates are partially healthy**  
-   Dedicated `security`, `celery`, and `flake8` lanes pass. The aggregate `unit` lane is unstable and currently unsuitable as a trustworthy release gate.
+- `Dockerfile`
+- `docker-compose.yml`
+- `docker-compose-deploy.yml`
+- `.github/workflows/checks.yml`
+- `app/app/settings.py`
+- `app/app/urls.py`
+- `.env.example`
+- `.dockerignore`
+- `.gitignore`
+- `Dockerfile` (status changed during reconciliation; content-level Poetry migration deferred until lockfile exists)
+- `Makefile`
+- `PHOTOBOX_PRODUCTION_VERIFICATION_REPORT.md`
 
-## Phase 1 Architecture Truth Map
+Files skipped:
 
-### 1. Tenant Boundary
+- `.env` and any secret-bearing local files were not copied.
+- `poetry.lock` was not copied or faked because neither repo had a generated lockfile at reconciliation time.
 
-**Canonical tenant object:** `core.Workspace`.
+Remaining risks:
 
-**Evidence chain**
+- The canonical report was normalized to the secure-base report structure; previous tracked report content remains recoverable through Git diff/history.
+- `poetry.lock` must be generated by Poetry from the reconciled `pyproject.toml`.
+- Docker runtime verification still depends on resolving the local Docker Desktop Redis/image-cache issue if it persists.
 
-- `core.models.Workspace` is the photographer-owned root object.
-- `gallery.models.Event.workspace -> Workspace`
-- `gallery.models.Scene.event -> Event.workspace`
-- `gallery.models.Photo.scene -> Scene.event -> Event.workspace`
-- `gallery.models.GalleryAccessSession.gallery -> Event.workspace`
-- `gallery.models.FavoriteSelection.session -> GalleryAccessSession.gallery -> Event.workspace`
-- `gallery.models.FavoriteSelection.photo -> Photo.scene.event.workspace`
-- `gallery.models.GalleryArchiveJob.gallery -> Event.workspace`
-- `checkout.models.CheckoutSession.user -> core.User`; billing state then hangs off `billing.models.Subscription.user`, not directly off `Workspace`.
+## 2. Repository and Toolchain Baseline
 
-**Endpoints that enforce the chain correctly**
-
-- `gallery.views.EventViewSet.get_queryset()` restricts events to `workspace__user=request.user`.
-- `gallery.views.SceneViewSet.get_queryset()` restricts scenes to `event__workspace__user=request.user`; `perform_create()` rechecks `event.workspace.user`.
-- `gallery.views.PhotoFastLaneViewSet.perform_create()` rechecks `scene.event.workspace.user == request.user` before accepting `scene` from the client.
-- `ingestion.serializers.BulkManifestSerializer.validate_scene_id()` and `ingestion.views.BulkIngestionView._phase2_commit()` both recheck `scene.event.workspace.user`.
-- `gallery.client_views.*` consistently scope gallery access through `GalleryAccessSession`, gallery role, gallery expiry, scene/photo visibility, and published status.
-- `gallery.views.PhotographerFavoritesSummaryView` scopes favorites to `Event.workspace__user=request.user`.
-
-**Endpoints / paths that remain risky or ambiguous**
-
-- `billing.views.GalleryUploadView` is a legacy quota endpoint keyed only to `Subscription.user`. It does not participate in the `Workspace -> Event -> Scene -> Photo` ownership chain and is therefore not a safe canonical upload surface for the gallery domain.
-- `core` still contains legacy `Gallery` / `Image` models beside `gallery.Event` / `Scene` / `Photo`. They are not the active route surface, but they preserve a second vocabulary for tenancy and media ownership.
-- `gallery.views.PhotoFastLaneViewSet.download_url()` deliberately accepts both photographer JWT and gallery cookie principals. The branching logic is source-backed and appears intentional, but it is a boundary-sensitive path because it merges two auth domains in one action.
-
-### 2. Quota Ledger
-
-**Actual state:** there are two ledgers.
-
-| Ledger | Source of truth in code | Used by | Notes |
+| Area | Current State | Risk | Action |
 |---|---|---|---|
-| Workspace storage ledger | `core.models.Workspace.storage_used_bytes` / `storage_limit_bytes` | Canonical gallery Fast Lane and Heavy Lane | Locked with `select_for_update()` inside `transaction.atomic()` in gallery and ingestion flows. |
-| Subscription storage ledger | `billing.models.Subscription.storage_used_bytes` / `storage_limit_bytes` | Legacy `billing.views.GalleryUploadView` and photographer dashboard display | Creates domain drift because dashboard and billing can disagree with gallery ingestion. |
+| Python version | Dockerfile uses `python:3.12-slim-bookworm`; host Python observed as 3.13 earlier in this workspace. | Host Python is non-authoritative and may diverge from runtime. | Documented Python `>=3.12,<3.13` in `pyproject.toml`. |
+| Poetry config | Canonical repo now has `pyproject.toml`; Poetry 2.4.1 is installed through pipx but its launcher is broken in this shell because it points to an inaccessible Python 3.14 executable. | Dependency installation is not lockfile deterministic until `poetry.lock` is generated. | Used `PYTHONPATH=C:\Users\PC\pipx\venvs\poetry\Lib\site-packages` with `C:\Python313\python.exe -m poetry` for `poetry check`. |
+| Lockfile | `poetry.lock` absent. `poetry lock` was attempted and failed because the project requires `>=3.12,<3.13` and this host only exposes Python 3.13.7. | Normal Poetry CI cannot be deterministic yet. | Do not fake the lockfile; install Python 3.12 or run lock generation in a healthy Python 3.12 Docker/CI environment. |
+| Dockerfile | Requirements-based install; non-root runtime user; Python 3.12. | No Poetry lockfile install yet. | Left Dockerfile mostly intact to preserve green baseline; documented Poetry migration blocker. |
+| docker-compose.yml | Defines Postgres, Redis, app, celery, and test service. | Root-level base-engineering tests were invisible to test container. | Mounted `./tests` into `/repo-tests` and mounted `pyproject.toml` read-only. |
+| docker-compose-deploy.yml | Deploy healthcheck used `/health/`; Celery beat referenced `django_celery_beat` scheduler without matching dependency/app. | Health route drift and stale scheduler dependency. | Added `/health/` alias, aligned healthcheck to `/api/health-check/`, removed stale scheduler argument. |
+| Django settings | Single settings file with test-mode overrides. | `DEBUG=release` crashed via `int()` cast; production required env did not fail closed for hosts/CORS/CSRF. | Added strict boolean parser and production env checks. |
+| DEBUG parsing | Previously `bool(int(os.environ.get('DEBUG', 0)))`. | Invalid non-numeric values crashed unclearly; production safety policy was implicit. | Accepted explicit true/false values only. |
+| Health route | App exposed `/api/health-check/`; deploy expected `/health/`. | Deploy health could fail while app was healthy. | Added `/health/` alias and retained `/api/health-check/`. |
+| Celery config | Celery app imports from `app.celery`; test mode runs eager tasks. | CI had Celery tests but no standalone gate. | Added `celery` script and CI job. |
+| Unit tests | Existing Docker test suite routes through `scripts/run-tests.sh unit`. | Aggregate timeout history could hide first failure. | Added independent unit gate; not fully run locally due Docker engine failure. |
+| Security tests | Existing security suite covers tenant isolation, JWT/OAuth, webhooks, signed URLs. | Security was bundled inside broad workflow. | Added independent security gate and optional Bandit/pip-audit checks. |
+| Integration tests | Existing tests mixed with unit runs. | No separate Postgres/Redis smoke gate. | Added `/repo-tests/integration` smoke tests. |
+| Toxiproxy | No Toxiproxy compose file or smoke gate existed. | No bounded behavior check under DB/Redis proxy path. | Added Toxiproxy compose, config, and smoke tests. |
+| CI workflow | Existing `.github/workflows/checks.yml` had one broad green path. | A senior reviewer could not see layer-specific failures. | Added `.github/workflows/ci.yml` with named gates; left old workflow in place. |
 
-**Canonical path behavior**
+## 3. Target File Structure
 
-- Fast Lane reserves quota in `gallery.views.PhotoFastLaneViewSet.perform_create()` by locking the `Workspace` row with `select_for_update()` and incrementing `storage_used_bytes` before the Celery handoff.
-- Heavy Lane reserves quota in `ingestion.views.BulkIngestionView._phase2_commit()` using `transaction.atomic()` plus `Workspace.objects.select_for_update(nowait=True)`.
-- Failed/abandoned fast-lane uploads refund quota in `gallery.tasks._handle_abandoned_upload()` using `Greatest(0, F(...) - refund_bytes)`.
-- Heavy Lane persists declared sizes at commit time, but there is no equivalent periodic reconciliation job in `ingestion` to reclaim stale reservations if the upload never finishes.
+Implemented or normalized:
 
-**Risk**
+- `.github/workflows/ci.yml`
+- `.github/workflows/ci_env.sh`
+- `scripts/ci/validate.sh`
+- `scripts/ci/django_smoke.sh`
+- `scripts/ci/lint.sh`
+- `scripts/ci/security.sh`
+- `scripts/ci/unit.sh`
+- `scripts/ci/celery.sh`
+- `scripts/ci/integration.sh`
+- `scripts/ci/toxiproxy_smoke.sh`
+- `scripts/ci/docker_build.sh`
+- `scripts/ci/env_sanity.py`
+- `tests/smoke/test_healthcheck.py`
+- `tests/smoke/test_settings_import.py`
+- `tests/smoke/test_celery_import.py`
+- `tests/integration/test_django_postgres_redis_smoke.py`
+- `tests/resilience/test_toxiproxy_smoke.py`
+- `docker-compose.toxiproxy.yml`
+- `toxiproxy.json`
+- `pyproject.toml`
 
-- `Workspace` is the operational ledger for real gallery ingestion.
-- `Subscription` is still exposed to product surfaces and a legacy upload endpoint.
-- The repo therefore has dual quota concepts, not one canonical quota ledger.
+## 4. Poetry Protocols
 
-### 3. Upload Flows
+Implemented:
 
-**Fast Lane actual state machine**
+- Added `pyproject.toml` with Python 3.12 as the supported runtime line, matching Docker.
+- Grouped dependencies into runtime, dev, test, lint, and security groups.
+- Added `validate` gate behavior that fails if `pyproject.toml` exists without `poetry.lock`.
 
-1. Photographer authenticates with JWT.
-2. `gallery.views.PhotoFastLaneViewSet.perform_create()` validates ownership, size, Pillow image structure, decompression-bomb handling, allowed formats, trailing payload absence, and sanitized filename.
-3. The view reserves bytes on `Workspace`.
-4. A `gallery.Photo` row is created with the uploaded `image_file`, `original_filename`, `file_size_bytes`, and default `PENDING` status.
-5. `gallery.tasks.process_fast_lane_asset.delay(photo_id)` is dispatched.
-6. `gallery.tasks.process_fast_lane_asset()` does not upload the local `image_file` to R2 itself. It checks whether `photo.r2_object_key` already exists in R2, self-heals to `READY` if present, or marks the upload abandoned and refunds quota if no R2 object is found.
-7. If an R2 original exists, `generate_photo_web_derivative()` can create `web_r2_object_key` and enable Cloudinary fetch delivery.
+Blocked:
 
-**Heavy Lane actual state machine**
+- `poetry --version` is not available on PATH in this process.
+- The pipx launcher at `C:\Users\PC\.local\bin\poetry.exe` fails because it points to inaccessible `C:\Users\PC\AppData\Local\Programs\Python\Python314\python.exe`.
+- Poetry 2.4.1 was successfully invoked with `PYTHONPATH=C:\Users\PC\pipx\venvs\poetry\Lib\site-packages` and `C:\Python313\python.exe -m poetry`.
+- `poetry check` passes with Poetry 2.4.1 metadata deprecation warnings.
+- `poetry lock` failed because local Python is 3.13.7 and the project policy is `>=3.12,<3.13`.
+- `poetry.lock` was not generated. A fake lockfile was intentionally not created.
+- Dockerfile still installs from requirements files to avoid breaking the current green baseline without a verified lockfile.
 
-1. Photographer authenticates with JWT.
-2. `ingestion.views.BulkIngestionView` applies `HeavyLaneTicketThrottle`.
-3. `BulkManifestSerializer` validates `scene_id`, per-file filename/media/size constraints, duplicate `client_reference_id`, and declared total size.
-4. `_phase1_prepare_assets()` generates tenant-scoped object keys under `raw/tenant_{user_id}/scene_{scene_id}/...` and presigned POST conditions.
-5. `_phase2_commit()` locks the `Workspace`, rechecks scene ownership, reserves quota, and bulk-creates `Photo` rows with `r2_object_key` plus `PENDING`.
-6. `ingestion.views.R2WebhookView` transitions matching rows to `READY` after HMAC/timestamp validation, declared-size verification, and row locking, then dispatches derivative generation.
+Next required commands in an environment with Python 3.12 and Poetry:
 
-**Delivery assumptions**
+```bash
+poetry lock
+poetry install --with dev,test,lint,security
+poetry check
+poetry lock --check
+```
 
-- `gallery.models.Photo.delivery_url` prefers `web_r2_object_key` and constructs a Cloudinary fetch URL from the R2 public domain.
-- `gallery.models.Photo.download_url` delegates to `gallery.storage.generate_r2_presigned_get_url()`.
-- `gallery.storage` clamps presigned download TTL to 60 seconds even though some serializer comments still describe longer expiry.
+## 5. Environment and Settings Hardening
 
-**Stale-state handling**
+Implemented:
 
-- Fast Lane has an explicit refund path for abandoned uploads.
-- Heavy Lane has webhook idempotency and ghost-key tolerance, but no source-backed periodic cleanup task for permanently pending rows.
+- `DEBUG` now accepts only `true`, `1`, `yes`, `on`, `false`, `0`, `no`, `off`.
+- Invalid `DEBUG` values raise `ImproperlyConfigured` with a clear message.
+- `DJANGO_SECRET_KEY` is supported as a production secret-manager alias for `SECRET_KEY`.
+- Production mode requires `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, and `CSRF_TRUSTED_ORIGINS`.
+- `ALLOWED_HOSTS='*'` is rejected when `DEBUG=False`.
+- `CSRF_TRUSTED_ORIGINS` is now explicit.
+- `SECURE_PROXY_SSL_HEADER` is configured when `DEBUG=False`.
+- `.env.example` now documents `CSRF_TRUSTED_ORIGINS`, Celery URLs, and `DJANGO_SECRET_KEY`.
+- `scripts/ci/env_sanity.py` validates CI/prod-like env requirements without printing secret values.
 
-### 4. Webhook Flows
+## 6. Django Smoke Gate
 
-| Domain | Path | Actual behavior | Risk |
-|---|---|---|---|
-| Canonical R2 asset webhook | `ingestion.urls -> /api/v1/ingestion/webhook/` | `ingestion.views.R2WebhookView` validates HMAC and timestamp through `core.security`, tolerates ghost keys with `200`, locks matching photo rows, enforces size match, and skips already-READY assets. | Best current implementation. |
-| Duplicate R2 asset webhook | `webhooks.urls -> /api/v1/webhooks/cloudflare/r2/` | `webhooks.views.CloudflareWebhookView` performs a second, similar Cloudflare/R2 flow with separate tests and slightly different structure. | Dangerous ambiguity and long-term drift risk. |
-| Billing webhook | `billing.urls -> /api/billing/webhook/` | `billing.views.WebhookReceiverView` validates primary/secondary Lemon Squeezy HMAC, rejects empty-secret bypass, rejects oversize payloads, parses JSON, and hands work to `process_lemon_squeezy_webhook.delay()`. | Stronger than docs implied, but no timestamp freshness window at the HTTP layer. |
+Implemented in `scripts/ci/django_smoke.sh`:
 
-**Replay / idempotency**
+- `manage.py check`
+- `makemigrations --check --dry-run`
+- `showmigrations --plan`
+- `django.setup()`
+- URL config import
+- Celery current app import
+- health URL reversing
+- root smoke tests from `/repo-tests/smoke`
 
-- Billing replay protection is implemented in `billing.tasks.process_lemon_squeezy_webhook()` via `ProcessedWebhook.event_id` plus a payload hash. This is good and source-backed.
-- R2 handlers are idempotent at the row-state level because READY rows are skipped.
-- Neither R2 path has a durable event ledger model; idempotency is inferred from current asset state, not from a stored webhook event registry.
+Local status: designed and partially verified.
 
-**Dead-letter behavior**
+Manual Windows checks using the existing local `venv`:
 
-- Billing task sends unprocessable webhook payloads to `billing.models.DeadLetterQueue`.
-- No equivalent dead-letter queue exists for the R2 webhook domain.
+- `python manage.py check` passed with controlled non-secret env values.
+- `python manage.py makemigrations --check --dry-run` passed with "No changes detected"; Django emitted a database history warning because local Postgres credentials are intentionally not available.
+- `python manage.py shell -c "import django; django.setup(); import app.urls; from app.celery import app as celery_app"` passed and printed `django urls celery ok app`.
 
-### 5. Auth Domains
+Dockerized smoke remains blocked by Docker Desktop engine errors.
 
-| Domain | Mechanism | Evidence | Boundary |
-|---|---|---|---|
-| Photographer API auth | JWT access token + HttpOnly refresh cookie | `user.views.EnterpriseTokenObtainPairView`, `CookieTokenRefreshView` | Canonical for dashboard, event, scene, Fast Lane, billing, checkout, ingestion. |
-| Refresh flow | Cookie-backed `refresh` token | `user.views.CookieTokenRefreshView` | Rotates via SimpleJWT blacklist configuration. |
-| Gallery-scoped auth | Separate HS256 gallery cookie JWT | `gallery.client_auth.GalleryCookieJWTAuthentication` | Canonical for public/client gallery actions, favorites, archive status. |
-| Magic link | Single-use hashed token stored in DB | `gallery.client_views.GalleryMagicLinkRequestView`, `GalleryMagicLinkConsumeView` | Creates `GalleryAccessSession`, then gallery cookie. |
-| Guest access | Session row + gallery cookie | `gallery.client_views.GalleryGuestAccessView` | Limited to guest role and published/non-expired galleries. |
-| Password reset | Django token generator | `user.views.PasswordResetRequestView`, `PasswordResetConfirmView` | No extra replay ledger beyond Django token semantics. |
-| Social login | Google via allauth / dj-rest-auth | `user.urls`, `settings.py` | Third-party trust boundary exists but was not re-exercised in this phase. |
+## 7. Docker Foundation
 
-### 6. Async System
+Implemented:
 
-| Task area | Source | Behavior |
-|---|---|---|
-| Fast Lane processing | `gallery.tasks.process_fast_lane_asset` | Retries, self-heals READY rows, refunds abandoned quota, dispatches derivative generation. |
-| Web derivative generation | `gallery.tasks.generate_photo_web_derivative` | Pulls original from R2, applies optional watermark, uploads derived WebP to R2. |
-| Archive generation | `gallery.tasks.build_gallery_archive` | Streams authorized READY photos from R2 into a ZIP and writes archive back to R2. |
-| Billing webhook processing | `billing.tasks.process_lemon_squeezy_webhook` | Idempotent processing, subscription updates, checkout session completion, DLQ fallback. |
-| Gallery publish notification | `gallery.views.EventViewSet.perform_update()` -> `gallery.notifications.send_gallery_ready_email.delay()` | Async email dispatch on first publish transition. |
+- `.dockerignore` now excludes virtualenvs, caches, coverage artifacts, local DBs, env files, secrets, frontend build artifacts, and `node_modules`.
+- `docker-compose.yml` mounts base-engineering tests into the test container.
+- `docker-compose-deploy.yml` healthcheck no longer relies on `curl`.
+- `docker-compose-deploy.yml` no longer references `django_celery_beat.schedulers:DatabaseScheduler`.
+- `docker-compose.toxiproxy.yml` and `toxiproxy.json` added.
 
-**Retry / idempotency observations**
+Verified:
 
-- Billing task is explicitly idempotent and row-locked.
-- Gallery tasks rely more on row state than on an external idempotency ledger.
-- No `django_celery_beat`-backed periodic schedule was found in source; the old deploy reference was stale.
+- `docker compose config -q` passed.
+- `docker-compose -f docker-compose-deploy.yml config -q` passed with unset-env warnings.
+- `docker-compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q` passed.
 
-### 7. Canonical vs Legacy Path Table
+Blocked:
 
-| Domain | Canonical path | Legacy / duplicate path | Evidence files | Risk | Recommended action |
-|---|---|---|---|---|---|
-| Gallery uploads | `gallery.views.PhotoFastLaneViewSet`, `ingestion.views.BulkIngestionView` | `billing.views.GalleryUploadView` | `app/gallery/views.py`, `app/ingestion/views.py`, `app/billing/views.py` | High | Keep legacy path documented as non-canonical; do not use for new frontend flows. |
-| Asset webhook | `/api/v1/ingestion/webhook/` | `/api/v1/webhooks/cloudflare/r2/` | `app/ingestion/urls.py`, `app/webhooks/urls.py` | High | Consolidate to one R2 webhook path after explicit deprecation plan. |
-| Gallery domain models | `gallery.Event`, `gallery.Scene`, `gallery.Photo` | `core.Gallery`, `core.Image` | `app/gallery/models.py`, `app/core/models.py` | Medium | Mark `core` media models as legacy in docs and admin; verify no live codepaths depend on them before removal. |
-| Quota ledger | `Workspace.storage_*` | `Subscription.storage_*` | `app/core/models.py`, `app/billing/models.py`, `app/gallery/views.py`, `app/ingestion/views.py` | High | Collapse product/UI reads onto the workspace ledger or add deterministic reconciliation. |
-| Health probe | `/api/health-check/` with proxy-aware HTTPS header | old `/health/` and plain-HTTP internal probes | `app/app/urls.py`, `docker-compose.yml`, `docker-compose-deploy.yml`, `app/app/settings.py` | High | Fixed in this pass. |
-| Celery Beat | plain `celery -A app beat` | old `django_celery_beat.schedulers:DatabaseScheduler` reference | `docker-compose-deploy.yml`, `app/app/settings.py` | Medium | Fixed stale scheduler reference; only reintroduce DB scheduler with real dependency and config. |
+- `docker version` with escalated Docker access returned HTTP 500 from `dockerDesktopLinuxEngine` for `/version`.
+- `docker info` with escalated Docker access returned HTTP 500 from `dockerDesktopLinuxEngine` for `/info`.
+- `docker image inspect redis:7-alpine` returned HTTP 500 for the image inspect API.
+- `docker pull redis:7-alpine` returned HTTP 500 for the image create API.
+- `docker compose run --rm test python --version` failed before app execution because Docker Desktop returned HTTP 500 while inspecting `postgres:13-alpine`.
+- Standalone `docker-compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q` passes, so YAML composition is valid; runtime engine access is the blocker.
 
-### 8. Dangerous Ambiguity List
+## 8. Lint Gate
 
-- Dual quota concepts: `Workspace` is the real upload ledger while `Subscription` still drives legacy upload and some dashboard display.
-- Dual R2 webhook namespaces: `ingestion` and `webhooks` both implement Cloudflare/R2 reconciliation.
-- Stale core models: `core.Gallery` / `core.Image` coexist with `gallery.Event` / `Photo`.
-- Deploy healthcheck drift: fixed in this pass, but the drift was real and blocked production-like startup verification.
-- Missing `django_celery_beat` dependency vs old deploy reference: fixed by removing the stale scheduler invocation.
-- `DEBUG` parsing fragility: fixed in this pass with explicit boolean validation.
-- Unit-suite instability: traced to orchestration/shared-state interference, not a currently reproducible app-logic deadlock.
+Implemented:
 
-## Phase 1B Unit Suite Instability Analysis
+- `scripts/ci/lint.sh`
+- `make lint`
+- CI job `lint`
 
-### Reproduction
+The gate preserves existing flake8 behavior through `docker compose run --rm test flake8`.
 
-- Historical failing command from Phase 0: `docker compose run --rm test unit`
-- Historical result: `20 passed, 264 errors`, with repeated `Timeout >60.0s`
+Local status: implemented, not run because Docker runtime failed before test container startup.
 
-### Follow-up investigation
+## 9. Security Gate
 
-- `docker compose run --rm test unit --maxfail=1 -vv` was rerun in isolation and passed: `284 passed in 747.35s`.
-- `docker compose run --rm test pytest core/tests/test_settings_boot.py -vv` passed after the settings fix.
-- Targeted suites (`flake8`, `security -x`, `celery`) also passed in isolation.
+Implemented:
 
-### First credible root cause
+- `scripts/ci/security.sh`
+- `make security`
+- CI job `security`
+- Existing security suite remains intact.
+- Optional Bandit and pip-audit checks are wired to run when the test image has those tools.
 
-The aggregate unit lane was not failing deterministically at the application level. The strongest evidence points to **shared Docker/DB interference across concurrent or overlapping test invocations**:
+Blocked:
 
-- Earlier compose operations produced container / network conflicts and orphan warnings.
-- A successful full run still emitted a PostgreSQL teardown warning that `test_devdb` was being accessed by other sessions.
-- The test service uses shared `db` and `redis` services and a shared pytest-django database name, so overlapping `docker compose run --rm test ...` commands can collide on the same infrastructure and leak sessions into teardown.
+- Bandit and pip-audit are declared in Poetry groups but not installed into the current requirements-based Docker test image.
 
-### Conclusion
+## 10. Unit Gate Stabilization
 
-- **This is a real CI reliability issue.**
-- It is **not** currently explained by a single broken test, deadlocked fixture, or reproducible app-level timeout.
-- CI should fail the unit gate if the suite is executed against shared infrastructure in parallel.
-- CI should run the unit lane **serially and in isolation** for this compose project, or use a per-job project name / isolated test DB.
+Implemented:
 
-### Recommended fix
+- `scripts/ci/unit.sh`
+- `make test-unit`
+- CI job `unit`
 
-1. Never run multiple `docker compose run --rm test ...` jobs against the same compose project and database simultaneously.
-2. Give each CI job its own compose project namespace or its own database name if unit, celery, and smoke run concurrently.
-3. Keep `pytest-timeout` enabled; do not paper over the original symptom by increasing timeouts.
-4. Add a CI note that the historical timeout cascade was environmental/orchestration drift, not a proof that the unit suite is healthy under concurrency.
+Not completed:
 
-## CI/CD Protocol Proposal
+- `pytest -vv --maxfail=1`
+- `pytest --durations=25`
+- app/package split timing analysis
 
-### Current state
+Reason: Docker failed before test container execution. No failing tests were hidden or skipped in this pass.
 
-- Current GitHub Actions workflow is a single broad job in `.github/workflows/checks.yml`.
-- It is Docker-first, but it is not staged the way a production verification pipeline should be.
-- There is **no** `pyproject.toml` or `poetry.lock` in the repository, so a true Poetry gate cannot pass today.
+## 11. Celery Verification
 
-### Recommended gate order
+Implemented:
 
-`validate -> lint -> security -> django-smoke -> unit -> celery -> integration -> toxiproxy -> docker-build`
+- `scripts/ci/celery.sh`
+- `make test-celery`
+- CI job `celery`
+- Celery app import check before Celery test suite.
 
-### Gate status from this pass
+Local status: implemented, not run due Docker runtime failure.
+
+## 12. Integration Testing
+
+Implemented:
+
+- `tests/integration/test_django_postgres_redis_smoke.py`
+- `scripts/ci/integration.sh`
+- `make test-integration`
+- CI job `integration`
+
+The smoke verifies:
+
+- database cursor round trip
+- health endpoint response
+- Django cache round trip
+
+Local status: implemented, not run due Docker runtime failure.
+
+## 13. Toxiproxy Resilience Gate
+
+Implemented:
+
+- `docker-compose.toxiproxy.yml`
+- `toxiproxy.json`
+- `tests/resilience/test_toxiproxy_smoke.py`
+- `scripts/ci/toxiproxy_smoke.sh`
+- `make test-toxiproxy`
+- CI job `toxiproxy`
+
+Coverage level:
+
+- Normal proxy socket path for Postgres proxy
+- Normal proxy socket path for Redis proxy
+
+Deferred P1:
+
+- toxic injection via Toxiproxy API for latency and cut scenarios
+- mutation safety proof under DB outage
+- broker failure assertion for async work
+
+## 14. CI Workflow
+
+Implemented:
+
+- Added `.github/workflows/ci.yml` with independent jobs:
+  - validate
+  - lint
+  - security
+  - django-smoke
+  - unit
+  - celery
+  - integration
+  - toxiproxy
+  - docker-build
+- Existing `.github/workflows/checks.yml` was not deleted.
+
+Risk:
+
+- New `validate` job will fail until `poetry.lock` is generated. This is intentional and truthful for deterministic Poetry readiness.
+
+## 15. Makefile and Developer Entrypoints
+
+Implemented targets:
+
+- `make validate`
+- `make lint`
+- `make security`
+- `make smoke`
+- `make test`
+- `make test-unit`
+- `make test-celery`
+- `make test-integration`
+- `make test-toxiproxy`
+- `make docker-build`
+- `make ci-local`
+
+Legacy-style entries retained:
+
+- `make test-api`
+- `make test-cloudinary`
+- `make test-e2e`
+- `make test-coverage`
+- `make legacy-test-all`
+
+Local note:
+
+- This Windows host lacks a usable Bash environment; `bash --version` invokes WSL and reports that no distributions are installed.
+- GitHub Actions on Ubuntu remains the authoritative shell-script runtime for `scripts/ci/*.sh`.
+- To refresh Poetry PATH after pipx installation, add `C:\Users\PC\.local\bin` to the user PATH and start a new terminal.
+- In this shell, Poetry can be invoked with `PYTHONPATH=C:\Users\PC\pipx\venvs\poetry\Lib\site-packages` and `C:\Python313\python.exe -m poetry`, but lockfile generation still requires Python 3.12 because the project policy is `>=3.12,<3.13`.
+- Windows-local equivalents used in this pass: `python scripts\ci\env_sanity.py`, `python -m py_compile ...`, `docker-compose ... config -q`, and `venv\Scripts\python.exe manage.py check`.
+- Docker/CI remains authoritative for full gate verification.
+
+## 16. Deployment Sanity
+
+Implemented:
+
+- `/health/` route exists.
+- `/api/health-check/` route remains canonical.
+- Deploy healthcheck now targets `/api/health-check/`.
+- Deploy healthcheck uses Python stdlib instead of `curl`.
+- Stale `django_celery_beat` scheduler dependency reference removed.
+- Production settings fail closed for missing host/CORS/CSRF env.
+- Production settings reject wildcard hosts.
+
+## 17. Files Changed
+
+- `.dockerignore`
+- `.env.example`
+- `.github/workflows/checks.yml`
+- `.github/workflows/ci.yml`
+- `.github/workflows/ci_env.sh`
+- `.gitignore`
+- `Makefile`
+- `PHOTOBOX_PRODUCTION_VERIFICATION_REPORT.md`
+- `app/app/settings.py`
+- `app/app/urls.py`
+- `docker-compose-deploy.yml`
+- `docker-compose.toxiproxy.yml`
+- `docker-compose.yml`
+- `pyproject.toml`
+- `scripts/ci/celery.sh`
+- `scripts/ci/django_smoke.sh`
+- `scripts/ci/docker_build.sh`
+- `scripts/ci/env_sanity.py`
+- `scripts/ci/integration.sh`
+- `scripts/ci/lint.sh`
+- `scripts/ci/security.sh`
+- `scripts/ci/toxiproxy_smoke.sh`
+- `scripts/ci/unit.sh`
+- `scripts/ci/validate.sh`
+- `tests/integration/test_django_postgres_redis_smoke.py`
+- `tests/resilience/test_toxiproxy_smoke.py`
+- `tests/smoke/test_celery_import.py`
+- `tests/smoke/test_healthcheck.py`
+- `tests/smoke/test_settings_import.py`
+- `toxiproxy.json`
+
+## 18. Commands Run
+
+```text
+git status
+git branch --show-current
+git remote -v
+git log --oneline -5
+rg --files
+poetry --version
+docker compose config -q
+docker compose -f docker-compose-deploy.yml config -q
+python scripts\ci\env_sanity.py
+python -m py_compile scripts\ci\env_sanity.py
+docker-compose --version
+python scripts\ci\env_sanity.py with controlled env values
+docker-compose -f docker-compose-deploy.yml config -q
+docker-compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q
+docker compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q
+bash --version
+docker compose run --rm test python manage.py check
+git diff --stat
+git status --short
+Test-Path .\pyproject.toml
+Test-Path .\poetry.lock
+Test-Path .\.github\workflows\ci.yml
+Test-Path .\.github\workflows\checks.yml
+Test-Path .\scripts\ci
+Test-Path .\docker-compose.toxiproxy.yml
+Test-Path .\toxiproxy.json
+Test-Path .\PHOTOBOX_PRODUCTION_VERIFICATION_REPORT.md
+PYTHONPATH=C:\Users\PC\pipx\venvs\poetry\Lib\site-packages C:\Python313\python.exe -m poetry --version
+PYTHONPATH=C:\Users\PC\pipx\venvs\poetry\Lib\site-packages C:\Python313\python.exe -m poetry check
+PYTHONPATH=C:\Users\PC\pipx\venvs\poetry\Lib\site-packages C:\Python313\python.exe -m poetry lock
+C:\Python313\python.exe -m py_compile scripts\ci\env_sanity.py tests\smoke\test_settings_import.py tests\smoke\test_celery_import.py tests\smoke\test_healthcheck.py tests\integration\test_django_postgres_redis_smoke.py tests\resilience\test_toxiproxy_smoke.py
+C:\Python313\python.exe scripts\ci\env_sanity.py with controlled env values
+venv\Scripts\python.exe manage.py check
+venv\Scripts\python.exe manage.py makemigrations --check --dry-run
+venv\Scripts\python.exe manage.py shell -c "import django; django.setup(); import app.urls; from app.celery import app as celery_app; print('django urls celery ok', celery_app.main)"
+docker version
+docker info
+docker image ls redis
+docker image inspect redis:7-alpine
+docker pull redis:7-alpine
+docker compose run --rm test python --version
+docker compose ps
+actionlint -version
+```
+
+## 19. Gate Results
+
+Phase 7 first-gate results:
 
 | Gate | Command | Result | Notes |
 |---|---|---|---|
-| validate | `docker compose config -q` | pass | Base compose syntax is valid. |
-| validate | `docker compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q` | pass | Toxiproxy compose overlay is valid. |
-| validate | `poetry check` | fail | Blocked because `pyproject.toml` and `poetry.lock` do not exist. |
-| lint | `docker compose run --rm test flake8` | pass | Passed after settings / CI-script changes. |
-| security | `docker compose run --rm test security -x` | pass | Phase 0 baseline: `87 passed`. |
-| django-smoke | `docker compose run --rm -v <repo>/scripts:/scripts --entrypoint sh test /scripts/ci/django_smoke.sh` | pass | New gate exercised end to end. |
-| unit | `docker compose run --rm test unit --maxfail=1 -vv` | pass | Serial isolated rerun passed; historical failures traced to shared-state interference. |
-| celery | `docker compose run --rm test celery` | pass | Phase 0 baseline: `18 passed`. |
-| integration | not separately implemented yet | fail | Still folded into Dockerized test flows; no dedicated authenticated API integration lane exists yet. |
-| toxiproxy | `docker compose -f docker-compose.yml -f docker-compose.toxiproxy.yml --profile toxiproxy run --rm -v <repo>/scripts:/scripts toxiproxy-test` | pass | Postgres and Redis latency/cut/recovery scenarios executed. |
-| docker-build | not separately run for `DEV=false` production image in this phase | fail | Production image build still needs a dedicated gate. |
+| validate | `poetry check`; `poetry lock`; `python scripts\ci\env_sanity.py`; compose config checks | fail | `poetry check` passed; env sanity passed after aligning `DJANGO_SECRET_KEY/SECRET_KEY` and `DB_PASSWORD/DB_PASS`; `poetry lock` failed because Python 3.12 is not installed locally and Docker runtime is unhealthy. |
+| django-smoke | `venv\Scripts\python.exe manage.py check`; `makemigrations --check --dry-run`; Django/URL/Celery import shell | partial pass | Import/check/makemigrations passed with controlled env. Full smoke gate remains blocked because DB connectivity and Dockerized test execution require a healthy Postgres/Redis runtime. |
+| compose-config | `docker compose config -q`; `docker-compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q`; `docker-compose -f docker-compose-deploy.yml config -q` | pass | YAML composition validates. `docker compose -f ...` has a local plugin/sandbox parsing issue, but standalone `docker-compose` validates merged compose files. |
 
-### Proposed CI stages
+Full split-gate status:
 
-- `validate`
-  - `poetry --version`
-  - `poetry check`
-  - lockfile consistency check
-  - `docker compose config -q`
-  - `python manage.py check`
-  - `python manage.py makemigrations --check --dry-run`
-- `lint`
-  - Dockerized `flake8`
-- `security`
-  - Existing `security -x`
-  - optional dependency audit after Poetry migration
-- `django-smoke`
-  - `scripts/ci/django_smoke.sh`
-- `unit`
-  - Dockerized `test unit`, isolated per job
-- `celery`
-  - Dockerized `test celery`
-- `integration`
-  - dedicated API flow against Postgres/Redis with mocks for R2/Cloudinary/Lemon
-- `toxiproxy`
-  - `docker-compose.toxiproxy.yml` overlay plus `scripts/ci/toxiproxy_smoke.sh`
-- `docker-build`
-  - production `DEV=false` image build and import smoke
+| Gate | Command | Result | Notes |
+|---|---|---|---|
+| validate | `bash scripts/ci/validate.sh` | implemented and failing | Local Bash unavailable; equivalent manual checks show `poetry check` and env sanity pass, but lockfile generation fails without Python 3.12. |
+| lint | `bash scripts/ci/lint.sh` | blocked | Implemented; Docker runtime failed before container execution. |
+| security | `bash scripts/ci/security.sh` | blocked | Implemented; Docker runtime failed before container execution. Bandit/pip-audit require Poetry image update. |
+| django-smoke | `bash scripts/ci/django_smoke.sh` | partially verified | Manual local Django check/import/makemigrations commands passed; full script blocked by local Bash/Docker runtime. |
+| unit | `bash scripts/ci/unit.sh` | blocked | Implemented; not run due Docker runtime failure. |
+| celery | `bash scripts/ci/celery.sh` | blocked | Implemented; not run due Docker runtime failure. |
+| integration | `bash scripts/ci/integration.sh` | blocked | Implemented; not run due Docker runtime failure. |
+| toxiproxy | `bash scripts/ci/toxiproxy_smoke.sh` | designed only | Compose config passed with standalone `docker-compose`; runtime not run. |
+| docker-build | `bash scripts/ci/docker_build.sh` | blocked | Implemented; Docker runtime is not healthy enough locally. |
 
-## Poetry Protocols
+## 20. Remaining Blockers
 
-### Actual repository truth
+1. Install or expose Python 3.12 locally, or run lock generation in a healthy Python 3.12 Docker/CI environment. Current local Python is 3.13.7 and is intentionally outside the project policy.
+2. Generate `poetry.lock` with Poetry 2.4.1 from the reconciled `pyproject.toml`; do not hand-write or fake it.
+3. Repair pipx/Poetry PATH or reinstall the Poetry pipx environment so `poetry` resolves normally instead of requiring the `PYTHONPATH` workaround.
+4. Docker Desktop `desktop-linux` returns HTTP 500 for `/version`, `/info`, image inspect, image pull, and compose runtime calls. This blocks Dockerized lint/security/unit/celery/integration/toxiproxy/docker-build gates.
+5. Dockerfile should migrate from requirements-based install to lockfile-based Poetry install only after `poetry.lock` exists and is verified.
+6. Local Bash is unavailable; CI/Linux can run scripts, but this Windows host cannot run `bash scripts/ci/*.sh` until WSL/Git Bash is configured.
+7. Toxiproxy latency/cut toxic injection is not implemented yet; this pass adds smoke-level proxy routing only and keeps deeper toxics as P1 after Docker runtime is healthy.
 
-- There is **no** `pyproject.toml`.
-- There is **no** `poetry.lock`.
-- Dependency management is requirements-based:
-  - `requirements.txt` for runtime
-  - `requirements.dev.txt` for dev/test tools
-  - `app/tests/requirements-test.txt` as a second, partially overlapping test dependency file
+## 21. Next Sprint Plan
 
-### Supported Python version
+1. Install/expose Python 3.12 and repair the pipx Poetry launcher/PATH.
+2. Run `poetry lock`, `poetry check`, `poetry install --with dev,test,lint,security`, `poetry run python --version`, and `poetry run pytest --version`.
+3. Repair Docker Desktop `desktop-linux` engine HTTP 500s, then rerun Docker image pull/inspect and compose runtime checks.
+4. Update Dockerfile to install from Poetry lockfile with dependency groups after the lockfile is verified.
+5. Rebuild Docker images and run `make ci-local` in a Linux/Bash-capable environment.
+6. Add Toxiproxy API toxic setup/cleanup for Postgres latency, Postgres cut, Redis latency, Redis cut, and recovery.
+7. Run aggregate unit investigation: `pytest -vv --maxfail=1`, `pytest --durations=25`, and split-by-app test commands.
 
-- **Recommended supported version:** Python `3.12`
-- Evidence:
-  - Dockerfile uses `python:3.12-slim-bookworm`
-  - Dockerized smoke, unit, celery, lint, and toxiproxy runs all used Python `3.12.13`
-  - Local checked-in venv is `3.13.7`, but the repo is not validated against it and previously lacked required tools
+## Definition of Done Status
 
-### Protocol recommendation
+Current status: partially implemented.
 
-1. Adopt Poetry only after creating `pyproject.toml` and `poetry.lock`.
-2. Declare `python = ">=3.12,<3.13"` unless the full suite is re-verified on 3.13.
-3. Split groups into:
-   - main/runtime
-   - `dev` for lint/test tools
-   - `ci` or `security` for audit/scanning tools
-4. Make CI fail if `pyproject.toml` changes without `poetry.lock` refresh.
-5. Do not use the checked-in local `.venv` as evidence of support.
-
-### Blocking issue
-
-Poetry discipline is **designed but not fully implementable yet** because the repository still lacks Poetry metadata. That is a release-process blocker for deterministic dependency validation, not a code-runtime blocker.
-
-## Django Smoke Gate
-
-### Implemented artifacts
-
-- `scripts/ci/django_smoke.sh`
-- `app/core/tests/test_settings_boot.py`
-
-### What the smoke gate now proves
-
-- settings import succeeds under controlled env
-- invalid `DEBUG=release` fails clearly
-- `manage.py check` succeeds
-- `manage.py check --deploy` can run under `DEBUG=0`
-- URLConf imports
-- Celery app imports
-- migrations are current
-- `/api/health-check/` exists and is reachable under proxy-aware HTTPS semantics
-
-### Real issues found and fixed while building the gate
-
-- `DEBUG` previously crashed with `ValueError` because settings hard-cast through `int()`.
-- Internal health checks were incompatible with `SECURE_SSL_REDIRECT` in `DEBUG=0`.
-- Deploy compose used a stale `/health/` path and a stale `django_celery_beat` scheduler invocation.
-
-## Toxiproxy Gate
-
-### Implemented artifacts
-
-- `docker-compose.toxiproxy.yml`
-- `scripts/ci/toxiproxy_smoke.sh`
-
-### Executed scenarios
-
-- baseline DB query through `postgres_proxy`
-- baseline Redis cache roundtrip through `redis_proxy`
-- PostgreSQL latency injection
-- PostgreSQL connection cut
-- PostgreSQL recovery after toxic removal
-- Redis latency injection
-- Redis connection cut
-- Redis recovery after toxic removal
-
-### Design notes
-
-- The toxiproxy admin API in the upstream image only bound reliably to loopback for this environment.
-- The working fix was to run `toxiproxy-test` in the proxy container's network namespace and talk to `127.0.0.1`.
-- This gate currently proves bounded failure/recovery for DB and Redis primitives. It does **not yet** prove no quota corruption or no false READY transition in a real upload workflow under fault injection. That remains P1 hardening work.
-
-## Production Readiness Gaps
-
-## Executive Summary
-
-- Overall rating: **Not production ready**
-- Recommended launch gate: **Production ready after critical fixes**
-- Reason: startup and resilience gates now run, but the repository still has unresolved architectural ambiguity in quota and webhook ownership, lacks deterministic Poetry lock discipline, and does not yet have a dedicated production-image or authenticated integration gate.
-
-### Top 5 launch blockers
-
-1. Dual quota ledgers (`Workspace` vs `Subscription`) can produce conflicting entitlement decisions.
-2. Duplicate R2 webhook paths (`ingestion` and `webhooks`) create reconciliation drift risk.
-3. No Poetry metadata or lockfile exists, so dependency validation cannot be deterministic under the requested protocol.
-4. Production `DEV=false` image build/import smoke was not yet a passing gate in this phase.
-5. No dedicated authenticated integration lane exists for real API flow verification against mocked third-party services.
-
-### Top 5 hardening recommendations
-
-1. Collapse product-facing storage enforcement onto a single ledger.
-2. Deprecate one R2 webhook namespace and retain one canonical reconciliation path.
-3. Add Poetry metadata and lock discipline, then make `validate` fail on drift.
-4. Add a production-image CI stage that boots the built image under `DEBUG=0`.
-5. Extend the Toxiproxy lane from primitive DB/Redis checks into upload, quota, and billing state assertions.
-
-### Launch blockers
-
-1. Dual quota ledger remains unresolved: `Workspace` is the real ingest ledger while `Subscription` is still exposed in product code.
-2. Dual R2 webhook paths remain live and duplicative.
-3. Poetry / lockfile discipline does not exist yet; dependency validation is not deterministic outside Docker requirements files.
-4. No dedicated production `DEV=false` docker-build gate was run in this phase.
-5. No dedicated authenticated integration lane exists yet for real end-to-end API verification against mocked storage/billing providers.
-
-### Hardening items
-
-- Add a single canonical R2 webhook path and deprecate the other.
-- Collapse dashboard / upload quota reads onto one ledger.
-- Add DRF spectacular extensions or explicit serializer/schema annotations for custom auth and APIViews.
-- Add a real integration test that exercises gallery upload state under DB/Redis disruption through Toxiproxy.
-- Replace the stale/incorrect local `Makefile` assumptions over time; only the new `ci-*` targets align with current Dockerized verification.
-
-## Changes Made
-
-| File | Change | Risk addressed |
-|---|---|---|
-| `app/app/settings.py` | Replaced `bool(int(...))` with strict boolean parsing; added `SECURE_PROXY_SSL_HEADER` in `DEBUG=0` mode | Boot fragility, invalid env handling, proxy-aware HTTPS health checks |
-| `docker-compose.yml` | Healthcheck now sends `X-Forwarded-Proto: https` to `/api/health-check/` | Internal health probe compatibility |
-| `docker-compose-deploy.yml` | Fixed health route; removed stale `django_celery_beat` scheduler reference; made health probe proxy-aware | Deploy drift / missing dependency path |
-| `scripts/ci/django_smoke.sh` | Added deterministic smoke gate with explicit env isolation | Startup verification |
-| `docker-compose.toxiproxy.yml` | Added Toxiproxy overlay and corrected namespace/listener design | Resilience verification |
-| `scripts/ci/toxiproxy_smoke.sh` | Added DB/Redis latency/cut/recovery gate | Dependency failure verification |
-| `app/core/tests/test_settings_boot.py` | Added DEBUG parsing regression tests | Prevents settings regression |
-| `Makefile` | Added Dockerized `ci-*` targets for validate/lint/security/smoke/unit/celery/toxiproxy | Developer/CI ergonomics |
-
-## Tests Run
-
-| Command | Result | Notes |
-|---|---|---|
-| `docker compose config -q` | Pass | Base compose syntax valid. |
-| `docker compose -f docker-compose.yml -f docker-compose.toxiproxy.yml config -q` | Pass | Toxiproxy overlay syntax valid. |
-| `docker compose run --rm test pytest core/tests/test_settings_boot.py -vv` | Pass | `2 passed`. |
-| `docker compose run --rm test flake8` | Pass | Lint clean after changes. |
-| `docker compose run --rm -v <repo>/scripts:/scripts --entrypoint sh test /scripts/ci/django_smoke.sh` | Pass | Smoke gate completed end to end. |
-| `docker compose -f docker-compose.yml -f docker-compose.toxiproxy.yml --profile toxiproxy run --rm -v <repo>/scripts:/scripts toxiproxy-test` | Pass | Postgres and Redis fault-injection scenarios completed. |
-| `docker compose run --rm test unit --maxfail=1 -vv` | Pass | Prior isolated rerun passed all tests; used for RCA. |
-
-## Remaining Launch Blockers
-
-- Not production ready yet.
-- Main blockers are architectural ambiguity, not raw startup failure:
-  - dual quota ledgers
-  - duplicate R2 webhook paths
-  - no Poetry/lockfile source of truth
-  - no dedicated production image gate
-  - no dedicated authenticated integration gate
-
-## Recommended Launch Gate
-
-- Classification: **Not production ready**
-- Upgrade path: **Production ready after critical fixes**
-
-## Next Sprint Plan
-
-### P0 security / correctness
-
-- Choose one canonical quota ledger and remove product-facing ambiguity.
-- Choose one canonical R2 webhook path and deprecate the duplicate.
-- Add upload/billing fault-injection tests that assert no false READY or quota corruption.
-
-### P1 production reliability
-
-- Add a dedicated production `DEV=false` docker-build and import smoke gate.
-- Create a real integration stage for authenticated photographer and gallery-client flows with mocked third parties.
-- Isolate compose project names or DB names per CI job to prevent shared-state test interference.
-
-### P2 cleanup and documentation
-
-- Document `core` media models as legacy or remove them after usage proof.
-- Align docs/comments with actual Fast Lane behavior and actual presigned URL TTL.
-- Replace the old single-job GitHub Actions workflow with staged gates.
-
-### P3 future hardening
-
-- Add DRF spectacular auth/schema extensions for gallery-cookie auth.
-- Add object-storage proxying for upload/webhook flows under Toxiproxy or a local S3-compatible emulator.
-- Add observability assertions for structured, non-sensitive error logging in failure-path tests.
-
+The base-engineering foundation is not production ready yet because the Poetry lockfile is missing, the local host lacks Python 3.12, Docker Desktop returns HTTP 500 for runtime operations, and Bash is unavailable locally. The canonical repo now contains the secure-base structure, scripts, CI separation, settings hardening, deploy alignment, report reconciliation, and smoke scaffolding, but full verification remains blocked by local tooling/runtime infrastructure.

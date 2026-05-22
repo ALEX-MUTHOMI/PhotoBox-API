@@ -35,12 +35,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _env_bool_strict(name: str, default: bool = False) -> bool:
-    """
-    Parse a boolean environment variable with explicit validation.
-
-    This avoids ambiguous crashes such as ValueError from int("release")
-    while still failing closed for unexpected values in production.
-    """
     value = os.environ.get(name)
     if value is None:
         return default
@@ -52,9 +46,12 @@ def _env_bool_strict(name: str, default: bool = False) -> bool:
         return False
 
     raise ImproperlyConfigured(
-        f"Invalid boolean value for {name}: {value!r}. "
-        "Expected one of: 1, 0, true, false, yes, no, on, off."
+        f"{name} must be one of true, 1, yes, on, false, 0, no, off. "
+        f"Received {value!r}."
     )
+
+
+DEBUG = _env_bool_strict("DEBUG", default=False)
 
 
 def _detect_test_mode() -> bool:
@@ -97,8 +94,16 @@ if not _IS_TEST:
         _missing.append('DB_NAME')
     if not os.environ.get('DB_PASS'):
         _missing.append('DB_PASS')
-    if not os.environ.get('SECRET_KEY'):
-        _missing.append('SECRET_KEY')
+    if not (os.environ.get('DJANGO_SECRET_KEY') or os.environ.get('SECRET_KEY')):
+        _missing.append('DJANGO_SECRET_KEY or SECRET_KEY')
+
+    if not DEBUG:
+        if not os.environ.get('ALLOWED_HOSTS'):
+            _missing.append('ALLOWED_HOSTS')
+        if not os.environ.get('CORS_ALLOWED_ORIGINS'):
+            _missing.append('CORS_ALLOWED_ORIGINS')
+        if not os.environ.get('CSRF_TRUSTED_ORIGINS'):
+            _missing.append('CSRF_TRUSTED_ORIGINS')
 
     if _missing:
         raise ImproperlyConfigured(
@@ -110,8 +115,11 @@ if not _IS_TEST:
 # ============================================================
 # 2. CORE DJANGO SETTINGS
 # ============================================================
-SECRET_KEY = os.environ.get('SECRET_KEY', 'INSECURE-LOCAL-DEV-KEY-DO-NOT-USE-IN-PROD')
-DEBUG      = _env_bool_strict('DEBUG', default=False)
+SECRET_KEY = (
+    os.environ.get('DJANGO_SECRET_KEY')
+    or os.environ.get('SECRET_KEY')
+    or 'INSECURE-LOCAL-DEV-KEY-DO-NOT-USE-IN-PROD'
+)
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -135,7 +143,6 @@ SITE_ID            = 1
 # ============================================================
 if not DEBUG:
     SECURE_SSL_REDIRECT            = True
-    SECURE_PROXY_SSL_HEADER        = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_HSTS_SECONDS            = 31536000   # 1 year
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD            = True
@@ -144,6 +151,10 @@ if not DEBUG:
     SESSION_COOKIE_SECURE          = True
     CSRF_COOKIE_SECURE             = True
     X_FRAME_OPTIONS                = 'DENY'
+    SECURE_PROXY_SSL_HEADER        = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+    if '*' in ALLOWED_HOSTS:
+        raise ImproperlyConfigured("ALLOWED_HOSTS must not contain '*' when DEBUG=False.")
 
 
 # ============================================================
@@ -230,6 +241,7 @@ DATABASES = {
         'NAME':     os.environ.get('DB_NAME'),
         'USER':     os.environ.get('DB_USER'),
         'PASSWORD': os.environ.get('DB_PASS'),
+        'PORT':     os.environ.get('DB_PORT', '5432'),
         'CONN_MAX_AGE': 60,   # Persistent connections: reduces per-request TCP overhead
     }
 }
@@ -393,6 +405,15 @@ CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
         'CORS_ALLOWED_ORIGINS',
+        'http://localhost:3000,http://127.0.0.1:3000'
+    ).split(',')
+    if origin.strip()
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        'CSRF_TRUSTED_ORIGINS',
         'http://localhost:3000,http://127.0.0.1:3000'
     ).split(',')
     if origin.strip()

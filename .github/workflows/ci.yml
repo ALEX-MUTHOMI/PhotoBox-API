@@ -1,0 +1,106 @@
+name: PhotoBox Base Engineering CI
+
+on:
+  push:
+    branches: ["main", "staging", "development"]
+  pull_request:
+    branches: ["main", "staging", "development"]
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Validate repository and config
+        run: bash scripts/ci/validate.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Lint
+        run: bash scripts/ci/lint.sh
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Security
+        run: bash scripts/ci/security.sh
+
+  django-smoke:
+    name: django-smoke
+    runs-on: ubuntu-latest
+    needs: [lint, security]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Django smoke
+        run: bash scripts/ci/django_smoke.sh
+
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    needs: django-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Unit tests
+        run: bash scripts/ci/unit.sh
+
+  celery:
+    name: celery
+    runs-on: ubuntu-latest
+    needs: django-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Celery verification
+        run: bash scripts/ci/celery.sh
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    needs: [unit, celery]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Integration tests
+        run: bash scripts/ci/integration.sh
+
+  toxiproxy:
+    name: toxiproxy
+    runs-on: ubuntu-latest
+    needs: integration
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Toxiproxy smoke
+        run: bash scripts/ci/toxiproxy_smoke.sh
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    needs: toxiproxy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Docker build
+        run: bash scripts/ci/docker_build.sh

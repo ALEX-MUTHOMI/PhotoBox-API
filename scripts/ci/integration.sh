@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+cd "$(dirname "$0")/../.."
+compose() {
+  if command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "$@"
+  else
+    docker compose "$@"
+  fi
+}
+
+compose run --rm test python -m pytest /repo-tests/integration -v --tb=short --timeout=60 "$@"
