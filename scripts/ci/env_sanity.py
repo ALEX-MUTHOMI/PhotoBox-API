@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 
 TRUE_VALUES = {"true", "1", "yes", "on"}
@@ -34,7 +35,23 @@ REQUIRED_ONE_OF = (
 )
 
 
+def load_dotenv_defaults(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        name = name.strip()
+        if name:
+            os.environ.setdefault(name, value.strip().strip("'\""))
+
+
 def main() -> int:
+    load_dotenv_defaults(Path(".env"))
+    load_dotenv_defaults(Path(".env.example"))
+
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     missing.extend(
         "/".join(names)

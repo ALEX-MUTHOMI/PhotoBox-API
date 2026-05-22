@@ -17,7 +17,7 @@ services:
           - postgres_proxy
           - redis_proxy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8474/version"]
+      test: ["CMD", "/toxiproxy-cli", "-host", "127.0.0.1:8474", "list"]
       interval: 5s
       timeout: 3s
       retries: 20

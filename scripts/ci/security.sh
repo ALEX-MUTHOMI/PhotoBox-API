@@ -10,6 +10,8 @@ compose() {
   fi
 }
 
+python scripts/ci/secret_hygiene.py
+
 compose run --rm test security
 
 if compose run --rm test python -m bandit --version >/dev/null 2>&1; then

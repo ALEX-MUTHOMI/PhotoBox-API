@@ -46,8 +46,8 @@ def _env_bool_strict(name: str, default: bool = False) -> bool:
         return False
 
     raise ImproperlyConfigured(
-        f"{name} must be one of true, 1, yes, on, false, 0, no, off. "
-        f"Received {value!r}."
+        f"Invalid boolean value for {name}: must be one of true, 1, yes, on, "
+        f"false, 0, no, off. Received {value!r}."
     )
 
 
