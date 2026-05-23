@@ -1038,17 +1038,29 @@ Verification:
 
 ### GitHub Actions Remote CI Result
 
-Pending. This branch must be pushed and GitHub Actions must be inspected before final production-base classification can be upgraded.
+Blocked / pending.
+
+Evidence:
+
+- Branch pushed: `hardening-photobox-production-base`.
+- Commit pushed for closeout evidence: `e1a84e4`.
+- GitHub workflow lookup for the pushed commit returned no workflow runs.
+- Cause: workflow `push` triggers are limited to `main`, `staging`, and `development`; this hardening branch does not trigger CI by direct push.
+- Required next action: open a pull request from `hardening-photobox-production-base` into `development` to trigger `PhotoBox Base Engineering CI`.
+- Attempted GitHub connector PR creation failed with `403 Resource not accessible by integration`.
+- Local GitHub CLI fallback unavailable because `gh` is not installed on this host.
+
+No GitHub Actions logs were available to inspect for secret leakage.
 
 ### Remaining Phase A Blockers
 
-1. Remote GitHub Actions not yet verified for this branch.
+1. Remote GitHub Actions not yet verified for this branch because PR creation is blocked from this environment.
 2. Production rotation remains required if the previously exposed local `SECRET_KEY` was ever reused outside local development.
 3. Bash/WSL is unavailable locally; local verification used Docker/Windows equivalents, while Linux CI remains authoritative.
 
 ### Phase A Final Classification
 
-Current classification before remote CI: base-engineering ready.
+Current classification after branch push but before PR-triggered remote CI: base-engineering ready.
 
 Not production-base ready until GitHub Actions passes remotely and no CI secret leakage is observed.
 
