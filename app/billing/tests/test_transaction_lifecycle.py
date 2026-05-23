@@ -357,6 +357,32 @@ class WebhookReceiverHTTPTests(TransactionTestCase):
         )
         self.assertEqual(resp.status_code, 401)
 
+    def test_rejected_webhook_response_body_is_generic(self):
+        resp = self.client.post(
+            self.url, data=self.payload, content_type='application/json',
+            HTTP_X_SIGNATURE='forged_abc123', HTTP_X_EVENT_ID='evt_http_generic',
+        )
+
+        rendered = resp.content.decode("utf-8").lower()
+        self.assertEqual(resp.status_code, 401)
+        self.assertNotIn("signature", rendered)
+        self.assertNotIn("headers", rendered)
+        self.assertNotIn("json", rendered)
+
+    def test_malformed_webhook_response_body_is_generic(self):
+        malformed_payload = b'{"meta":'
+        sig = self._sign(malformed_payload)
+        resp = self.client.post(
+            self.url, data=malformed_payload, content_type='application/json',
+            HTTP_X_SIGNATURE=sig, HTTP_X_EVENT_ID='evt_http_malformed',
+        )
+
+        rendered = resp.content.decode("utf-8").lower()
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("signature", rendered)
+        self.assertNotIn("headers", rendered)
+        self.assertNotIn("json", rendered)
+
     @override_settings(
         LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY='',
         LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY='',

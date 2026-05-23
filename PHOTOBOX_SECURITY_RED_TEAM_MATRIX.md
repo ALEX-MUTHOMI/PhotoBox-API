@@ -217,3 +217,64 @@ This pass focused only on output safety, scriptable content, signed URL leakage,
 | EXIF/metadata | Current public serializer does not expose EXIF, but future metadata display must sanitize PII and scriptable values. | Phase C metadata extraction/output tests. |
 | Provider-backed URL behavior | Docker tests mock/localize provider behavior; live R2/Cloudinary sandbox proof is out of scope. | Phase C provider sandbox URL and object-key proof. |
 | Error response matrix | Existing tests cover upload/signed URL paths, but a full endpoint-by-endpoint error message equivalence matrix remains open. | Phase B.3B enumeration/error response expansion. |
+
+## Phase B.3B Billing, Webhook, Enumeration, CSRF, And Resource-Abuse Surface Matrix
+
+This pass maps billing, webhook, auth, browser-session, and expensive-operation surfaces before patching. No provider calls, branch creation, push, PR, Darasa domain logic, or secret output are in scope.
+
+| Surface | Route/Service/Task | Actor | Auth Domain | Trust Boundary | Tenant Boundary | Expensive Operation? | Expected Protection | Existing Tests | Missing Tests | Risk |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Photographer login | `POST /api/user/token/` | Anonymous attacker / photographer | anonymous to photographer JWT/cookie | Credentials and refresh cookie | User account | Medium | Generic auth failure, password validation, refresh cookie HttpOnly/Secure/SameSite | `user/tests/test_user_api.py`, `core/tests/test_auth_jwt.py` | Dedicated auth enumeration matrix remains Phase B.3B scope. | High |
+| Password reset request | `POST /api/user/password-reset/` | Anonymous attacker | anonymous/public | Email ownership, reset email | User account | Medium | Generic response, rate limit, no token logging | `user/tests/test_password_reset.py` | Log redaction for reset-token path if logging is added. | High |
+| JWT refresh/logout | SimpleJWT refresh/cookie flow | Photographer | photographer JWT/cookie | Refresh cookie | User account | Low | Refresh rotation and blacklist, HttpOnly/Secure/SameSite cookie | `core/tests/test_auth_jwt.py` | CSRF-specific cookie refresh regression if endpoint becomes browser session based. | High |
+| Client magic link request | `POST /api/galleries/{gallery_id}/magic-link/` | Anonymous client | anonymous/public | Gallery allowlist email | Gallery/client allowlist | Email send | Published/non-expired gallery, generic response, hashed token, throttle | `gallery/tests/test_dual_lane_auth.py` | Enumeration equivalence matrix. | High |
+| Client magic link consume | `POST /api/galleries/magic-link/consume/` | Token holder | anonymous to client-gallery session | Magic token | Gallery/session/email | Low | Single use, expiry, gallery lifecycle revalidation, scoped cookies | `gallery/tests/test_dual_lane_auth.py` | CSRF/browser-session review if cookie auth changes. | High |
+| Checkout creation | `POST /api/checkout/generate/` | Photographer / malicious photographer | photographer dashboard auth and billing provider | Client plan/redirect input, provider API | User checkout session | Provider call | Auth required, plan allowlist, active subscriber block, redirect allowlist, cache lock, no user-controlled entitlement | `checkout/tests/test_checkout_security.py`, `billing/tests/test_transaction_lifecycle.py` | Production localhost redirect rejection; client-submitted workspace/entitlement override assertions. | High |
+| Billing webhook HTTP layer | `POST /api/billing/webhook/` | Lemon Squeezy / forged provider attacker | billing provider access | Raw body HMAC, event headers | User/subscription/checkout session | Celery handoff | Signature required, raw body verification, empty secret fail-closed, payload-size cap, generic external failure | `billing/tests/test_security.py`, `billing/tests/test_transaction_lifecycle.py` | Generic external error bodies; malformed JSON equivalence; signature log redaction. | Critical |
+| Subscription lifecycle task | `billing.tasks.process_lemon_squeezy_webhook` | Celery/internal after verified webhook | billing provider/internal task | Provider payload custom_data, subscription state | User/subscription/checkout session | Entitlement mutation | Payload-hash idempotency, user/session match, known statuses only, transaction lock, audit trail | `billing/tests/test_transaction_lifecycle.py`, `billing/tests/test_billing_hardening.py` | DLQ payload redaction at rest; provider event ordering policy expansion. | Critical |
+| Billing audit/event record | `BillingAuditLog`, `ProcessedWebhook`, `DeadLetterQueue` | Internal/operator | internal ledger | Provider event IDs and payload-derived context | User/subscription | Low | Audit immutable, webhook idempotency, DLQ safe persistence | `billing/tests/test_audit_immutability.py`, `billing/tests/test_log_redaction.py` | DLQ must not persist raw sensitive provider payload fields. | High |
+| Storage/R2 webhook canonical namespace | `POST /api/v1/webhooks/cloudflare/r2/` | Cloudflare R2 / forged provider attacker | webhook provider access | Timestamped HMAC, object key payload | Photo/media asset object key | Derivative task fanout | Signature/timestamp required, unknown key ignored, READY idempotency, no duplicate derivative fanout | `webhooks/tests/test_cloudflare.py`, `webhooks/tests/test_r2_webhook.py` | Broader log redaction for object-key/signature failure paths. | Critical |
+| Heavy Lane ingestion webhook | `POST /api/v1/ingestion/webhook/` | Cloudflare R2 / forged provider attacker | webhook provider access | Timestamped HMAC, object key payload | MediaAsset object key | Derivative task fanout | Signature/timestamp required, pending asset match, size quarantine, READY idempotency | `ingestion/tests/test_r2_webhook.py`, `ingestion/tests/test_security.py` | Canonical namespace decision remains Phase C/F handoff. | Critical |
+| Upload init / Heavy Lane manifest | `POST /api/v1/ingestion/bulk/` | Photographer | photographer dashboard auth | Manifest body and scene ID | Workspace/event/scene/quota | HMAC ticket generation and DB writes | Scene ownership, batch limits, duplicate client refs, quota lock, server object keys, throttle | `ingestion/tests/test_views.py`, `ingestion/tests/test_security.py`, `ingestion/tests/test_quota_ledger.py` | Provider sandbox proof deferred to Phase C. | Critical |
+| Signed URL issuance | `GET /api/gallery/fast-lane/photos/{id}/download-url/` | Photographer/client/guest | photographer dashboard or gallery-scoped auth | Photo ID and gallery session | Workspace/gallery/photo | R2 presign | Auth before presign, lifecycle checks, READY-only, TTL cap, no signed URL logs | `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py`, B.3A storage tests | Enumeration equivalence for missing/private/unauthorized responses remains B.3B. | Critical |
+| Archive generation | Gallery archive request/status views and `build_gallery_archive` | Gallery client | client-gallery scoped auth | Gallery session and archive job | Gallery/session/photo | Celery archive build and R2 ZIP | Session scope, dedupe pending/completed jobs, READY/visible-only media, short URL | `gallery/tests/test_archive_engine.py` | Resource-abuse bounds and enumeration equivalence expansion. | High |
+| Favorites mutation | Gallery favorites views | Gallery client/guest | client-gallery scoped auth | Photo ID, notes | Gallery/session/photo | Low/medium | Session scope, visibility, role, throttle, no cross-gallery selection | `gallery/tests/test_favorites_engine.py` | Enumeration equivalence for missing/hidden/private photo. | High |
+| CORS/CSRF/cookie settings | `app.settings`, allauth/dj-rest-auth/browser flows | Browser attacker | browser credential boundary | Origin, cookies, CSRF headers | User/gallery session | Low | Production secure cookies, explicit CORS/CSRF origins, no wildcard credentials, allauth middleware | `core/tests/test_settings_boot.py`, smoke checks | Dedicated production settings tests for localhost/test exceptions and redirect behavior. | High |
+| Error/log paths | `user.exceptions`, billing/webhook/task logs, storage helpers | Developer/operator/attacker observing logs | telemetry boundary | Exception messages, payloads, tokens | All tenants | Low | Scrubbers, redacted Bandit, no raw signatures/tokens/signed URLs | `core/tests/test_security_helpers.py`, B.3A/B billing log tests | Expand DLQ-at-rest and generic webhook response coverage. | High |
+
+## Phase B.3B Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-011 | High | Checkout redirect policy | Production checkout redirect validation accepted localhost as a development exception even when `DEBUG=False`, allowing a production open-redirect primitive if a hostile client supplied a localhost return URL. | `checkout/tests/test_checkout_security.py::CheckoutAPISecurityTests::test_production_checkout_redirect_rejects_localhost` | `CheckoutRequestSerializer.validate_success_url` now treats localhost as DEBUG-only, requires HTTP(S), requires HTTPS in production, and allows only configured first-party hosts / `FRONTEND_URL`. | Test failed first with provider path reached (`502`), then passed; checkout/billing suites passed. |
+| PB-012 | High | Billing DLQ at-rest redaction | Billing DLQ persistence received raw provider payload fields, including session tokens and email-like fields, even though fallback logging was redacted. | `billing/tests/test_log_redaction.py::BillingWebhookLogRedactionTests::test_dlq_record_does_not_persist_raw_sensitive_provider_payload` | `safe_create_dlq` now stores `scrub_value(payload_data)` and fingerprints the scrubbed payload; sensitive-key coverage includes session token, customer email, and signatures. | Test failed first with raw values in persisted payload, then passed; billing and unit suites passed. |
+| PB-013 | Medium | Billing webhook enumeration / external errors | Billing webhook rejection bodies exposed verification internals such as `Invalid signature` and `Malformed JSON`, making provider-verification behavior externally distinguishable. | `WebhookReceiverHTTPTests.test_rejected_webhook_response_body_is_generic`; `test_malformed_webhook_response_body_is_generic` | Billing webhook HTTP layer now returns generic external rejection bodies for missing/invalid signatures, malformed JSON, and payload-size rejection while preserving status codes. | Tests failed first on `signature`/`json` response bodies, then passed; security and billing suites passed. |
+
+## Phase B.3B Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env passed; ignored local `.env` still needs local `DEBUG` cleanup. |
+| redacted Bandit | pass | Docker redacted Bandit reported `bandit issues: 0`. |
+| lint | pass | Docker `flake8 .` returned `0`. |
+| new B.3B tests | pass | 4 targeted tests passed twice after failing first. |
+| affected checkout/billing | pass | 60 passed. |
+| security | pass | 88 passed. |
+| affected webhooks/ingestion/user/gallery | pass | 216 passed. |
+| unit | pass | 303 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed. |
+| integration | pass | 2 passed. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |
+
+## Phase B.3B Remaining Risks
+
+| Area | Remaining Risk | Recommended Next TDD Target |
+|---|---|---|
+| Provider ordering semantics | Current out-of-order subscription tests cover cancel then renewal; full Lemon Squeezy event timestamp/version semantics need provider-specific review. | Phase E billing state-machine hardening. |
+| Webhook namespaces | Both storage webhook namespaces have security/idempotency tests, but canonical path consolidation is not part of B.3B. | Phase F webhook/API cleanup or Phase C provider proof. |
+| CSRF/browser contract | Current settings and auth tests cover secure cookies and CORS basics; if refresh/logout become browser cookie-only mutation endpoints, add explicit CSRF tests. | Phase D auth/browser hardening. |
+| Resource abuse | Existing local throttles cover login, password reset, magic links, favorites, checkout, uploads, and manifests; production still needs CDN/WAF limits and provider-side webhook allowlisting. | Phase G operations hardening. |
+| Local toolchain | Host Poetry still points to a stale Python path; Docker is authoritative until host env is repaired. | Phase A maintenance. |

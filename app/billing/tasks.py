@@ -6,6 +6,7 @@ from celery.exceptions import MaxRetriesExceededError
 from django.db import transaction, OperationalError
 from django.contrib.auth import get_user_model
 from checkout.models import CheckoutSession, PricingPlan
+from core.security import scrub_value
 from billing.models import Subscription, BillingAuditLog, SubscriptionTier, DeadLetterQueue, ProcessedWebhook
 
 logger = logging.getLogger(__name__)
@@ -46,16 +47,17 @@ def safe_create_dlq(event_id, payload_data, error_message):
     """
     FAILSAFE: Ensures we NEVER lose a payment payload, even if the DB goes completely offline.
     """
+    safe_payload = scrub_value(payload_data)
     try:
         DeadLetterQueue.objects.create(
             event_id=event_id,
-            payload=payload_data,
+            payload=safe_payload,
             error_message=error_message
         )
     except Exception as dlq_exc:
         try:
             payload_fingerprint = hashlib.sha256(
-                json.dumps(payload_data, sort_keys=True, separators=(',', ':'), default=str)
+                json.dumps(safe_payload, sort_keys=True, separators=(',', ':'), default=str)
                 .encode('utf-8')
             ).hexdigest()[:16]
         except (TypeError, ValueError):

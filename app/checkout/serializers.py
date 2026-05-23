@@ -54,18 +54,35 @@ class CheckoutRequestSerializer(serializers.Serializer):
     def validate_success_url(self, value):
         """
         SECURITY: Open Redirect Defense.
-        Only allow redirects back to our own domain or localhost.
+        Only allow redirects back to configured first-party domains. Localhost
+        is a development-only exception and must never be accepted when DEBUG is
+        false.
         """
         if not value:
             return value
 
         parsed_url = urlparse(value)
-        # In production, settings.ALLOWED_HOSTS typically contains your domains
-        # (e.g., ['api.photobox.com', 'photobox.com', 'localhost'])
-        allowed_domains = getattr(settings, 'ALLOWED_HOSTS', [])
+        allowed_domains = {
+            host.lstrip(".")
+            for host in getattr(settings, 'ALLOWED_HOSTS', [])
+            if host and host != "*"
+        }
+        frontend_host = urlparse(getattr(settings, "FRONTEND_URL", "")).hostname
+        if frontend_host:
+            allowed_domains.add(frontend_host)
+        localhost_domains = {"localhost", "127.0.0.1"}
 
-        # Localhost fallback for development
-        if parsed_url.hostname not in allowed_domains and parsed_url.hostname not in ['localhost', '127.0.0.1']:
+        if parsed_url.scheme not in {"http", "https"}:
+            raise serializers.ValidationError("Untrusted redirect URL provided. Security violation logged.")
+
+        if not getattr(settings, "DEBUG", False) and parsed_url.scheme != "https":
+            raise serializers.ValidationError("Untrusted redirect URL provided. Security violation logged.")
+
+        is_local_dev_redirect = (
+            getattr(settings, "DEBUG", False)
+            and parsed_url.hostname in localhost_domains
+        )
+        if parsed_url.hostname not in allowed_domains and not is_local_dev_redirect:
             raise serializers.ValidationError("Untrusted redirect URL provided. Security violation logged.")
 
         return value

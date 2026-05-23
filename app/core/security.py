@@ -32,6 +32,12 @@ _SENSITIVE_KEYS = {
     "api_key",
     "email",
     "client_email",
+    "customer_email",
+    "session_token",
+    "signature",
+    "webhook_signature",
+    "x_signature",
+    "x-signature",
     "email_host_password",
 }
 

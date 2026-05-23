@@ -1691,3 +1691,223 @@ Phase B.3B should cover:
 - Rate limiting and DDoS/resource abuse.
 - Checkout tampering and redirect policy.
 - Provider payload safety and log redaction.
+
+## Phase B.3B - Billing, Webhook, Enumeration, CSRF, and Resource Abuse Start State
+
+Date: 2026-05-23
+
+Current branch: `development`
+
+Latest commit inspected at start: `3616c50 Red Team Verfications continua`
+
+Starting classification: Phase B.3A passed locally; full Phase B not passed; not production ready.
+
+Current local gate baseline inherited from B.3A:
+
+- secret-hygiene: pass
+- env-sanity: pass with controlled placeholders
+- redacted Bandit: pass, 0 issues
+- lint: pass
+- targeted output/signed URL/archive/favorites: 41 passed
+- security: 88 passed
+- gallery: 117 passed
+- unit: 300 passed
+- celery: 18 passed
+- django-smoke: 5 passed
+- integration: 2 passed
+- toxiproxy: 7 passed
+- docker build: pass
+- `git diff --check`: pass with LF-to-CRLF warnings only
+
+Scope for this pass:
+
+- Billing and checkout tampering.
+- Lemon Squeezy webhook forgery, replay, out-of-order behavior, idempotency, and redaction.
+- Storage/R2 webhook replay/idempotency review.
+- Enumeration resistance across auth, gallery, signed URL, archive, billing, and webhook errors.
+- CSRF/CORS/cookie/session/OAuth browser-boundary review.
+- Rate limiting and resource-abuse review for high-cost endpoints.
+- CI/test isolation for the new red-team tests.
+
+Out of scope:
+
+- No branch creation, push, PR, or commit.
+- No real Cloudflare R2, Cloudinary, Lemon Squeezy, email, or internet service calls.
+- No Phase C provider sandbox testing, media pipeline proof, or event-bus work.
+- No Darasa domain logic, product feature expansion, broad refactor, or hidden test failures.
+
+Pre-flight and safety:
+
+- Branch remained `development`.
+- Remote remained `https://github.com/ALEX-MUTHOMI/PhotoBox-API.git`.
+- `.env` is not tracked.
+- Working tree was clean at B.3B start.
+- Host Poetry still points at a removed Python path; Docker and controlled host-Python fallback remain authoritative.
+- `secret_hygiene.py` passed with host Python fallback.
+- `env_sanity.py` passed with controlled placeholder environment and no values printed.
+- Docker redacted Bandit reported `bandit issues: 0`.
+- No provider calls, secret output, branch creation, push, PR, or Darasa concepts were introduced.
+
+## Phase B.3B Surface Map
+
+The detailed B.3B surface matrix was added to `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md`. The first actionable test targets selected from the matrix are:
+
+| Target | Reason |
+|---|---|
+| Checkout redirect allowlist | Production redirect validation still needs proof that localhost/test exceptions cannot be used as open redirects when `DEBUG=False`. |
+| Billing DLQ-at-rest redaction | Existing log fallback redacts provider payloads, but DLQ persistence should also avoid raw sensitive provider payload fields. |
+| Billing webhook external errors | Webhook HTTP failures should remain generic externally while preserving safe internal context. |
+
+## Phase B.3B Executive Summary
+
+Phase B.3B closed three verified billing/webhook/resource-boundary issues with failing tests first:
+
+- PB-011 High: production checkout redirect validation allowed localhost development redirects when `DEBUG=False`.
+- PB-012 High: billing DLQ persistence accepted raw sensitive provider payload fields at rest.
+- PB-013 Medium: billing webhook rejection bodies exposed verification internals such as signature and JSON parse reasons.
+
+No real Lemon Squeezy, Cloudflare R2, Cloudinary, email, or internet services were called. No branch, push, PR, secret output, or Darasa domain logic was introduced.
+
+## Phase B.3B Billing / Checkout Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Production checkout accepted localhost redirect targets far enough to attempt provider communication. | High | fixed | `test_production_checkout_redirect_rejects_localhost` failed first with `502`, then passed with `400`. |
+| Checkout redirect validation now requires HTTP(S), requires HTTPS when `DEBUG=False`, and allows only configured first-party hosts plus `FRONTEND_URL`. | High | fixed | Checkout/billing suites passed `60` tests. |
+| Existing checkout controls remain intact: auth required, active subscriber block, plan allowlist, cache lock, and rate limiting. | High | covered | `checkout/tests` and billing lifecycle tests passed. |
+
+## Phase B.3B Billing Webhook Forgery / Replay / Out-of-Order Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Billing webhook rejection bodies leaked verification internals. | Medium | fixed | Generic response tests failed first on `signature`/`json`, then passed. |
+| Missing/invalid signatures, tampered body, payload hash replay, empty-secret fail-closed, duplicate event idempotency, and custom-data user/session mismatch remain covered. | Critical | covered | Billing security and transaction lifecycle tests passed. |
+| Out-of-order cancel then renewal behavior remains covered locally. | High | covered | `billing/tests/test_billing_hardening.py::OutOfOrderWebhookTests` passed. |
+
+## Phase B.3B Storage Webhook Replay / Idempotency Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Storage webhook replay/idempotency tests remain green after B.3B changes. | Critical | covered | Webhook/ingestion affected suite passed `216` tests. |
+| Duplicate object-created events do not enqueue duplicate derivative work. | High | covered | Existing B.2 tests passed in webhooks/ingestion suites. |
+| Canonical webhook namespace consolidation remains out of scope. | Medium | deferred | Phase C/F handoff item. |
+
+## Phase B.3B Enumeration Resistance Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Billing webhook external errors now avoid user-visible `signature`, `headers`, and `json` reason leakage. | Medium | fixed | Two generic webhook response tests passed. |
+| Login, password reset, magic-link request, and user auth generic response/rate-limit coverage remains green. | High | covered | Security gate passed `88`; user/gallery affected suites passed. |
+| Full endpoint-by-endpoint error equivalence timing analysis remains out of scope. | Medium | deferred | Phase D/G hardening. |
+
+## Phase B.3B CSRF / CORS / Cookie / Session Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Production checkout redirects no longer inherit localhost development exception. | High | fixed | New production override test passed. |
+| Existing settings keep production CORS explicit and secure cookies enabled when `DEBUG=False`. | High | covered | Env sanity, settings boot, smoke, and security gates passed. |
+| Browser cookie CSRF tests should be expanded if refresh/logout become cookie-only mutation endpoints. | Medium | deferred | Phase D auth/browser handoff. |
+
+## Phase B.3B Rate-Limit / DDoS / Resource Abuse Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Existing rate limits for checkout, password reset, magic-link send, guest access, favorites, Fast Lane uploads, and Heavy Lane manifests remained green. | High | covered | Checkout, user, gallery, ingestion, and unit suites passed. |
+| Malformed/oversized billing webhook payloads are rejected before business mutation and now use generic external errors. | High | fixed/covered | Billing HTTP tests passed. |
+| CDN/WAF/provider-side quotas and allowlisting remain operational hardening, not local application code. | Medium | deferred | Phase G operations. |
+
+## Phase B.3B Logging / Telemetry Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Billing DLQ fallback logging was already redacted, but persisted DLQ payloads now also scrub sensitive provider fields. | High | fixed | `test_dlq_record_does_not_persist_raw_sensitive_provider_payload` failed first, then passed. |
+| Sensitive scrubber coverage now includes session tokens, customer email, and webhook signatures. | High | fixed | Core scrubber change covered by billing and security gates. |
+| Redacted Bandit and secret hygiene remained clean. | High | pass | `bandit issues: 0`; `secret hygiene ok`. |
+
+## Phase B.3B CI/Test Isolation Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| New B.3B tests are deterministic across repeated execution. | Medium | pass | Targeted B.3B tests passed twice. |
+| DB-sharing gates were run sequentially to avoid known `test_devdb` collision. | Medium | pass | Sequential unit, smoke, integration, and Toxiproxy gates passed. |
+| Toxiproxy resilience remained unaffected by billing/webhook changes. | Medium | pass | 7 resilience tests passed. |
+
+## Phase B.3B Tests Added
+
+| Test | Purpose |
+|---|---|
+| `CheckoutAPISecurityTests.test_production_checkout_redirect_rejects_localhost` | Proves localhost redirect exceptions are not accepted in production checkout flow. |
+| `BillingWebhookLogRedactionTests.test_dlq_record_does_not_persist_raw_sensitive_provider_payload` | Proves DLQ-at-rest payloads scrub session tokens and email-like sensitive fields. |
+| `WebhookReceiverHTTPTests.test_rejected_webhook_response_body_is_generic` | Proves invalid billing webhook signatures do not expose verification internals externally. |
+| `WebhookReceiverHTTPTests.test_malformed_webhook_response_body_is_generic` | Proves malformed billing webhook payloads do not expose parser internals externally. |
+
+## Phase B.3B Fixes Made
+
+| File | Change |
+|---|---|
+| `app/checkout/serializers.py` | Hardened checkout success redirect policy: DEBUG-only localhost, HTTPS required in production, configured first-party host allowlist. |
+| `app/checkout/tests/test_checkout_security.py` | Added production localhost redirect regression test. |
+| `app/core/security.py` | Expanded sensitive-key scrubber coverage for session tokens, customer email, and webhook signatures. |
+| `app/billing/tasks.py` | DLQ now stores scrubbed provider payloads and fingerprints scrubbed payload content. |
+| `app/billing/tests/test_log_redaction.py` | Added DLQ-at-rest redaction regression test. |
+| `app/billing/views.py` | Billing webhook HTTP rejections now use generic external response bodies while preserving status codes. |
+| `app/billing/tests/test_transaction_lifecycle.py` | Added generic billing webhook rejection body tests. |
+| `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md` | Added B.3B surface matrix, findings, gate evidence, and remaining risks. |
+
+## Phase B.3B Gate Results
+
+| Gate | Result | Command | Notes |
+|---|---|---|---|
+| secret-hygiene | pass | `python scripts/ci/secret_hygiene.py` | No tracked likely real secrets. |
+| env-sanity | pass | `python scripts/ci/env_sanity.py` with controlled placeholders | Plain ignored `.env` still has invalid `DEBUG`; controlled gate passed without printing values. |
+| redacted-bandit | pass | Docker `python /scripts/ci/bandit_redacted.py -r . -c /repo-config/pyproject.toml` | 0 issues. |
+| lint | pass | Docker `flake8 .` | Returned `0`. |
+| new B.3B tests | pass | Docker pytest targeted B.3B tests | 4 passed twice after failing first. |
+| checkout/billing | pass | Docker pytest `checkout/tests billing/tests` | 60 passed. |
+| security | pass | Docker `security` | 88 passed. |
+| webhooks/ingestion/user/gallery | pass | Docker pytest affected suites | 216 passed. |
+| unit | pass | Docker `unit` | 303 passed. |
+| celery | pass | Docker `celery` | 18 passed. |
+| django-smoke | pass | Docker pytest `/repo-tests/smoke --ds=app.settings` | 5 passed. |
+| integration | pass | Docker pytest `/repo-tests/integration --ds=app.settings` | 2 passed. |
+| toxiproxy | pass | Docker Compose Toxiproxy resilience pytest | 7 passed. |
+| docker-build | pass | `docker build .` | Build completed. |
+| diff-check | pass | `git diff --check` | LF-to-CRLF warnings only. |
+
+## Phase B.3B Remaining Risks
+
+| Severity | Risk | Handoff |
+|---|---|---|
+| Medium | Host Poetry virtualenv still points to a removed Python path; Docker remains authoritative until host env is repaired. | Phase A maintenance |
+| Medium | Plain ignored local `.env` still has invalid `DEBUG`; controlled env gate passes. | Local developer hygiene |
+| Medium | Provider-specific Lemon Squeezy event timestamp/version semantics need deeper review beyond local out-of-order tests. | Phase E billing state-machine hardening |
+| Medium | Storage webhook namespace consolidation remains out of scope. | Phase F/API cleanup or Phase C provider proof |
+| Medium | Production WAF/CDN/provider-side throttling and IP allowlisting remain operational controls outside local tests. | Phase G operations hardening |
+| Medium | Full CSRF tests should be added if cookie-backed refresh/logout semantics are expanded. | Phase D auth/browser hardening |
+
+No Critical findings remain open from Phase B.3B. No High findings remain open from issues addressed in this pass.
+
+## Phase B.3B Classification
+
+Phase B.3B passed.
+
+Reason: the billing/checkout/webhook/logging issues found in this pass were reproduced with failing tests first, fixed narrowly, and verified through targeted, affected-suite, security, unit, Celery, smoke, integration, Toxiproxy, and Docker build gates.
+
+Full Phase B is not claimed as complete here because provider sandbox proof, full endpoint timing/equivalence analysis, browser CSRF expansion for future cookie-only endpoints, and operational WAF/CDN controls remain assigned to later phases.
+
+Production ready is not claimed.
+
+## Phase C Recommendation
+
+Recommended next phase remains Phase C - Upload and Media Pipeline Hardening.
+
+Phase C should prove:
+
+- Fast Lane upload security.
+- Heavy Lane manifest security.
+- Safe object key policy.
+- Quota reservation and race protection.
+- Malicious image rejection.
+- R2 sandbox upload proof.
+- Cloudinary sandbox fetch/display proof.
+- Client gallery media delivery safety.
