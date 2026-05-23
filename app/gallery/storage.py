@@ -190,11 +190,11 @@ def generate_r2_presigned_get_url(
             Params={"Bucket": bucket_name, "Key": r2_object_key},
             ExpiresIn=expires_in,
         )
-    except (ClientError, BotoCoreError) as exc:
+    except Exception as exc:
         logger.error(
-            "[R2] generate_presigned_get_url failed for key=%s: %s",
+            "[R2] generate_presigned_get_url failed for key=%s error_type=%s",
             r2_object_key,
-            exc,
+            type(exc).__name__,
         )
         return None
 

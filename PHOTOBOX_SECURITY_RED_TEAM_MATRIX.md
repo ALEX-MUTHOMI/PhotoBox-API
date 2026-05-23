@@ -158,3 +158,62 @@ This update expands the route matrix with object-boundary and missing-test colum
 | integration | pass | 2 passed. |
 | toxiproxy | pass | 7 passed. |
 | docker-build | pass | `docker build .` passed. |
+
+## Phase B.3A Output Surface Matrix
+
+This pass focused only on output safety, scriptable content, signed URL leakage, and client gallery delivery boundaries. No provider calls, branch creation, push, PR, Darasa domain logic, or secret output were performed.
+
+| Surface | Route/Serializer/Service | Actor | Auth Domain | Input Source | Output Field | Risk | Existing Test | Missing Test |
+|---|---|---|---|---|---|---|---|---|
+| Event/gallery title | `GalleryPublicSerializer` via `GET /api/galleries/{gallery_id}/` | Gallery client/guest | client/gallery-scoped auth | Photographer-controlled `Event.title` | `title` | Scriptable title could be rendered unsafely by clients. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Frontend must still avoid `v-html`/raw HTML rendering. |
+| Event slug | `EventSerializer`, event creation APIs | Photographer and client gallery payload consumers | photographer dashboard auth / client-gallery output | Photographer-controlled title | `slug` | Unsafe URL path segments or script-like slug fragments. | `gallery/tests/test_events_api.py::EventApiTests::test_create_event_slug_is_safe_for_scriptable_title` | None for current backend policy. |
+| Scene title | `GalleryPublicSceneSerializer` | Gallery client/guest | client/gallery-scoped auth | Photographer-controlled `Scene.title` | `title` | Scriptable scene name could be rendered unsafely by clients. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Frontend escaping contract remains required. |
+| Scene slug | Scene APIs and public scene payload | Photographer and gallery client | photographer dashboard auth / client-gallery output | Photographer-controlled scene title | `slug` | Unsafe URL path segment if slug generation regresses. | Existing gallery scene/event API tests cover safe creation path. | Add explicit scene scriptable slug regression if scene slugs become route-critical. |
+| Gallery description/caption | Not present in current `Event`/public gallery model fields | N/A | N/A | N/A | N/A | If added later, rich text could become XSS surface. | Not applicable in current schema. | Phase B follow-up if description/caption fields are introduced. |
+| Photo filename | `GalleryPublicPhotoSerializer` | Gallery client/guest | client/gallery-scoped auth | Photographer upload filename | `original_filename` | Scriptable filename could be rendered unsafely or expose path-like content. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename`; upload filename tests in `app/tests/test_api_upload.py` | Frontend display must still render as text, not HTML. |
+| Photo display name/caption | Not present in current public photo serializer | N/A | N/A | N/A | N/A | Future captions/display labels could become XSS surfaces. | Not applicable in current schema. | Phase B follow-up if caption/display fields are introduced. |
+| Photo metadata / EXIF | `Photo.exif_data`, internal model field | Gallery client/guest if exposed later | client-gallery output | Uploaded image metadata | Not exposed by `GalleryPublicPhotoSerializer` | Raw EXIF can carry HTML/JS-like strings or PII. | `test_client_gallery_payload_excludes_internal_keys_and_download_urls` verifies public payload excludes internal metadata. | Phase C should test EXIF extraction/sanitization if metadata is surfaced. |
+| Delivery URL | `Photo.delivery_url`, `GalleryPublicPhotoSerializer` | Gallery client/guest | client/gallery-scoped auth | Server-generated Cloudinary fetch URL or legacy optimized URL | `delivery_url` | Legacy stored URL fields could return `javascript:` or `data:` scheme payloads. | `test_client_gallery_payload_rejects_scriptable_legacy_delivery_url`; `gallery/tests/test_security_cloud.py` | Phase C provider-sandbox proof for Cloudinary/R2 URL behavior. |
+| Cover URLs | `GalleryPublicSerializer.cover_image_url`, `cover_photo` | Gallery client/guest | client/gallery-scoped auth | Workspace branding URL / event cover URL | `cover_image_url`, `cover_photo` | Scriptable branding/cover URLs could be returned to clients. | `test_client_gallery_payload_rejects_scriptable_cover_urls`; `gallery/tests/test_watermark_engine.py` | None for current HTTP(S)-only backend policy. |
+| Download URL | `PhotoFastLaneViewSet.download_url`, archive status views | Photographer or scoped gallery client | photographer dashboard auth and client/gallery-scoped auth | R2 object key after auth checks | signed `download_url` | Unauthorized or stale sessions could receive temporary capability URLs. | `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py`, `gallery/tests/test_storage_unit.py` | Phase C/G provider proof for live R2 TTL and cache behavior. |
+| Signed URL logs | `generate_r2_presigned_get_url` | Internal service/log consumer | internal storage helper | Provider/client exception details | Logs | Exception paths could include full signed URL query strings. | `gallery/tests/test_storage_unit.py::R2StorageUnitTests::test_generate_presigned_get_url_failure_redacts_signed_query` | Add broader structured logging tests if signed URL generation moves to new services. |
+| Archive download endpoint | Gallery archive views/tasks | Gallery client | client/gallery-scoped auth | Archive job, R2 archive key | archive status URL | Archive URL or media set could cross gallery/session boundary. | `gallery/tests/test_archive_engine.py`, `gallery/tests/test_download_workflows.py` | Phase C should verify provider-backed archive object existence and TTL behavior. |
+| Favorites payload | Favorites APIs and archive favorites flow | Gallery client/guest and photographer summary | client/gallery-scoped auth or photographer dashboard auth | FavoriteSelection rows | favorites summary/archive | Favorites could leak across gallery/session or include hidden media. | `gallery/tests/test_favorites_engine.py`, `gallery/tests/test_archive_engine.py` | Add unpublished/expired favorite mutation regression if lifecycle policy changes. |
+| Magic link / gallery access response | `GalleryMagicLinkConsumeView`, public gallery views | Anonymous/client | anonymous to client-gallery session | Magic link token and gallery state | session response/cookie | Stale links could continue access after lifecycle changes. | `gallery/tests/test_dual_lane_auth.py` | None for current stale-link revocation coverage. |
+| R2 object key exposure | Public gallery serializers and download services | Gallery client/guest | client-gallery output | Private object keys | Public JSON fields | Object keys should not be unnecessarily exposed in client payloads. | `test_client_gallery_payload_excludes_internal_keys_and_download_urls` | Phase C provider proof should revisit delivery URL key disclosure policy. |
+| Error responses | Gallery/download/upload views | Anonymous/client/photographer | mixed | Access failures and validation failures | response body | Errors could leak private object existence or stack traces. | Existing upload response safety tests; signed URL lifecycle tests use 403/generic denial. | Add dedicated output error response matrix in Phase B.3B if endpoint behavior changes. |
+
+## Phase B.3A Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-008 | High | Client gallery text output | Photographer-controlled gallery title, scene title, or filename containing scriptable HTML was returned raw in public gallery JSON and could be executed by a careless frontend renderer. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Public gallery serializers now return sanitized client text using tag stripping plus HTML escaping for `title`, scene `title`, and `original_filename`; stored originals are preserved. | New test failed first on raw `<script>` output, then passed; gallery suite passed. |
+| PB-009 | High | Client gallery URL output | Legacy stored delivery/cover URL fields could return scriptable `javascript:` or `data:` URLs to public clients. | `test_client_gallery_payload_rejects_scriptable_legacy_delivery_url`; `test_client_gallery_payload_rejects_scriptable_cover_urls` | Client-facing URL fields now allow only absolute HTTP(S) URLs; unsafe legacy `optimized_url`, cover image, and cover photo values are suppressed. | New tests failed first with scriptable URLs in payload, then passed; existing safe Cloudinary/cover tests still passed. |
+| PB-010 | Medium | Signed URL failure redaction | A provider/client exception during signed URL generation could propagate or include a full signed URL query string in error paths. | `gallery/tests/test_storage_unit.py::R2StorageUnitTests::test_generate_presigned_get_url_failure_redacts_signed_query` | `generate_r2_presigned_get_url` now fails closed, returns `None`, and logs only object key and exception type without exception message/query string. | New test failed first with uncaught exception, then passed; storage/security/unit gates passed. |
+
+## Phase B.3A Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env passed; plain ignored `.env` still has invalid `DEBUG` and should be fixed locally without committing secrets. |
+| redacted Bandit | pass | Docker redacted Bandit reported `bandit issues: 0`. |
+| lint | pass | Docker `flake8 .` returned `0`. |
+| targeted output/signed URL/archive/favorites | pass | 41 passed. |
+| security | pass | 88 passed. |
+| gallery | pass | 117 passed. |
+| unit | pass | 300 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed. |
+| integration | pass | 2 passed. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |
+
+## Phase B.3A Remaining Risks
+
+| Area | Remaining Risk | Recommended Next TDD Target |
+|---|---|---|
+| Frontend rendering contract | Backend now sanitizes current public gallery text fields, but Vue/frontend must still render untrusted strings as text and avoid raw HTML rendering. | Add frontend contract tests when frontend implementation exists. |
+| EXIF/metadata | Current public serializer does not expose EXIF, but future metadata display must sanitize PII and scriptable values. | Phase C metadata extraction/output tests. |
+| Provider-backed URL behavior | Docker tests mock/localize provider behavior; live R2/Cloudinary sandbox proof is out of scope. | Phase C provider sandbox URL and object-key proof. |
+| Error response matrix | Existing tests cover upload/signed URL paths, but a full endpoint-by-endpoint error message equivalence matrix remains open. | Phase B.3B enumeration/error response expansion. |

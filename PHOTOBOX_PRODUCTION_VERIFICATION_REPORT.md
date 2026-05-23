@@ -1506,3 +1506,188 @@ No Critical findings remain open from Phase B.2. No High findings remain open fr
 Phase B partially complete.
 
 Reason: all new Phase B.2 High findings were closed with failing tests first and the executed local gates passed, but the full enterprise red-team checklist is not yet exhausted endpoint-by-endpoint. PhotoBox remains not production ready.
+
+## Phase B.3A - Output Safety and Signed URL Red-Team Start State
+
+Date: 2026-05-23
+
+Current branch: `development`
+
+Latest commit inspected at start: `42671d4 Red Team verification update`
+
+Starting classification: Phase B partially complete; base-engineering ready locally; not production ready.
+
+Scope for this pass:
+
+- XSS and scriptable content risks in client-facing gallery output.
+- Photographer-controlled public serializer output.
+- Client gallery payload safety.
+- Signed URL issuance and failure-path leakage.
+- Hidden/private/unready media delivery boundaries already covered by existing gallery tests.
+- Archive/favorites delivery boundaries where tied to client gallery output.
+
+Out of scope:
+
+- No branch creation, push, PR, or commit.
+- No real Cloudflare R2, Cloudinary, Lemon Squeezy, email, or internet calls.
+- No Phase C provider sandbox testing.
+- No product-feature additions, broad refactors, or Darasa domain logic.
+
+Pre-flight and safety:
+
+- Branch remained `development`.
+- Remote remained `https://github.com/ALEX-MUTHOMI/PhotoBox-API.git`.
+- `.env` is not tracked.
+- `secret_hygiene.py` passed with host Python fallback.
+- Host Poetry still points at a removed Python path; Docker test image remains authoritative for gates.
+- Plain local `env_sanity.py` inherited an ignored `.env` with invalid `DEBUG`; controlled placeholder environment passed and no values were printed.
+- Docker redacted Bandit reported `bandit issues: 0`.
+- No provider calls, secret output, branch creation, push, PR, or Darasa concepts were introduced.
+
+## Phase B.3A Executive Summary
+
+Phase B.3A found and closed three backend output-safety gaps using strict TDD:
+
+- PB-008 High: public gallery JSON returned raw scriptable photographer-controlled text in current client-facing fields.
+- PB-009 High: client-facing legacy URL fields could emit scriptable `javascript:` or `data:` URL schemes.
+- PB-010 Medium: signed URL generation failure paths could propagate provider/client exception text containing a full signed URL query string.
+
+All three patches were narrow and limited to public serializer output policy, safe URL filtering, and signed URL helper failure redaction. Stored photographer originals remain intact where appropriate. No real providers were called.
+
+## Phase B.3A Output Surface Matrix
+
+The detailed endpoint/surface matrix was updated in `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md`. Key surfaces reviewed in this pass:
+
+| Surface | Backend Policy | Evidence |
+|---|---|---|
+| Gallery/event title | Public serializer returns tag-stripped and HTML-escaped client text. | `test_client_gallery_payload_escapes_scriptable_titles_and_filename` |
+| Scene title | Public serializer returns tag-stripped and HTML-escaped client text. | `test_client_gallery_payload_escapes_scriptable_titles_and_filename` |
+| Photo original filename | Public serializer returns tag-stripped and HTML-escaped client text. | `test_client_gallery_payload_escapes_scriptable_titles_and_filename` |
+| Event slug | Existing safe slug generation remains covered. | `test_create_event_slug_is_safe_for_scriptable_title` |
+| Delivery URL | Unsafe legacy URL schemes are suppressed; only absolute HTTP(S) URLs are client-safe. | `test_client_gallery_payload_rejects_scriptable_legacy_delivery_url` |
+| Cover URLs | Unsafe branding/cover URL schemes are suppressed. | `test_client_gallery_payload_rejects_scriptable_cover_urls` |
+| Internal object keys / archive URLs | Public gallery payload excludes direct download URL, archive URL, object key, and EXIF fields. | `test_client_gallery_payload_excludes_internal_keys_and_download_urls` |
+| Signed URL failures | Failure path returns `None` and logs only safe context. | `test_generate_presigned_get_url_failure_redacts_signed_query` |
+
+## Phase B.3A XSS / Scriptable Text Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Public gallery title, scene title, and original filename could return raw scriptable HTML in JSON. | High | fixed | New test failed first on raw scriptable output, then passed after serializer safe-text policy. |
+| Stored original values still contain photographer input. | Low | accepted | Backend preserves originals; public output uses safe client fields. Frontend must still render as text. |
+
+## Phase B.3A Scriptable File / Image Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Existing Fast Lane upload tests already reject SVG/scriptable files, renamed executables, MIME spoofing, oversized files, decompression bombs, and unsafe filenames. | High | covered by existing tests | `gallery/tests/test_fastlane_api.py`, `app/tests/test_api_upload.py`, and full unit gate passed. |
+| Public payload does not expose raw EXIF/internal metadata. | Medium | covered | `test_client_gallery_payload_excludes_internal_keys_and_download_urls` passed. |
+| Live R2/Cloudinary media validation remains out of scope. | Medium | deferred | Phase C provider sandbox proof required. |
+
+## Phase B.3A Client Gallery Delivery Boundary Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Client gallery payload excludes internal keys, archive URLs, direct download URLs, and EXIF metadata. | High | fixed/covered | New client serializer test passed. |
+| Existing gallery lifecycle tests block stale magic link/session access after unpublish/expiry and enforce gallery scope. | High | covered | `gallery/tests/test_dual_lane_auth.py`, `gallery/tests/test_download_workflows.py`, and full gallery suite passed. |
+| Existing visibility/archive/favorites tests enforce READY-only and scoped access behavior. | High | covered | `gallery/tests/test_archive_engine.py`, `gallery/tests/test_favorites_engine.py`, and gallery suite passed. |
+
+## Phase B.3A Signed URL Lifecycle Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Legacy client-facing delivery URL fallback could emit scriptable URLs. | High | fixed | New failing test added first; `Photo.delivery_url` now suppresses unsafe legacy fallback schemes. |
+| Cover image fields could emit scriptable URLs. | High | fixed | New failing test added first; public serializer cover URL fields now allow only absolute HTTP(S) URLs. |
+| Signed URL provider/client failure could expose query strings through exception text. | Medium | fixed | New failing test added first; helper now fails closed and logs exception type only. |
+| Signed URL TTL remains bounded by existing tests. | High | covered | `gallery/tests/test_presigned_url_security.py` and storage unit tests passed. |
+
+## Phase B.3A Archive / Favorites Delivery Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Archive jobs stream only allowed READY assets and scope status URLs to gallery/session. | High | covered | `gallery/tests/test_archive_engine.py` passed in targeted and full gallery runs. |
+| Favorites mutations reject photos from another gallery and enforce scoped selections. | High | covered | `gallery/tests/test_favorites_engine.py` passed in targeted and full gallery runs. |
+| Archive/favorites live R2 object behavior remains provider-proof work. | Medium | deferred | Phase C provider sandbox tests required. |
+
+## Phase B.3A Error and Log Redaction Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Signed URL exception paths now avoid logging full URL/query strings. | Medium | fixed | `test_generate_presigned_get_url_failure_redacts_signed_query` passed. |
+| Redacted Bandit and secret hygiene remained clean after patches. | High | pass | `bandit issues: 0`; `secret hygiene ok`. |
+| A full endpoint-by-endpoint error response equivalence matrix remains open. | Medium | deferred | Phase B.3B should cover enumeration/error response expansion. |
+
+## Phase B.3A Tests Added
+
+| Test | Purpose |
+|---|---|
+| `ClientGallerySerializationSafetyTests.test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Proves public gallery title, scene title, and filename output are safe for client JSON consumers while stored originals remain unchanged. |
+| `ClientGallerySerializationSafetyTests.test_client_gallery_payload_excludes_internal_keys_and_download_urls` | Proves public gallery payload does not expose object keys, archive URLs, direct download URLs, or EXIF metadata. |
+| `ClientGallerySerializationSafetyTests.test_client_gallery_payload_rejects_scriptable_legacy_delivery_url` | Proves unsafe legacy `optimized_url` values are not emitted as client delivery URLs. |
+| `ClientGallerySerializationSafetyTests.test_client_gallery_payload_rejects_scriptable_cover_urls` | Proves unsafe cover/branding URL values are not emitted to clients. |
+| `R2StorageUnitTests.test_generate_presigned_get_url_failure_redacts_signed_query` | Proves signed URL generation failures do not leak signed query strings or raw provider exception text. |
+
+## Phase B.3A Fixes Made
+
+| File | Change |
+|---|---|
+| `app/gallery/client_serializers.py` | Added client output helpers for safe text and safe URL policy; public gallery, scene, photo filename, cover image, and cover photo outputs now use safe serializer fields. |
+| `app/gallery/models.py` | Added safe client URL validation for legacy `optimized_url` fallback in `Photo.delivery_url`. |
+| `app/gallery/storage.py` | Added fail-closed signed URL generation failure handling and redacted error logging. |
+| `app/gallery/tests/test_client_gallery_serialization.py` | Added B.3A client gallery output-safety tests. |
+| `app/gallery/tests/test_storage_unit.py` | Added signed URL failure redaction regression test. |
+| `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md` | Added B.3A output surface matrix, findings, gates, and remaining risks. |
+
+## Phase B.3A Gate Results
+
+| Gate | Result | Command | Notes |
+|---|---|---|---|
+| secret-hygiene | pass | `python scripts/ci/secret_hygiene.py` | No tracked likely real secrets. |
+| env-sanity | pass | `python scripts/ci/env_sanity.py` with controlled placeholders | Plain ignored `.env` still has invalid `DEBUG`; controlled gate passed without printing values. |
+| redacted-bandit | pass | Docker `python /scripts/ci/bandit_redacted.py -r . -c /repo-config/pyproject.toml` | 0 issues. |
+| lint | pass | Docker `flake8 .` | Returned `0`. |
+| targeted output/signed URL/archive/favorites | pass | Docker pytest affected files | 41 passed. |
+| security | pass | Docker `security` | 88 passed. |
+| gallery | pass | Docker pytest `gallery/tests` | 117 passed. |
+| unit | pass | Docker `unit` | 300 passed. |
+| celery | pass | Docker `celery` | 18 passed. |
+| django-smoke | pass | Docker pytest `/repo-tests/smoke --ds=app.settings` | 5 passed. |
+| integration | pass | Docker pytest `/repo-tests/integration --ds=app.settings` | 2 passed. |
+| toxiproxy | pass | Docker Compose Toxiproxy resilience pytest | 7 passed. |
+| docker-build | pass | `docker build .` | Build completed. |
+
+## Phase B.3A Remaining Risks
+
+| Severity | Risk | Handoff |
+|---|---|---|
+| Medium | Host Poetry virtualenv still points to a removed Python path; Docker remains authoritative until host env is repaired. | Phase A maintenance |
+| Medium | Plain ignored local `.env` still has invalid `DEBUG`; controlled env gate passes. | Local developer hygiene |
+| Medium | Frontend must still render untrusted API strings as text and avoid raw HTML rendering. | Frontend implementation contract |
+| Medium | EXIF/metadata is not exposed now; if surfaced later, it needs explicit sanitization and PII policy. | Phase C |
+| Medium | Live R2/Cloudinary signed URL and delivery behavior remains out of scope. | Phase C provider sandbox proof |
+| Medium | Full enumeration/error response equivalence matrix remains open. | Phase B.3B |
+| Medium | Parallel DB-sharing gates can collide on `test_devdb`; run sequentially unless DB names are isolated. | CI reliability |
+
+No Critical findings remain open from Phase B.3A. No High findings remain open from the issues addressed in this pass.
+
+## Phase B.3A Classification
+
+Phase B.3A passed.
+
+Reason: the output-safety and signed URL leakage issues found in this pass were reproduced with failing tests first, patched narrowly, and verified through targeted, security, gallery, unit, Celery, smoke, integration, Toxiproxy, and Docker build gates.
+
+This is not a full Phase B completion and not a production-readiness claim. PhotoBox remains not production ready until the remaining Phase B.3B/B.3C areas and Phase C provider/media pipeline proof are complete.
+
+## Phase B.3B Recommendation
+
+Recommended next pass: Phase B.3B - Billing, Webhook Replay, Enumeration, CSRF, Rate-Limit, and Resource Abuse.
+
+Phase B.3B should cover:
+
+- Billing replay windows and out-of-order provider events.
+- Webhook duplicate/idempotency behavior across provider namespaces.
+- Enumeration resistance for auth, gallery, archive, signed URL, and billing errors.
+- CSRF/CORS/cookie hardening.
+- Rate limiting and DDoS/resource abuse.
+- Checkout tampering and redirect policy.
+- Provider payload safety and log redaction.
