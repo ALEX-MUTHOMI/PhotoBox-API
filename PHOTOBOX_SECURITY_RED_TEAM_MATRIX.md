@@ -116,3 +116,45 @@ Boundary: No Darasa domain logic or terminology is in scope.
 | Webhook replay windows | R2 timestamp replay protection exists; Lemon Squeezy relies on signature and payload-hash idempotency. | Confirm provider timestamp/event metadata support and add bounded replay-window tests if available. |
 | Logs and telemetry | DLQ raw payload logging fixed; signed URL and webhook failure logs still need broader redaction assertions. | Add tests for signed URL, webhook signature, token, and email-code absence in logs. |
 
+## Phase B.2 Attack Surface Matrix Update
+
+This update expands the route matrix with object-boundary and missing-test columns before new Phase B.2 patches. The current pass remains limited to red-team security verification; no Darasa domain logic, provider E2E, branch creation, push, or PR is in scope.
+
+| Route/Service | Actor | Auth Domain | Tenant Boundary | Object Boundary | Data Touched | Expected Protection | Existing Tests | Missing Tests | Risk |
+|---|---|---|---|---|---|---|---|---|---|
+| `GET /api/gallery/fast-lane/photos/{id}/download-url/` | Photographer or scoped gallery client | photographer dashboard JWT/session auth and client/gallery-scoped auth | Workspace and gallery | Photo, scene, event, gallery access session, R2 object key | R2 presigned GET URL | Authorization before URL generation, photographer ownership or gallery token scope/session revalidated, published/non-expired gallery for clients, READY-only asset, short TTL, no signed URL logging | `gallery/tests/test_download_authorization.py`, `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py` | Client signed URL after gallery unpublish/expiry; signed URL log redaction | Critical |
+| `GET /api/galleries/{gallery_id}/` | Gallery client/guest | client/gallery-scoped auth | Gallery | Gallery, scenes, photos, access session | Client gallery payload | Published and non-expired gallery, gallery token scope, role visibility, READY-only photos, JSON-safe serialization | `gallery/tests/test_dual_lane_auth.py` | Full scriptable field serialization matrix | Critical |
+| `POST /api/galleries/{gallery_id}/favorites/` | Gallery client/guest | client/gallery-scoped auth | Gallery | Gallery access session, photo, favorite selection | Favorites | Gallery scope, DB session revalidation, role visibility, photo belongs to gallery, published/non-expired gallery | `gallery/tests/test_favorites_engine.py` | Unpublished/expired gallery favorite mutation regression test | High |
+| `POST /api/galleries/{gallery_id}/archive/` | Gallery client | client/gallery-scoped auth | Gallery | Gallery archive job, R2 archive key | Archive job | Client role, gallery scope, published/non-expired gallery, deduplicated pending/completed job, no unauthorized photos | `gallery/tests/test_archive_engine.py`, `gallery/tests/test_download_workflows.py` | Archive spam/resource-abuse bound; unpublished/expired gallery regression test | High |
+| `POST /api/checkout/generate/` | Photographer | photographer dashboard auth and billing provider access | User/subscription | Pricing plan, checkout session, redirect URL | Checkout URL | Auth required, active subscriber blocked, active plan allowlist, redirect allowlist, cache lock, provider timeout, no real provider in tests | `checkout/tests/test_checkout_security.py`, `checkout/tests/test_Payment_gateway.py`, `billing/tests/test_transaction_lifecycle.py` | Workspace ownership/entity mapping tests if workspace checkout is introduced | High |
+| `POST /api/billing/webhook/` | Lemon Squeezy | billing provider access | User/subscription/checkout session | Provider event, checkout session, subscription, audit ledger | Entitlement state | HMAC verification, empty-secret fail-closed, payload-hash idempotency, user/session custom-data match, DLQ redaction | `billing/tests/test_security.py`, `billing/tests/test_transaction_lifecycle.py`, `billing/tests/test_log_redaction.py` | Provider timestamp/replay-window support verification; out-of-order downgrade matrix | Critical |
+| `POST /api/v1/ingestion/bulk/` | Photographer | photographer dashboard auth | Workspace/event/scene | Upload manifest, MediaAsset, object key, quota ledger | Heavy Lane presigned upload tickets | Scene ownership, quota lock, batch limits, server-generated object keys, duplicate client refs rejected, no provider call required | `ingestion/tests/test_views.py`, `ingestion/tests/test_security.py`, `ingestion/tests/test_quota_ledger.py` | Provider-sandbox prefix proof; quota race expansion | Critical |
+| `POST /api/v1/ingestion/webhook/` | Cloudflare R2 | webhook provider access | Media asset object key | MediaAsset, R2 object key, upload status | Ingestion state | Raw body HMAC, timestamp/replay protection where supported, unknown keys ignored/quarantined, idempotent mutation | `ingestion/tests/test_r2_webhook.py`, `ingestion/tests/test_security.py` | Duplicate namespace canonical-path proof; log redaction expansion | Critical |
+| `gallery.tasks.build_gallery_archive` | Celery worker | Celery/internal task access | Gallery/session | Archive job, favorite selections, R2 originals, archive ZIP | Generated archive | READY-only assets, visibility and favorites session filters, server-generated archive key, temp cleanup, idempotent failure state | `gallery/tests/test_archive_engine.py` | Transaction/failure invariant under R2 partial failure; provider-sandbox proof | Critical |
+| CI gate orchestration | Developer/CI | internal build system | Test DB/Redis/Docker services | Test database, Redis keys, Toxiproxy toxics | Gate evidence | No secret echo, deterministic scripts, no concurrent shared DB gates unless isolated, toxic cleanup before/after | `scripts/ci/*`, local Phase A/B evidence | DB namespace isolation for parallel smoke/integration | Medium |
+
+## Phase B.2 Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-005 | High | Signed URL / client gallery lifecycle | A previously authenticated gallery client could request a fresh R2 signed download URL after the gallery was unpublished or expired because `download_url` revalidated session scope but not gallery lifecycle. | `gallery/tests/test_download_workflows.py::DownloadWorkflowTests::test_client_download_url_rejects_unpublished_gallery_before_presign`; `test_client_download_url_rejects_expired_gallery_before_presign` | `PhotoFastLaneViewSet.download_url` now checks gallery `is_published` and `expires_at` before any presign operation for gallery principals. | New tests failed first with `200 != 403`, then passed; affected gallery signed URL/archive/favorites tests passed; unit passed. |
+| PB-006 | Medium | Dashboard/client auth-domain separation | Phase B.2 needed explicit regression proof that client-gallery credentials cannot use dashboard APIs and photographer identities cannot perform client-only mutations. | `gallery/tests/test_auth_domain_boundaries.py` | No code patch required; current auth separation already denies both paths. | 2 auth-domain boundary tests passed; unit passed. |
+| PB-007 | High | R2 webhook replay / resource abuse | Duplicate object-created webhooks for already READY assets did not mutate state, but they re-enqueued derivative tasks, allowing retry storms to fan out unnecessary Celery work. | `webhooks/tests/test_cloudflare.py::CloudflareWebhookSecurityTests::test_duplicate_object_created_does_not_enqueue_duplicate_derivative`; `ingestion/tests/test_r2_webhook.py::R2WebhookIdempotencyTests::test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative` | Both Cloudflare webhook namespaces now return `already_ready` without scheduling duplicate derivative work in the already-READY branch. | New tests failed first with duplicate task calls, then passed; webhooks/ingestion suites passed; Celery and unit gates passed. |
+
+## Phase B.2 Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env values only; no values printed. |
+| redacted Bandit | pass | `bandit issues: 0`. |
+| lint | pass | Docker `flake8` returned `0`. |
+| security | pass | 87 passed. |
+| affected gallery | pass | 25 passed. |
+| affected ingestion/webhooks | pass | 44 passed. |
+| unit | pass | 295 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed using the configured `--ds=app.settings` smoke command. |
+| integration | pass | 2 passed. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |

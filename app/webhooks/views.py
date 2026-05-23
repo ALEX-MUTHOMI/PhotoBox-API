@@ -114,8 +114,6 @@ class CloudflareWebhookView(APIView):
 
             if locked_asset.status == "READY" and locked_asset.is_processed:
                 logger.info("Asset %s already READY. Idempotent skip.", r2_object_key)
-                if locked_asset.media_type == "IMAGE":
-                    generate_photo_web_derivative.delay(str(locked_asset.id))
                 return Response({"status": "already_ready"}, status=status.HTTP_200_OK)
 
             if locked_asset.status != "QUARANTINED":

@@ -1386,3 +1386,123 @@ Phase C - Upload and Media Pipeline Hardening should prove:
 - quota race protection
 - safe object key policy
 - client gallery media delivery safety
+
+## Phase B.2 Enterprise Red-Team Expansion - Start State
+
+Date: 2026-05-23
+
+Current branch: `development`
+
+Latest commit inspected: `9a58a8e Red Team Verification Test and Patches Enacted`
+
+Starting classification: Phase B partially complete; base-engineering ready locally; not production ready.
+
+Scope:
+
+- Continue endpoint-by-endpoint Phase B red-team verification using strict TDD.
+- Focus on IDOR, dashboard/client auth separation, signed URL access, gallery lifecycle revocation, billing/webhook trust boundaries, output safety, upload abuse, rate limiting, log redaction, and CI isolation.
+- Preserve PhotoBox as a photography SaaS only.
+
+Out of scope:
+
+- No Darasa domain logic.
+- No new branch, push, or pull request.
+- No real Cloudflare R2, Cloudinary, Lemon Squeezy, email, or internet service calls.
+- No Phase C provider E2E, media pipeline redesign, or event-bus implementation.
+- No broad refactors or product-feature expansion.
+
+Safety constraints confirmed:
+
+- `git status --short` was clean at Phase B.2 start.
+- Branch remained `development`.
+- Remote remained `https://github.com/ALEX-MUTHOMI/PhotoBox-API.git`.
+- `.env` is not tracked.
+- Host Poetry still points at a removed Python 3.12 path, so Docker and controlled host Python fallback remain authoritative for this pass.
+- Plain local `env_sanity.py` inherited an ignored `.env` with invalid `DEBUG`; controlled placeholder env passed and no values were printed.
+- `secret_hygiene.py` passed.
+- Redacted Bandit in Docker reported `bandit issues: 0`.
+- No branch creation, push, PR, provider call, secret output, or Darasa concept was introduced.
+
+CI/test isolation note:
+
+- Prior Phase B evidence showed a parallel smoke/integration run collided on shared `test_devdb`; sequential reruns passed. DB-sharing gates must not run concurrently unless database/schema/service namespaces are isolated.
+
+## Phase B.2 Executive Summary
+
+Phase B.2 extended the red-team sweep across signed URL lifecycle revocation, dashboard/client auth-domain separation, and R2 webhook replay/resource-abuse behavior. Three additional findings were tested:
+
+- PB-005 High: client-gallery signed URL issuance did not re-check gallery unpublish/expiry before presigning.
+- PB-006 Medium: auth-domain separation lacked explicit regression coverage; current behavior was verified without code changes.
+- PB-007 High: duplicate R2 object-created webhooks did not double-mutate state but did re-enqueue derivative work on already-READY assets.
+
+No Darasa domain logic was introduced. No branch, push, PR, real provider call, or secret output was performed.
+
+## Phase B.2 Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Client-gallery signed URL route allowed presigning after gallery unpublish or expiry. | High | fixed | Two failing tests added first; endpoint now blocks before R2 presign. |
+| Dashboard/client auth-domain separation needed explicit regression tests. | Medium | covered | New tests prove gallery client token cannot list dashboard events and photographer identity cannot use client favorite mutation. |
+| Duplicate Cloudflare/R2 object-created webhooks re-enqueued derivative work for already READY assets. | High | fixed | Two failing tests added first across both webhook namespaces; already-READY branches now skip duplicate derivative scheduling. |
+
+## Phase B.2 Tests Added
+
+| Test | Purpose |
+|---|---|
+| `DownloadWorkflowTests.test_client_download_url_rejects_unpublished_gallery_before_presign` | Ensures gallery revocation blocks client signed URL issuance before presign. |
+| `DownloadWorkflowTests.test_client_download_url_rejects_expired_gallery_before_presign` | Ensures gallery expiry blocks client signed URL issuance before presign. |
+| `AuthDomainBoundaryTests.test_gallery_client_token_cannot_list_dashboard_events` | Proves gallery-scoped credentials cannot use photographer dashboard event APIs. |
+| `AuthDomainBoundaryTests.test_photographer_identity_cannot_use_client_favorite_mutation` | Proves photographer identity cannot use client-only favorite mutation. |
+| `CloudflareWebhookSecurityTests.test_duplicate_object_created_does_not_enqueue_duplicate_derivative` | Prevents duplicate derivative task fanout on replayed Cloudflare webhook delivery. |
+| `R2WebhookIdempotencyTests.test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative` | Prevents duplicate derivative task fanout on replayed Heavy Lane ingestion webhook delivery. |
+
+## Phase B.2 Fixes Made
+
+| File | Change |
+|---|---|
+| `app/gallery/views.py` | Revalidates gallery `is_published` and `expires_at` for gallery-client signed URL requests before generating an R2 presigned URL. |
+| `app/gallery/tests/test_download_workflows.py` | Added signed URL lifecycle revocation tests. |
+| `app/gallery/tests/test_auth_domain_boundaries.py` | Added dashboard/client auth-domain boundary tests. |
+| `app/webhooks/views.py` | Already-READY Cloudflare webhook branch no longer re-enqueues derivative generation on duplicate delivery. |
+| `app/webhooks/tests/test_cloudflare.py` | Added duplicate derivative fanout regression test. |
+| `app/ingestion/views.py` | Already-READY Heavy Lane webhook branch no longer re-enqueues derivative generation on duplicate delivery. |
+| `app/ingestion/tests/test_r2_webhook.py` | Added duplicate derivative fanout regression test. |
+| `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md` | Added Phase B.2 matrix update, findings, and gate evidence. |
+
+## Phase B.2 Gate Results
+
+| Gate | Result | Command | Notes |
+|---|---|---|---|
+| secret-hygiene | pass | `python scripts/ci/secret_hygiene.py` | No tracked likely real secrets. |
+| env-sanity | pass | `python scripts/ci/env_sanity.py` with controlled placeholders | Plain local `.env` still has invalid `DEBUG`; controlled gate passed without printing values. |
+| diff-check | pass | `git diff --check` | Only Windows LF-to-CRLF warnings. |
+| redacted-bandit | pass | Docker `python /scripts/ci/bandit_redacted.py -r . -c /repo-config/pyproject.toml` | 0 issues. |
+| lint | pass | Docker `flake8 .` | Returned `0`. |
+| security | pass | Docker `security` | 87 passed. |
+| affected-gallery | pass | Docker pytest affected gallery files | 25 passed. |
+| affected-ingestion-webhooks | pass | Docker pytest affected ingestion/webhook files | 44 passed. |
+| unit | pass | Docker `unit` | 295 passed. |
+| celery | pass | Docker `celery` | 18 passed. |
+| django-smoke | pass | Docker pytest `/repo-tests/smoke --ds=app.settings` | 5 passed. |
+| integration | pass | Docker pytest `/repo-tests/integration --ds=app.settings` | 2 passed. |
+| toxiproxy | pass | Docker Compose Toxiproxy resilience pytest | 7 passed. |
+| docker-build | pass | `docker build .` | Build completed. |
+
+## Phase B.2 Remaining Risks
+
+| Severity | Risk | Handoff |
+|---|---|---|
+| Medium | Host Poetry virtualenv still points to a removed Python path; Docker remains authoritative until host env is repaired. | Phase A maintenance |
+| Medium | Plain ignored local `.env` still has invalid `DEBUG`; controlled env gate passes. | Local developer hygiene |
+| Medium | Public JSON display fields still need an explicit frontend rendering safety contract. | Phase B continuation / frontend contract |
+| Medium | Lemon Squeezy provider timestamp/replay-window support still needs provider-specific review. | Phase E billing/webhook hardening |
+| Medium | R2/Cloudinary sandbox proof remains out of scope. | Phase C |
+| Medium | Parallel DB-sharing gates can collide on `test_devdb`; CI should not run DB-sharing gates concurrently without isolated DB names. | CI reliability |
+
+No Critical findings remain open from Phase B.2. No High findings remain open from the issues addressed in this pass.
+
+## Phase B.2 Classification
+
+Phase B partially complete.
+
+Reason: all new Phase B.2 High findings were closed with failing tests first and the executed local gates passed, but the full enterprise red-team checklist is not yet exhausted endpoint-by-endpoint. PhotoBox remains not production ready.

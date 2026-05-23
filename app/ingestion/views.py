@@ -697,8 +697,6 @@ class R2WebhookView(APIView):
                         "[R2-WEBHOOK] Already READY — idempotent skip. key=%r",
                         r2_object_key,
                     )
-                    if locked.media_type == "IMAGE":
-                        generate_photo_web_derivative.delay(str(locked.id))
                     return Response(
                         {"status": "already_ready"},
                         status=status.HTTP_200_OK,

@@ -1,8 +1,10 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -109,6 +111,38 @@ class DownloadWorkflowTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["requester_kind"], "client")
         self.assertEqual(response.data["delivery_mode"], "direct_r2_presigned_get")
+
+    @patch("gallery.storage.get_r2_client")
+    def test_client_download_url_rejects_unpublished_gallery_before_presign(self, mock_get_r2_client):
+        self._grant_client_gallery_session()
+        self.event.is_published = False
+        self.event.save(update_fields=["is_published"])
+        mock_get_r2_client.return_value.generate_presigned_url.return_value = (
+            "https://signed.example.com/revoked.jpg"
+        )
+
+        response = self.client_gallery_client.get(
+            reverse("gallery:fastlane-photo-download-url", kwargs={"pk": self.photo.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        mock_get_r2_client.assert_not_called()
+
+    @patch("gallery.storage.get_r2_client")
+    def test_client_download_url_rejects_expired_gallery_before_presign(self, mock_get_r2_client):
+        self._grant_client_gallery_session()
+        self.event.expires_at = timezone.now() - timedelta(minutes=1)
+        self.event.save(update_fields=["expires_at"])
+        mock_get_r2_client.return_value.generate_presigned_url.return_value = (
+            "https://signed.example.com/expired.jpg"
+        )
+
+        response = self.client_gallery_client.get(
+            reverse("gallery:fastlane-photo-download-url", kwargs={"pk": self.photo.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        mock_get_r2_client.assert_not_called()
 
     def test_unready_asset_cannot_generate_download_url(self):
         self._grant_client_gallery_session()
