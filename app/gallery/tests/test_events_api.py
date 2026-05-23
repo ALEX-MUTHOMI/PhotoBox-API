@@ -49,6 +49,19 @@ class EventApiTests(TestCase):
         event = Event.objects.get(id=res.data['id'])
         self.assertTrue(event.check_pin('1234'))
 
+    def test_create_event_slug_is_safe_for_scriptable_title(self):
+        """SECURITY: Generated slugs must not carry scriptable title content."""
+        payload = {
+            'title': '<script>alert(1)</script>',
+            'event_type': 'OTHER',
+        }
+        res = self.client.post(EVENTS_URL, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('<', res.data['slug'])
+        self.assertNotIn('>', res.data['slug'])
+        self.assertRegex(res.data['slug'], r'^[a-z0-9-]+-[a-f0-9]{8}$')
+
     def test_create_event_without_workspace_fails(self):
         """SECURITY: Verify missing workspace cleanly raises 400 Bad Request."""
         hacker = create_user(email='hacker@example.com', password='pwd')

@@ -2,6 +2,7 @@
 Serializers for the Gallery API View (The Pixieset Standard).
 """
 import secrets
+from django.utils.text import slugify
 from rest_framework import serializers
 from gallery.models import Event, Scene, Photo
 
@@ -33,7 +34,7 @@ class EventSerializer(serializers.ModelSerializer):
         # IDEMPOTENCY DEFENSE: Generate a highly random slug to prevent database collisions
         # even if a user creates two events named "The Wedding".
         # E.g., 'the-wedding-a4b8f9'
-        safe_title = validated_data.get('title', 'event').lower().replace(' ', '-')
+        safe_title = slugify(validated_data.get('title', 'event')) or 'event'
         crypto_suffix = secrets.token_hex(4)
         validated_data['slug'] = f"{safe_title}-{crypto_suffix}"
 

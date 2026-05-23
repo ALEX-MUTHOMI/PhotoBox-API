@@ -212,6 +212,35 @@ class FullTransactionLifecycleTests(TransactionTestCase):
         self.sub.refresh_from_db()
         self.assertFalse(self.sub.is_pro)  # Must remain FREE
 
+    def test_subscription_created_rejects_user_session_mismatch(self):
+        """
+        SECURITY: custom_data user_id and session_token must anchor the same
+        checkout session owner. A mismatched token must not upgrade another user.
+        """
+        attacker = User.objects.create_user(
+            email="attacker@example.com",
+            password="SecurePass123!",
+        )
+        attacker_session = CheckoutSession.objects.create(
+            user=attacker,
+            plan=self.plan,
+        )
+
+        payload = _make_ls_payload(
+            'subscription_created',
+            self.user.id,
+            attacker_session.session_token,
+        )
+        process_lemon_squeezy_webhook(payload, 'evt_mismatch_001')
+
+        self.sub.refresh_from_db()
+        attacker.subscription.refresh_from_db()
+        self.assertFalse(self.sub.is_pro)
+        self.assertFalse(attacker.subscription.is_pro)
+        self.assertTrue(
+            DeadLetterQueue.objects.filter(event_id='evt_mismatch_001').exists()
+        )
+
     # ─────────────────────────────────────────
     # 4. SECURITY: Payment Failure Grace Period
     # ─────────────────────────────────────────

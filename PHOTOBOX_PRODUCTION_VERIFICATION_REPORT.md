@@ -1084,3 +1084,305 @@ If Phase A remote CI passes, proceed to Phase B - Red-Team Security Sweep:
 - client gallery access boundaries
 - logs/telemetry redaction
 - operational incident runbooks
+
+## Phase B Red-Team Security Sweep - Start State
+
+Date: 2026-05-23
+
+Current branch: `development`
+
+Latest commit at start: `64020b5 docs: record remote CI trigger blocker`
+
+Starting classification: base-engineering ready locally; production-base readiness still depends on remote CI evidence; not production ready.
+
+Scope for Phase B:
+
+- Build an endpoint and trust-boundary matrix from the real code.
+- Identify security anomalies across tenant isolation, auth boundaries, gallery access, uploads, webhooks, billing, signed URLs, archive access, rate limiting, and log safety.
+- Use strict TDD for executable findings: failing test first, smallest patch, targeted rerun, broader affected gate rerun.
+- Patch only verified security gaps.
+
+Out of scope for this pass:
+
+- Darasa domain logic or migration.
+- New PhotoBox product features unless required to close a verified security gap.
+- Live Cloudflare R2, Cloudinary, Lemon Squeezy, email, or internet calls.
+- Pushing, opening pull requests, or remote CI trigger work.
+- Broad refactors or cosmetic cleanup.
+
+Safety constraints:
+
+- No secrets may be printed, committed, or logged.
+- `.env` remains untracked.
+- Existing security gates must not be weakened.
+- Failing tests must not be hidden or skipped without a documented reason.
+- No real provider services may be called.
+
+Pre-flight results:
+
+| Check | Result | Notes |
+|---|---|---|
+| `git status --short` | pass | Working tree was clean before Phase B documentation files were created. |
+| Current branch | pass | `development`; user explicitly requested no new branch. |
+| Remote | pass | `origin` points to `https://github.com/ALEX-MUTHOMI/PhotoBox-API.git`. |
+| `.env` tracked | pass | `git ls-files .env` returned no tracked file. |
+| `git diff --check` | pass | No whitespace errors at start. |
+| `poetry run ...` checks | blocked | Poetry virtualenv points to stale Python 3.12 path on host. |
+| `python scripts/ci/secret_hygiene.py` | pass | Host Python 3.13 executed tracked-file secret scan; no likely real tracked secrets. |
+| `python scripts/ci/env_sanity.py` | pass | Controlled placeholder env values only; no values printed. |
+| Docker redacted Bandit | pass | `bandit issues: 0`. |
+
+No Darasa domain logic was introduced or identified in Phase B start-state inspection.
+
+Attack-surface output file created:
+
+- `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md`
+
+## Phase B Red-Team Security Sweep - Progress Report
+
+### Phase B Executive Summary
+
+Phase B started with a clean Git working tree and redacted pre-flight checks. The real code surface was inspected before patching, and `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md` was created with route, actor, auth-domain, tenant-boundary, data, protection, existing-test, and risk mapping.
+
+Strict TDD was followed for executable findings:
+
+1. Write failing test.
+2. Confirm failure for the expected reason.
+3. Patch minimal code.
+4. Rerun targeted test.
+5. Rerun affected suites and gates.
+
+Phase B is not a full production-readiness claim. It is a red-team progress pass that closed verified gaps and preserved the secure-base gates.
+
+### Attack Surface Matrix
+
+Created: `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md`
+
+The matrix distinguishes:
+
+- photographer dashboard auth
+- client/gallery-scoped auth
+- anonymous/public access
+- webhook provider access
+- Celery/internal task access
+- billing provider access
+
+Tenant boundaries mapped:
+
+- Workspace
+- Event
+- Scene
+- Photo
+- Gallery/session
+- Subscription/billing user
+- Archive job ownership
+
+### IDOR / Multitenancy / RBAC / ABAC Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Gallery magic-link tokens could be consumed after gallery unpublish, creating a client session after access revocation. | High | fixed | New failing test added first, then `GalleryMagicLinkConsumeView` patched to revalidate publication/expiry before session creation. |
+| Existing tenant isolation tests cover event, scene, photo, download URL, favorites, archive, and Heavy Lane scene ownership. | - | preserved | Security gate and unit gate passed after changes. |
+
+Patch:
+
+- `app/gallery/client_views.py`
+
+Tests:
+
+- `gallery/tests/test_dual_lane_auth.py::DualLaneGalleryAuthTests::test_magic_link_consume_rejects_unpublished_gallery`
+- `gallery/tests/test_dual_lane_auth.py`: 9 passed
+
+Residual risk:
+
+- A full endpoint-by-endpoint dashboard-vs-gallery-token authorization matrix should be added next.
+
+### Enumeration Findings
+
+No enumeration patch was made in this pass. Existing tests still cover generic login failure, password reset non-enumeration, rate-limited password reset, social login trust boundaries, and gallery scope mismatch.
+
+Residual risk:
+
+- Add explicit tests for client code verification and gallery invalid/unauthorized responses being indistinguishable.
+
+### XSS / Output Safety Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Event slug generation used raw photographer-controlled title content and could expose script delimiters in public API payloads. | Medium | fixed | New failing script-title slug test added first; serializer now uses Django `slugify` with a safe fallback. |
+
+Patch:
+
+- `app/gallery/serializers.py`
+
+Tests:
+
+- `gallery/tests/test_events_api.py::EventApiTests::test_create_event_slug_is_safe_for_scriptable_title`
+- `gallery/tests/test_events_api.py`: passed inside affected suite
+
+Residual risk:
+
+- Public JSON fields still require a frontend contract forbidding unsafe HTML rendering. Add serialization tests for event title, scene title, captions/notes, and filenames with scriptable values.
+
+### Upload Abuse Findings
+
+No upload pipeline patch was made in this pass. Existing Fast Lane and Heavy Lane tests continue to cover magic-byte rejection, oversized upload rejection, decompression bomb rejection, path traversal filename handling, quota ledger behavior, manifest validation, and object key validation.
+
+Residual risk:
+
+- Provider sandbox proof for R2/Cloudinary remains Phase C.
+
+### Auth / JWT / Email-Code / Crypto Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Magic-link consumption did not revalidate gallery revocation state. | High | fixed | Same fix as IDOR/client-gallery boundary finding. |
+
+Existing coverage preserved:
+
+- JWT refresh rotation and blacklist
+- expired access token rejection
+- no-token rejection
+- social login verified-email checks
+- password reset generic response and rate limiting
+
+Residual risk:
+
+- Add explicit tests for expired gallery magic-link consumption and email-code brute-force replay behavior.
+
+### Webhook Forgery / Replay Findings
+
+No R2 webhook patch was made in this pass. Existing R2 and Cloudflare webhook tests still pass and cover missing signatures, invalid signatures, timestamp replay windows, payload tampering, unknown object keys, non-PutObject ignores, and size mismatch quarantine.
+
+Residual risk:
+
+- Lemon Squeezy webhook replay currently relies on signature validation plus payload-hash idempotency. Provider timestamp support should be reviewed before adding replay-window enforcement.
+
+### Billing / Checkout Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Billing `subscription_created` did not verify `custom_data.user_id` and `session_token` belonged to the same checkout session owner. | High | fixed | New failing mismatch test added first; billing task now rejects mismatch before entitlement mutation. |
+
+Patch:
+
+- `app/billing/tasks.py`
+
+Tests:
+
+- `billing/tests/test_transaction_lifecycle.py::FullTransactionLifecycleTests::test_subscription_created_rejects_user_session_mismatch`
+- `billing/tests/test_transaction_lifecycle.py billing/tests/test_log_redaction.py`: 17 passed
+
+Residual risk:
+
+- Deeper subscription state-machine tests are still needed for past-due, downgrade, over-limit, and cancellation upload behavior.
+
+### Signed URL / Archive / Favorites Findings
+
+No signed URL/archive/favorites patch was made in this pass. Existing tests continue to cover owner/client signed URL authorization, cross-tenant URL blocking, READY-only URL generation, short TTL, archive gallery scope, favorites archive session scope, and guest/client favorite visibility rules.
+
+Residual risk:
+
+- Add log-redaction tests proving signed URLs are never emitted in application logs.
+
+### DDoS / Rate-Limit Findings
+
+No rate-limit patch was made in this pass. Existing tests continue to cover login throttling, registration velocity, password reset throttling, magic-link throttling, guest access throttling, favorite throttling, upload throttling, and checkout throttling.
+
+Residual risk:
+
+- Add explicit signed URL and archive request abuse tests.
+
+### Logging / Telemetry Findings
+
+| Finding | Severity | Status | Evidence |
+|---|---|---|---|
+| Billing DLQ failure fallback logged raw provider payload content, including email/custom_data fields. | High | fixed | New failing log-redaction test added first; fallback now logs event ID, DB error type, payload fingerprint, and `raw_payload_logged=false`. |
+
+Patch:
+
+- `app/billing/tasks.py`
+
+Tests:
+
+- `billing/tests/test_log_redaction.py::BillingWebhookLogRedactionTests::test_dlq_failure_does_not_log_raw_payload_pii_or_tokens`
+
+Residual risk:
+
+- Add broader log-redaction tests for webhook signatures, JWTs, refresh tokens, signed URLs, and email-code tokens.
+
+### Tests Added
+
+| Test | Purpose |
+|---|---|
+| `DualLaneGalleryAuthTests.test_magic_link_consume_rejects_unpublished_gallery` | Blocks client session creation from stale magic links after gallery revocation. |
+| `FullTransactionLifecycleTests.test_subscription_created_rejects_user_session_mismatch` | Blocks billing entitlement mutation when checkout session owner and webhook user anchor mismatch. |
+| `BillingWebhookLogRedactionTests.test_dlq_failure_does_not_log_raw_payload_pii_or_tokens` | Prevents raw provider payload PII/token leakage when DLQ persistence fails. |
+| `EventApiTests.test_create_event_slug_is_safe_for_scriptable_title` | Ensures generated public slugs are URL-safe for scriptable photographer-controlled titles. |
+
+### Fixes Made
+
+| File | Change |
+|---|---|
+| `app/gallery/client_views.py` | Revalidate gallery publication/expiry during magic-link consumption; consume stale link and return 403 without creating a session. |
+| `app/billing/tasks.py` | Require `subscription_created` checkout session owner to match `custom_data.user_id`; remove raw payload logging from DLQ failure fallback. |
+| `app/gallery/serializers.py` | Generate event slugs using `slugify` plus crypto suffix. |
+| `app/gallery/tests/test_dual_lane_auth.py` | Added stale magic-link revocation test. |
+| `app/billing/tests/test_transaction_lifecycle.py` | Added billing user/session mismatch test. |
+| `app/billing/tests/test_log_redaction.py` | Added billing DLQ fallback log-redaction test. |
+| `app/gallery/tests/test_events_api.py` | Added scriptable-title slug safety test. |
+| `PHOTOBOX_SECURITY_RED_TEAM_MATRIX.md` | Added attack surface matrix and Phase B findings. |
+
+### Phase B Gate Results
+
+| Gate | Result | Command | Notes |
+|---|---|---|---|
+| secret-hygiene | pass | `python scripts/ci/secret_hygiene.py` | Host Poetry is blocked by stale Python path; host Python fallback used. |
+| env-sanity | pass | `python scripts/ci/env_sanity.py` with controlled placeholders | No values printed. |
+| redacted-bandit | pass | Docker `python /scripts/ci/bandit_redacted.py -r . -c /repo-config/pyproject.toml` | 0 issues. |
+| lint | pass | Docker `flake8` | Returned `0`. |
+| security | pass | Docker `security` | 87 passed. |
+| targeted gallery auth/events | pass | Docker pytest affected files | 15 passed. |
+| targeted billing lifecycle/logging | pass | Docker pytest affected files | 17 passed. |
+| unit | pass | Docker `unit` | 290 passed. |
+| celery | pass | Docker `celery` | 18 passed. |
+| django-smoke | pass | Docker pytest `/repo-tests/smoke` | 5 passed after sequential rerun. |
+| integration | pass | Docker pytest `/repo-tests/integration` | 2 passed after sequential rerun. |
+| toxiproxy | pass | Docker Compose Toxiproxy pytest | 7 passed. |
+| docker-build | pass | `docker build .` | Build completed. |
+
+Note: An initial parallel smoke/integration run collided on the shared `test_devdb`; sequential reruns passed. This was local test orchestration contention, not an application failure.
+
+### Remaining Risks
+
+| Severity | Risk | Status |
+|---|---|---|
+| Medium | Host Poetry virtualenv still points to stale Python 3.12 path; Docker gates are authoritative until host env is repaired. | open |
+| Medium | Full Phase B matrix has not yet received a new adversarial test per row. | open |
+| Medium | Client-gallery JSON fields still need explicit frontend rendering safety contract tests. | open |
+| Medium | Lemon Squeezy webhook timestamp/replay-window support needs provider-specific confirmation. | open |
+| Medium | Signed URL and webhook signature log-redaction tests should be expanded. | open |
+| Medium | R2/Cloudinary sandbox provider proof remains out of scope and should move to Phase C. | open |
+
+No open Critical or High findings were left from the issues patched in this pass.
+
+### Phase B Classification
+
+Phase B partially complete.
+
+Reason: verified High/Medium findings were closed with TDD and all executed local gates passed, but the full red-team checklist has not yet been exhausted endpoint-by-endpoint and remote CI/provider-sandbox evidence remains out of scope for this local pass.
+
+Not production ready.
+
+### Recommended Phase C Handoff
+
+Phase C - Upload and Media Pipeline Hardening should prove:
+
+- Fast Lane upload security
+- Heavy Lane manifest security
+- R2 sandbox upload proof
+- Cloudinary sandbox fetch/display proof
+- malicious image rejection
+- quota race protection
+- safe object key policy
+- client gallery media delivery safety

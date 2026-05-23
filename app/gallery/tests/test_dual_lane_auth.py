@@ -148,6 +148,27 @@ class DualLaneGalleryAuthTests(TestCase):
         )
         self.assertEqual(second.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_magic_link_consume_rejects_unpublished_gallery(self):
+        raw_token = "raw-token-for-revoked-gallery"
+        GalleryMagicLink.objects.create(
+            gallery=self.gallery,
+            email="bride@example.com",
+            token_hash=hash_magic_link_token(raw_token),
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        self.gallery.is_published = False
+        self.gallery.save(update_fields=["is_published"])
+
+        response = self.client.post(
+            reverse("gallery_public:magic-link-consume"),
+            {"token": raw_token},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(GalleryAccessSession.objects.count(), 0)
+        self.assertEqual(GalleryMagicLink.objects.count(), 0)
+
     def test_guest_access_creates_guest_session_and_cookie(self):
         response = self.client.post(
             reverse("gallery_public:guest-access", args=[self.gallery.id]),
