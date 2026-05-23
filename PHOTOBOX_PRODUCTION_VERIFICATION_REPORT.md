@@ -873,3 +873,202 @@ Current classification: base-engineering ready with local production-base harden
 Not yet `production-base ready` because remote GitHub Actions have not been executed and local secret rotation cannot be confirmed from this session.
 
 Not full `production ready`; product-level hardening still requires quota, webhook, billing, archive, signed URL, deployment-secret, and frontend-contract verification beyond base platform gates.
+
+## Phase A Production-Base Closeout
+
+Date: 2026-05-23
+
+Current classification at closeout start: local base-engineering ready, not production-base ready.
+
+Reason for closeout:
+
+- Auth-sensitive settings were touched during secure base hardening.
+- Remote GitHub Actions had not yet been proven for the hardening commit.
+- The local `.env` `SECRET_KEY` exposure required explicit closeout without recording values.
+
+Scope freeze:
+
+- Auth-sensitive diff review.
+- Allauth compatibility review.
+- NOSEC / false-positive review.
+- Secret rotation closeout.
+- Local gate rerun.
+- Safe commit discipline.
+- Remote GitHub Actions verification.
+- Final Phase A report update.
+
+Out of scope:
+
+- R2/Cloudinary live provider testing.
+- Fast Lane / Heavy Lane redesign.
+- Billing state-machine work.
+- Webhook refactor.
+- Quota algorithm extraction.
+- ABAC/RBAC redesign.
+- Full product red-team sweep.
+- New product features.
+
+Safety constraints:
+
+- No PhotoBox product features.
+- No Darasa domain logic.
+- No weakened security gates.
+- No hidden failures or skipped tests.
+- No printed, pasted, committed, or logged secret values.
+- No force push.
+
+### Changed-File Risk Inventory
+
+The hardening changes are already committed in `ef41a9f` and this closeout branch starts from that commit. `git diff --name-only` is clean before this report update, so the inventory below is based on the last hardening commit.
+
+| File | Risk Group | Why It Matters | Requires Review? |
+|---|---|---|---|
+| `app/app/settings.py` | Security-sensitive | Allauth middleware/settings, JWT, CORS/CSRF, cookie/security settings. | yes |
+| `app/user/serializers.py` | Security-sensitive | Password update flow and auth validation errors. | yes |
+| `app/user/views.py` | Security-sensitive | Registration, Turnstile, JWT/OAuth-facing behavior. | yes |
+| `app/ingestion/views.py` | Security-sensitive | Webhook signature setting reference. | yes |
+| `app/webhooks/views.py` | Security-sensitive | Cloudflare webhook signature setting reference. | yes |
+| `scripts/ci/security.sh` | Security-sensitive | Security gate orchestration and redacted scanner invocation. | yes |
+| `scripts/ci/bandit_redacted.py` | Security-sensitive | Prevents CI from printing source snippets or secret-like values. | yes |
+| `Dockerfile` | Infrastructure | Poetry lockfile-based build and deploy dependency path. | yes |
+| `pyproject.toml` | Infrastructure | Dependency security upgrades and deploy group. | yes |
+| `poetry.lock` | Infrastructure | Deterministic dependency lock. | yes |
+| `docker-compose.yml` | Infrastructure | Test image config and safe mounted config. | yes |
+| `scripts/ci/*.sh` | Infrastructure | Safe Compose env-file defaults and gate parity. | yes |
+| `tests/resilience/test_toxiproxy_smoke.py` | Tests | Bounded DB/Redis failure and recovery invariants. | yes |
+| `PHOTOBOX_PRODUCTION_VERIFICATION_REPORT.md` | Documentation | Closeout evidence and classification. | yes |
+
+### Auth Change Review
+
+| File | Change | Why Needed? | Security Impact | Test Coverage | Safe to Keep? |
+|---|---|---|---|---|---|
+| `app/app/settings.py` | Added `allauth.account.middleware.AccountMiddleware`. | Required by django-allauth 65.x. | Compatibility only; does not weaken login or permissions. | `user/tests`, JWT/security suites. | yes |
+| `app/app/settings.py` | Replaced deprecated `ACCOUNT_EMAIL_REQUIRED`, `ACCOUNT_USERNAME_REQUIRED`, `ACCOUNT_AUTHENTICATION_METHOD` with `ACCOUNT_LOGIN_METHODS` and `ACCOUNT_SIGNUP_FIELDS`. | Required to avoid relying on deprecated allauth behavior. | Preserves email-only login and required email/password signup fields. | `user/tests`, social adapter tests, security suite. | yes |
+| `app/app/settings.py` | No JWT expiry, rotation, blacklist, signing key, CORS, CSRF, or production fail-closed behavior weakened. | Verification only. | Access lifetime remains 60 minutes, refresh 7 days, rotation and blacklist remain enabled. | `core/tests/test_auth_jwt.py`, security suite. | yes |
+| `app/user/serializers.py` | Added narrow `nosec` comments to request field-name strings. | Bandit false positive. | No behavior change; password validation and old-password requirement remain intact. | `user/tests/test_user_api.py`. | yes |
+| `app/user/views.py` | Added narrow `nosec` to test-only Turnstile sentinel. | Bandit false positive. | No production bypass because it is gated by `settings.TESTING`. | anti-fraud tests and security suite. | yes |
+| `app/ingestion/views.py`, `app/webhooks/views.py` | Added narrow `nosec` to setting-name strings. | Bandit false positive. | No secret value is embedded; signature verification remains fail-closed. | webhook security tests. | yes |
+
+Release-blocker verification:
+
+- Login behavior was not weakened.
+- Password validation and password hashing were not weakened.
+- JWT signing, expiry, refresh rotation, and blacklist behavior were not weakened.
+- OAuth/social trust boundary remains hardened: verified email required and blind account takeover blocked.
+- Production secure cookie flags remain enabled when `DEBUG=false`.
+- CSRF middleware remains enabled.
+- CORS remains non-wildcard.
+- `DEBUG=false` remains fail-closed for required environment.
+- Photographer JWT and public/client gallery access remain separate auth paths.
+- Account enumeration tests remain passing.
+- Rate-limit behavior was not weakened.
+
+### Allauth Compatibility Review
+
+| Item | Result |
+|---|---|
+| Installed django-allauth version | `65.17.0` |
+| Required middleware | `allauth.account.middleware.AccountMiddleware` present after Django auth middleware. |
+| Required settings style | `ACCOUNT_LOGIN_METHODS = {'email'}` and `ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']`. |
+| Auth routes exposed | Existing `user/urls.py` routes only; no new URL route added by this change. |
+| Social login boundary | `HardenedSocialAccountAdapter` still blocks unverified email and blind linking. |
+| Deprecated behavior | Deprecated allauth settings removed; `manage.py check` reports no issues. |
+
+Targeted tests:
+
+- `docker compose --env-file .env.example --profile test run --rm test python -m pytest user/tests -vv --tb=short --timeout=60`: 28 passed.
+- `docker compose --env-file .env.example --profile test run --rm test python -m pytest core/tests/test_auth_jwt.py user/tests/test_social_adapter.py user/tests/test_user_api.py -vv --tb=short --timeout=60`: 29 passed.
+- A broad auth keyword run was started in parallel earlier and collided with another test database run; that was classified as test DB contention, not an auth failure. Sequential targeted auth suites passed after restarting only the local Postgres container.
+
+Remaining allauth risk:
+
+- `allauth.exceptions` import warning remains from current adapter import path. It is not a gate failure but should be cleaned up in a future compatibility polish pass.
+
+### NOSEC / False Positive Review
+
+| File | Line/Context | Rule ID | Why False Positive? | Safer Alternative Considered? | Keep? |
+|---|---|---|---|---|---|
+| `app/app/settings.py` | DRF throttle scope `password_reset_request` | B105 | Throttle scope label, not a secret. | Rename would reduce clarity. | yes |
+| `app/user/serializers.py` | `password` / `old_password` request keys | B105 | Serializer field names, not literals used as credentials. | Renaming would break API contract. | yes |
+| `app/user/serializers.py` | `old_password` validation error keys | B105 | Error field names, not secrets. | Generic non-field error considered, but existing tests validate field-level UX. | yes |
+| `app/user/views.py` | `token == 'valid'` under `TESTING` | B105 | Test-only Turnstile sentinel gated by `settings.TESTING`. | Fixture-level monkeypatch considered; current guard is explicit. | yes |
+| `app/ingestion/views.py` | `secret_setting="CLOUDFLARE_WEBHOOK_SECRET"` | B106 | Setting name, not secret value. | None needed. | yes |
+| `app/webhooks/views.py` | `secret_setting="CLOUDFLARE_WEBHOOK_SECRET"` | B106 | Setting name, not secret value. | None needed. | yes |
+| `app/conftest.py` | Test fixture credential | B105 | Deterministic test credential only. | Randomizing would add noise without security value. | yes |
+| `app/gallery/management/commands/seed_db.py` | Demo seed credentials | B105 | Non-production seed data; command guarded for non-production use. | Env override can be added later if staging seed policy requires it. | yes |
+| `app/gallery/management/commands/seed_db.py` | Demo random choices | B311 | Non-cryptographic demo seed data only. | `secrets` is inappropriate for demo data. | yes |
+
+Verification:
+
+- `docker compose --env-file .env.example --profile test run --rm test python /scripts/ci/bandit_redacted.py -r . -c /repo-config/pyproject.toml`: Bandit issues 0.
+- Redacted Bandit output prints no source snippets and no literal secret-like values.
+- `python scripts\ci\secret_hygiene.py`: pass.
+- `python scripts\ci\env_sanity.py` with controlled placeholder env: pass.
+
+### Secret Rotation Closeout
+
+| Check | Result | Notes |
+|---|---|---|
+| `.env` ignored | yes | `.gitignore` ignores `.env`. |
+| `.env` tracked | no | `git ls-files .env` returned no tracked file. |
+| tracked secret found | no | `secret_hygiene.py` passed; no values printed. |
+| local SECRET_KEY rotated | yes | Ignored local `.env` was updated with a new local-only value; value not printed or committed. |
+| production rotation required | unknown | Required if the exposed local value was ever reused in staging or production. |
+
+`.env.example` remains placeholder-only for this closeout. CI scripts use `.env.example` by default and do not echo env values.
+
+### Local Production-Base Gate Re-run
+
+| Gate | Local Result | Command | Notes |
+|---|---|---|---|
+| secret-hygiene | pass | `python scripts\ci\secret_hygiene.py` | No tracked likely real secrets. |
+| env-sanity | pass | `python scripts\ci\env_sanity.py` with controlled placeholder env | No values printed. |
+| validate | pass | Manual equivalent: Poetry lock already validated in Python 3.12 Docker; Compose configs passed. | Bash unavailable locally. |
+| django-smoke | pass | Docker pytest smoke command | 5 passed. |
+| compose-config | pass | `docker compose --env-file .env.example ... config -q` | Base, Toxiproxy, deploy configs passed. |
+| lint | pass | `docker compose --env-file .env.example --profile test run --rm test flake8` | flake8 passed. |
+| security | pass | `docker compose --env-file .env.example --profile test run --rm test security` | 87 passed. |
+| bandit | pass | Redacted Bandit wrapper | 0 issues. |
+| dependency-audit | pass | `python -m pip_audit` in test image | No known vulnerabilities found. |
+| unit | pass | `docker compose --env-file .env.example --profile test run --rm test unit` | 286 passed. |
+| celery | pass | `docker compose --env-file .env.example --profile test run --rm test celery` | 18 passed. |
+| integration | pass | Docker pytest integration command | 2 passed. |
+| toxiproxy | pass | Docker Compose Toxiproxy pytest command | 7 passed. |
+| docker-build | pass | `docker build .`; `docker compose --env-file .env.example build` | Both passed. |
+
+### GitHub Actions Remote CI Result
+
+Pending. This branch must be pushed and GitHub Actions must be inspected before final production-base classification can be upgraded.
+
+### Remaining Phase A Blockers
+
+1. Remote GitHub Actions not yet verified for this branch.
+2. Production rotation remains required if the previously exposed local `SECRET_KEY` was ever reused outside local development.
+3. Bash/WSL is unavailable locally; local verification used Docker/Windows equivalents, while Linux CI remains authoritative.
+
+### Phase A Final Classification
+
+Current classification before remote CI: base-engineering ready.
+
+Not production-base ready until GitHub Actions passes remotely and no CI secret leakage is observed.
+
+Not production ready; product-level hardening remains out of scope for Phase A.
+
+### Next Phase Recommendation
+
+If Phase A remote CI passes, proceed to Phase B - Red-Team Security Sweep:
+
+- endpoint authorization matrix
+- IDOR testing
+- enumeration attacks
+- XSS and scriptable image risks
+- DDoS/rate-limit review
+- RBAC/ABAC review
+- tenant isolation
+- upload abuse
+- webhook forgery/replay
+- billing tampering
+- signed URL leakage
+- client gallery access boundaries
+- logs/telemetry redaction
+- operational incident runbooks
