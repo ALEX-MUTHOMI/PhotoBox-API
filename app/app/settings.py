@@ -382,6 +382,9 @@ JWT_AUTH_COOKIE         = 'access'
 JWT_AUTH_REFRESH_COOKIE = 'refresh'
 
 ACCOUNT_USER_MODEL_USERNAME_FIELD  = None
+ACCOUNT_USERNAME_REQUIRED          = False
+ACCOUNT_EMAIL_REQUIRED             = True
+ACCOUNT_AUTHENTICATION_METHOD      = 'email'
 ACCOUNT_LOGIN_METHODS              = {'email'}
 ACCOUNT_SIGNUP_FIELDS              = ['email*', 'password1*', 'password2*']
 
