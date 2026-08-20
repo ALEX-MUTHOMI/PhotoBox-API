@@ -459,7 +459,7 @@ class GalleryArchiveJob(models.Model):
         ordering = ['-created_at']
         constraints = [
             models.CheckConstraint(
-                check=(
+                condition=(
                     models.Q(archive_type=GalleryArchiveType.FULL)
                     | models.Q(access_session__isnull=False)
                 ),

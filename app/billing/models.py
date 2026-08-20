@@ -43,11 +43,11 @@ class Subscription(models.Model):
         constraints = [
             # SECURITY: Mathematically prevents the "Negative Quota" hack at the SQL database level
             models.CheckConstraint(
-                check=models.Q(storage_used_bytes__gte=0),
+                condition=models.Q(storage_used_bytes__gte=0),
                 name='prevent_negative_storage_used'
             ),
             models.CheckConstraint(
-                check=models.Q(storage_limit_bytes__gte=0),
+                condition=models.Q(storage_limit_bytes__gte=0),
                 name='prevent_negative_storage_limit'
             )
         ]
