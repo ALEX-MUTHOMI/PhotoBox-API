@@ -6,10 +6,28 @@
 .docker
 
 # Python
-app/__pycache__/
-app/*/__pycache__/
-app/*/*/__pycache__/
-app/*/*/*/__pycache__/
-.env/
+**/__pycache__/
+**/*.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+app/test_db.sqlite3
+*.sqlite3
+
+# Local secrets and env files
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Build and frontend artifacts
+dist/
+build/
+node_modules/

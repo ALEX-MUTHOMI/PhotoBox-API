@@ -20,6 +20,10 @@ from .tasks import process_lemon_squeezy_webhook
 
 User = get_user_model()
 
+
+def _webhook_rejected(http_status):
+    return Response({"detail": "Webhook rejected."}, status=http_status)
+
 # ==========================================
 # MODULE 1: THE HIGH-CONCURRENCY PAYMENT GATEWAY
 # ==========================================
@@ -35,14 +39,14 @@ class WebhookReceiverView(APIView):
         # 0. OOM DEFENSE: Reject absurdly large payloads before any processing
         content_length = request.META.get('CONTENT_LENGTH')
         if content_length and int(content_length) > 1 * 1024 * 1024:  # 1MB max
-            return Response("Payload too large", status=status.HTTP_400_BAD_REQUEST)
+            return _webhook_rejected(status.HTTP_400_BAD_REQUEST)
 
         raw_payload = request.body
         incoming_signature = request.META.get('HTTP_X_SIGNATURE', '')
         event_id = request.META.get('HTTP_X_EVENT_ID')
 
         if not incoming_signature or not event_id:
-            return Response("Missing headers", status=status.HTTP_401_UNAUTHORIZED)
+            return _webhook_rejected(status.HTTP_401_UNAUTHORIZED)
 
         # ENGINEER FIX: Zero-Downtime Key Rotation Support
         primary_secret = getattr(settings, 'LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY', '').encode('utf-8')
@@ -51,7 +55,7 @@ class WebhookReceiverView(APIView):
         # SECURITY FIX: If BOTH secrets are empty, reject ALL webhooks.
         # Empty HMAC matches empty HMAC — this is a full authentication bypass.
         if not primary_secret and not secondary_secret:
-            return Response("Webhook secrets not configured", status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"detail": "Webhook unavailable."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         primary_signature = hmac.new(primary_secret, raw_payload, hashlib.sha256).hexdigest() if primary_secret else ''
 
@@ -60,12 +64,12 @@ class WebhookReceiverView(APIView):
             # Fallback to secondary key if primary fails
             secondary_signature = hmac.new(secondary_secret, raw_payload, hashlib.sha256).hexdigest() if secondary_secret else ''
             if not secondary_secret or not hmac.compare_digest(incoming_signature, secondary_signature):
-                return Response("Invalid signature", status=status.HTTP_401_UNAUTHORIZED)
+                return _webhook_rejected(status.HTTP_401_UNAUTHORIZED)
 
         try:
             payload_data = json.loads(raw_payload)
         except json.JSONDecodeError:
-            return Response("Malformed JSON", status=status.HTTP_400_BAD_REQUEST)
+            return _webhook_rejected(status.HTTP_400_BAD_REQUEST)
 
         # The event id header is not authenticated by the HMAC, so never trust it
         # as the sole idempotency key. We derive a deterministic payload hash and

@@ -15,6 +15,7 @@ import json
 import hmac
 import hashlib
 import time
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -169,6 +170,23 @@ class R2WebhookIdempotencyTests(TestCase):
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, 'READY')
         self.assertTrue(self.asset.is_processed)
+
+    @patch("ingestion.views.generate_photo_web_derivative.delay")
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    def test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative(self, mock_delay):
+        """
+        IDEMPOTENCY: Replayed object-created events for an already READY asset
+        must not fan out duplicate derivative tasks.
+        """
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'already_ready')
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'READY')
+        self.assertTrue(self.asset.is_processed)
+        mock_delay.assert_not_called()
 
 
 class R2WebhookSecurityTests(TestCase):

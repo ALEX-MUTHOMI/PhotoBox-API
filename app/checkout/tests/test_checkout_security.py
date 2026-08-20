@@ -3,6 +3,7 @@ from rest_framework.test import APITestCase
 from rest_framework import status
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.test import override_settings
 from checkout.models import PricingPlan
 from checkout.views import CheckoutRateThrottle, GenerateCheckoutLinkView
 
@@ -137,4 +138,24 @@ class CheckoutAPISecurityTests(APITestCase):
             status.HTTP_400_BAD_REQUEST,
             "FATAL: The API is vulnerable to Open Redirect attacks!"
         )
+        self.assertIn("success_url", response.data)
+
+    @override_settings(DEBUG=False, ALLOWED_HOSTS=["api.photobox.example", "testserver"])
+    def test_production_checkout_redirect_rejects_localhost(self):
+        """
+        HACKER: In production, localhost must not be accepted as a checkout
+        redirect target. Localhost redirects are development-only and become an
+        open-redirect primitive if accepted in production.
+        """
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            self.generate_url,
+            {
+                "plan_id": self.plan.id,
+                "success_url": "http://localhost:3000/checkout-complete",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("success_url", response.data)

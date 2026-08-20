@@ -6,6 +6,7 @@ from celery.exceptions import MaxRetriesExceededError
 from django.db import transaction, OperationalError
 from django.contrib.auth import get_user_model
 from checkout.models import CheckoutSession, PricingPlan
+from core.security import scrub_value
 from billing.models import Subscription, BillingAuditLog, SubscriptionTier, DeadLetterQueue, ProcessedWebhook
 
 logger = logging.getLogger(__name__)
@@ -46,19 +47,30 @@ def safe_create_dlq(event_id, payload_data, error_message):
     """
     FAILSAFE: Ensures we NEVER lose a payment payload, even if the DB goes completely offline.
     """
+    safe_payload = scrub_value(payload_data)
     try:
         DeadLetterQueue.objects.create(
             event_id=event_id,
-            payload=payload_data,
+            payload=safe_payload,
             error_message=error_message
         )
     except Exception as dlq_exc:
-        # FATAL FALLBACK: Dump the raw JSON to the system logs for manual AWS/Datadog recovery.
+        try:
+            payload_fingerprint = hashlib.sha256(
+                json.dumps(safe_payload, sort_keys=True, separators=(',', ':'), default=str)
+                .encode('utf-8')
+            ).hexdigest()[:16]
+        except (TypeError, ValueError):
+            payload_fingerprint = "unavailable"
+
+        # FATAL FALLBACK: preserve a correlation handle without logging raw
+        # provider payloads, emails, checkout tokens, or custom_data values.
         logger.critical(
-            f"FATAL DLQ FAILURE | Event: {event_id} | "
-            f"Original Error: {error_message} | "
-            f"DB Error: {dlq_exc} | "
-            f"RAW PAYLOAD: {json.dumps(payload_data)}"
+            "FATAL DLQ FAILURE | event_id=%s | original_error_recorded=true | "
+            "db_error_type=%s | payload_fingerprint=%s | raw_payload_logged=false",
+            event_id,
+            type(dlq_exc).__qualname__,
+            payload_fingerprint,
         )
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=5)
@@ -115,6 +127,9 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id, payload_hash=Non
                         raise ValueError("CRITICAL: Webhook missing custom_data anchors.")
 
                     session = CheckoutSession.objects.select_for_update().get(session_token=session_token)
+                    if str(session.user_id) != str(user_id):
+                        raise ValueError("CRITICAL: Webhook custom_data user/session mismatch.")
+
                     if session.status == 'COMPLETED':
                         return "Already processed"
 

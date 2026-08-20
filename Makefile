@@ -1,94 +1,48 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Makefile — Enterprise test runner commands
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Usage:
-#   make test-unit          → fast, no external services (CI/pre-commit)
-#   make test-celery        → Celery tasks in eager mode
-#   make test-cloudinary    → real Cloudinary API (needs env vars)
-#   make test-cloudflare    → real Cloudflare Worker (needs staging URL)
-#   make test-e2e           → full photographer flow against staging
-#   make test-all           → everything
-#   make test-coverage      → unit + integration with coverage report
-#
-# Required environment variables for integration/E2E tests:
-#   CLOUDINARY_CLOUD_NAME
-#   CLOUDINARY_API_KEY
-#   CLOUDINARY_API_SECRET
-#   CLOUDFLARE_WORKER_URL
-#   CF_TEST_TOKEN
-#   CELERY_BROKER_URL
-#   STAGING_BASE_URL
-#   E2E_PHOTOGRAPHER_USERNAME
-#   E2E_PHOTOGRAPHER_PASSWORD
-# ─────────────────────────────────────────────────────────────────────────────
+.PHONY: validate lint security smoke test test-unit test-celery test-integration test-toxiproxy docker-build ci-local
+.PHONY: test-api test-cloudinary test-e2e test-coverage legacy-test-all
 
-.PHONY: test-unit test-celery test-cloudinary test-cloudflare test-e2e test-all test-coverage
+validate:
+	bash scripts/ci/validate.sh
 
-# Unit tests only — no external services, no broker — safe for pre-commit hooks
+lint:
+	bash scripts/ci/lint.sh
+
+security:
+	bash scripts/ci/security.sh
+
+smoke:
+	bash scripts/ci/django_smoke.sh
+
+test: test-unit
+
 test-unit:
-	pytest tests/ -m "unit" \
-		--timeout=10 \
-		-v \
-		--tb=short
+	bash scripts/ci/unit.sh
 
-# Celery tasks in eager mode (synchronous, no broker needed)
-test-celery-unit:
-	pytest tests/test_celery_tasks.py -m "celery and unit" \
-		--timeout=30 \
-		-v
+test-celery:
+	bash scripts/ci/celery.sh
 
-# Celery integration — requires running Redis
-test-celery-integration:
-	pytest tests/test_celery_tasks.py -m "celery and integration" \
-		--timeout=120 \
-		-v
+test-integration:
+	bash scripts/ci/integration.sh
 
-# Cloudinary — hits the real API, creates and deletes real resources
-test-cloudinary:
-	pytest tests/test_cloudinary_integration.py -m cloudinary \
-		--timeout=60 \
-		-v \
-		-s
+test-toxiproxy:
+	bash scripts/ci/toxiproxy_smoke.sh
 
-# Cloudflare — hits the real staging Worker
-test-cloudflare:
-	pytest tests/test_cloudflare_integration.py -m cloudflare \
-		--timeout=60 \
-		-v \
-		-s
+docker-build:
+	bash scripts/ci/docker_build.sh
 
-# Full E2E — the real photographer flow against staging
-test-e2e:
-	pytest tests/test_e2e_photographer_flow.py -m e2e \
-		--timeout=180 \
-		-v \
-		-s
+ci-local: validate lint security smoke test-unit test-celery test-integration test-toxiproxy docker-build
 
-# API layer tests (unit + schema + auth — mocks external calls)
 test-api:
-	pytest tests/test_api_upload.py \
-		--timeout=30 \
-		-v
+	docker compose run --rm test api
 
-# Everything
-test-all:
-	pytest tests/ \
-		--timeout=180 \
-		-v
+test-cloudinary:
+	docker compose run --rm test cloudinary
 
-# Coverage report (unit + API tests — not integration to avoid flakiness in CI)
+test-e2e:
+	docker compose run --rm test e2e
+
 test-coverage:
-	pytest tests/test_api_upload.py tests/test_celery_tasks.py \
-		-m "unit or (celery and unit)" \
-		--cov=photos \
-		--cov-report=term-missing \
-		--cov-report=html:htmlcov \
-		--cov-fail-under=80 \
-		--timeout=30
+	docker compose run --rm test coverage
 
-# Parallel execution (faster for large test suites)
-test-parallel:
-	pytest tests/ -m "unit" \
-		-n auto \
-		--timeout=30
+legacy-test-all:
+	docker compose run --rm test all

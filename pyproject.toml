@@ -1,0 +1,70 @@
+[tool.poetry]
+name = "photobox-api"
+version = "1.0.0"
+description = "PhotoBox photography SaaS backend API."
+authors = ["PhotoBox Engineering"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+Django = ">=4.2.26,<4.3"
+djangorestframework = ">=3.15.2,<3.16"
+psycopg2 = ">=2.9.3,<2.10"
+drf-spectacular = ">=0.22.1,<0.23"
+Pillow = ">=10.2.0"
+python-dotenv = ">=1.0.0"
+djangorestframework-simplejwt = ">=5.5.1,<5.6"
+argon2-cffi = ">=23.1.0"
+dj-rest-auth = ">=7.0.1,<8"
+django-allauth = ">=65.14.1,<66"
+boto3 = ">=1.28.0"
+django-storages = ">=1.13.2"
+cloudinary = ">=1.36.0"
+celery = ">=5.3.0"
+redis = ">=5.0.0"
+django-cors-headers = ">=4.0.0"
+sentry-sdk = ">=2.0.0"
+
+[tool.poetry.group.dev.dependencies]
+factory-boy = ">=3.3.0,<3.4"
+Faker = ">=24.11.0,<25"
+
+[tool.poetry.group.test.dependencies]
+pytest = ">=9.0.3,<9.1"
+pytest-django = ">=4.9.0,<4.10"
+pytest-mock = ">=3.14.0,<3.15"
+pytest-timeout = ">=2.3.0,<2.4"
+coverage = ">=7.5.0,<8"
+
+[tool.poetry.group.lint.dependencies]
+flake8 = ">=7.1.1,<7.2"
+
+[tool.poetry.group.security.dependencies]
+bandit = ">=1.7.9,<2"
+pip-audit = ">=2.7.3,<3"
+
+[tool.poetry.group.deploy]
+optional = true
+
+[tool.poetry.group.deploy.dependencies]
+uwsgi = ">=2.0.23"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "app.settings"
+python_files = ["test_*.py", "*_tests.py"]
+testpaths = ["billing", "checkout", "core", "gallery", "ingestion", "tests", "user", "webhooks"]
+addopts = "-ra"
+markers = [
+  "celery: Celery-focused contract and worker behavior tests.",
+  "slow: Tests that intentionally exercise throttling or longer-running flows.",
+  "unit: Pure unit tests with all network boundaries mocked.",
+]
+
+[tool.bandit]
+exclude_dirs = ["*/tests/*", "tests/*", "*/migrations/*"]
+skips = ["B101"]
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

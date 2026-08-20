@@ -75,6 +75,26 @@ class R2StorageUnitTests(SimpleTestCase):
 
         self.assertIsNone(url)
 
+    @patch("gallery.storage.get_r2_client")
+    def test_generate_presigned_get_url_failure_redacts_signed_query(self, mock_get_r2_client):
+        mock_client = MagicMock()
+        mock_client.generate_presigned_url.side_effect = RuntimeError(
+            "failed https://signed.example.com/file.jpg?X-Amz-Signature=secret"
+        )
+        mock_get_r2_client.return_value = mock_client
+
+        with self.assertLogs("gallery.storage", level="ERROR") as logs:
+            url = generate_r2_presigned_get_url(
+                bucket="test-bucket",
+                key="fast-lane/tenant_1/photo_1/image.jpg",
+            )
+
+        self.assertIsNone(url)
+        log_output = "\n".join(logs.output)
+        self.assertNotIn("X-Amz-Signature", log_output)
+        self.assertNotIn("secret", log_output)
+        self.assertNotIn("https://signed.example.com/file.jpg", log_output)
+
     def test_generate_presigned_post_rejects_non_positive_sizes(self):
         self.assertIsNone(
             generate_r2_presigned_post(
@@ -133,4 +153,3 @@ class R2StorageUnitTests(SimpleTestCase):
 
     def test_infer_content_type_defaults_for_unknown_extension(self):
         self.assertEqual(infer_content_type("archive.bin"), "application/octet-stream")
-

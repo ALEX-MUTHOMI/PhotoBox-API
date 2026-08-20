@@ -1,11 +1,24 @@
 import uuid
+from urllib.parse import urlparse
 from django.conf import settings
+import logging
+
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth.hashers import make_password, check_password
 
 # Assuming Workspace is defined in core.models
 from core.models import Workspace
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_safe_client_url(value: str | None) -> bool:
+    if not value:
+        return False
+    parsed = urlparse(str(value))
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 class VisibilityChoices(models.TextChoices):
@@ -212,7 +225,7 @@ class Photo(models.Model):
             )
 
         # Backward compat: old photos with Cloudinary SDK optimized_url still work
-        if self.optimized_url:
+        if self.optimized_url and _is_safe_client_url(self.optimized_url):
             return self.optimized_url
 
         return None
@@ -244,7 +257,7 @@ class Photo(models.Model):
             try:
                 return self.image_file.url
             except Exception:
-                pass
+                logger.debug("Legacy local image URL was unavailable.", exc_info=True)
 
         return None
 

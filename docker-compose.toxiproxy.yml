@@ -1,0 +1,56 @@
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-config", "/etc/toxiproxy/toxiproxy.json", "-host", "0.0.0.0"]
+    volumes:
+      - ./toxiproxy.json:/etc/toxiproxy/toxiproxy.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8474:8474"
+    networks:
+      default:
+        aliases:
+          - postgres_proxy
+          - redis_proxy
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "-host", "127.0.0.1:8474", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  test:
+    environment:
+      DB_HOST: postgres_proxy
+      DB_PORT: "5432"
+      REDIS_URL: redis://redis_proxy:6379/1
+      CELERY_BROKER_URL: redis://redis_proxy:6379/0
+      CELERY_RESULT_BACKEND: redis://redis_proxy:6379/0
+    depends_on:
+      toxiproxy:
+        condition: service_healthy
+
+  app:
+    environment:
+      DB_HOST: postgres_proxy
+      DB_PORT: "5432"
+      REDIS_URL: redis://redis_proxy:6379/1
+      CELERY_BROKER_URL: redis://redis_proxy:6379/0
+      CELERY_RESULT_BACKEND: redis://redis_proxy:6379/0
+    depends_on:
+      toxiproxy:
+        condition: service_healthy
+
+  celery:
+    environment:
+      DB_HOST: postgres_proxy
+      DB_PORT: "5432"
+      REDIS_URL: redis://redis_proxy:6379/1
+      CELERY_BROKER_URL: redis://redis_proxy:6379/0
+      CELERY_RESULT_BACKEND: redis://redis_proxy:6379/0
+    depends_on:
+      toxiproxy:
+        condition: service_healthy

@@ -39,21 +39,21 @@ User = get_user_model()
 PHOTOGRAPHERS = [
     {
         'email': 'alex@photobox.dev',
-        'password': 'PhotoBox2026!',
+        'password': 'PhotoBox2026!',  # nosec B105 - non-production seed data credential.
         'name': 'Alex Muthomi',
         'business_name': 'Muthomi Studios',
         'tier': 'PRO',
     },
     {
         'email': 'jane@photobox.dev',
-        'password': 'PhotoBox2026!',
+        'password': 'PhotoBox2026!',  # nosec B105 - non-production seed data credential.
         'name': 'Jane Wanjiru',
         'business_name': 'Wanjiru Photography',
         'tier': 'FREE',
     },
     {
         'email': 'admin@photobox.dev',
-        'password': 'PhotoBox2026!',
+        'password': 'PhotoBox2026!',  # nosec B105 - non-production seed data credential.
         'name': 'System Admin',
         'business_name': 'PhotoBox HQ',
         'tier': 'PRO',
@@ -163,7 +163,7 @@ class Command(BaseCommand):
             specs.append(
                 {
                     'email': f'seeded-{index + 1:03d}@photobox.dev',
-                    'password': 'PhotoBox2026!',
+                    'password': 'PhotoBox2026!',  # nosec B105 - non-production seed data credential.
                     'name': f'Seeded Photographer {index + 1:03d}',
                     'business_name': f'Seeded Studio {index + 1:03d}',
                     'tier': 'PRO' if index % 2 == 0 else 'FREE',
@@ -264,7 +264,7 @@ class Command(BaseCommand):
                 defaults={
                     'business_name': photog_data['business_name'],
                     'storage_limit_bytes': 10 * 1024 * 1024 * 1024,  # 10 GB
-                    'brand_color': random.choice(['#1a1a2e', '#16213e', '#0f3460', '#533483']),
+                    'brand_color': random.choice(['#1a1a2e', '#16213e', '#0f3460', '#533483']),  # nosec B311 - demo seed data only.
                 }
             )
 
@@ -281,7 +281,9 @@ class Command(BaseCommand):
                         defaults={
                             'title': event_data['title'],
                             'event_type': event_data['event_type'],
-                            'event_date': (timezone.now() - timedelta(days=random.randint(1, 90))).date(),
+                            'event_date': (
+                                timezone.now() - timedelta(days=random.randint(1, 90))  # nosec B311
+                            ).date(),
                             'is_published': True,
                             'client_email': event_data['client_email'],
                             'client_name': event_data['client_name'],
@@ -306,9 +308,9 @@ class Command(BaseCommand):
                         scene_seeded_bytes = 0
 
                         for _ in range(missing_count):
-                            filename = random.choice(MOCK_FILENAMES)
-                            w, h = random.choice(MOCK_DIMENSIONS)
-                            file_size = random.randint(800_000, 4_500_000)
+                            filename = random.choice(MOCK_FILENAMES)  # nosec B311 - demo seed data only.
+                            w, h = random.choice(MOCK_DIMENSIONS)  # nosec B311 - demo seed data only.
+                            file_size = random.randint(800_000, 4_500_000)  # nosec B311 - demo seed data only.
                             photo_uuid = uuid.uuid4()
                             mock_r2_key = (
                                 f"fast-lane/tenant_{workspace.id}/"

@@ -1,0 +1,280 @@
+# PhotoBox Security Red-Team Matrix
+
+Date: 2026-05-23
+
+Scope: Phase B strict TDD red-team sweep for PhotoBox API. PhotoBox remains a photography SaaS covering photographer accounts, workspaces, events, scenes, media uploads, public/client galleries, favorites, archive jobs, checkout, billing, webhooks, Cloudflare R2, Cloudinary delivery, Celery/Redis, PostgreSQL, and Lemon Squeezy.
+
+Boundary: No Darasa domain logic or terminology is in scope.
+
+## Inspected Code Surface
+
+| Area | Files Inspected |
+|---|---|
+| Root routing and settings | `app/app/urls.py`, `app/app/settings.py` |
+| Photographer auth | `app/user/urls.py`, `app/user/views.py`, `app/user/serializers.py`, `app/user/password_reset_serializers.py`, `app/user/adapters.py` |
+| Dashboard gallery APIs | `app/gallery/urls.py`, `app/gallery/views.py`, `app/gallery/serializers.py`, `app/gallery/models.py` |
+| Client gallery APIs | `app/gallery/client_urls.py`, `app/gallery/client_views.py`, `app/gallery/client_auth.py`, `app/gallery/client_permissions.py`, `app/gallery/client_serializers.py` |
+| Storage and media workers | `app/gallery/storage.py`, `app/gallery/tasks.py`, `app/gallery/filename_utils.py` |
+| Heavy Lane ingestion | `app/ingestion/urls.py`, `app/ingestion/views.py`, `app/ingestion/serializers.py`, `app/ingestion/tasks.py` |
+| Webhooks | `app/webhooks/urls.py`, `app/webhooks/views.py`, `app/billing/views.py`, `app/billing/tasks.py` |
+| Billing and checkout | `app/billing/urls.py`, `app/billing/models.py`, `app/billing/serializers.py`, `app/checkout/urls.py`, `app/checkout/views.py`, `app/checkout/serializers.py` |
+| Shared security helpers | `app/core/security.py`, `scripts/ci/secret_hygiene.py`, `scripts/ci/env_sanity.py`, `scripts/ci/bandit_redacted.py` |
+| Existing test coverage | `app/*/tests/`, `tests/smoke/`, `tests/integration/`, `tests/resilience/` |
+
+## Endpoint And Trust-Boundary Matrix
+
+| Route/Service | Actor | Auth Domain | Tenant Boundary | Data Touched | Expected Protection | Existing Tests | Risk |
+|---|---|---|---|---|---|---|---|
+| `GET /health/`, `GET /api/health-check/` | Anonymous / load balancer | anonymous/public access | None | Health response | No secrets, no DB-heavy behavior, deploy path alignment | `tests/smoke/test_healthcheck.py`, `core/tests/test_health_check.py` | Low |
+| `GET /api/schema/`, `GET /api/docs/` | Anonymous / developer | anonymous/public access | None | OpenAPI schema/docs | No secret examples, no internal-only routes documented as public | Smoke only; deeper schema auth review pending | Medium |
+| `POST /api/user/create/` | Anonymous external attacker | anonymous/public access | New photographer account | User, Workspace, Subscription signal | Turnstile check, Gmail alias normalization, terms acceptance, registration throttling, no privilege field mass assignment | `user/tests/test_user_api.py` | Medium |
+| `POST /api/user/token/` | Photographer | photographer dashboard auth | User account | JWT access and refresh cookie | Generic errors, active-user check through auth backend, refresh cookie HttpOnly/Secure, brute-force throttle | `user/tests/test_user_api.py`, `core/tests/test_auth_jwt.py` | High |
+| `POST /api/user/token/refresh/` | Photographer | photographer dashboard auth | User account/session | Refresh token, access token, refresh cookie | HttpOnly cookie extraction, rotation, blacklist after rotation, expired/reused refresh rejected | `core/tests/test_auth_jwt.py` | High |
+| `POST /api/user/google/` | External OAuth user | photographer dashboard auth / OAuth | User account | Social login identity | Verified email required, blind account takeover blocked, existing linked provider allowed only when linked | `user/tests/test_social_adapter.py`, `user/tests/test_user_api.py` | High |
+| `POST /api/user/password-reset/` | Anonymous external attacker | anonymous/public access | User account | Password reset email | Generic response for existing/non-existing email, rate limiting, no account enumeration | `user/tests/test_password_reset.py` | High |
+| `POST /api/user/password-reset/confirm/` | Anonymous token holder | anonymous/public access | User account | Password reset token/password | Valid uid/token required, active user required, Django password validators, token replay should fail after password change | `user/tests/test_password_reset.py` | High |
+| `GET/PATCH /api/user/me/` | Photographer | photographer dashboard auth | User account | User profile, password, terms metadata | Auth required, password change requires old password, billing fields read-only | `user/tests/test_user_api.py` | Medium |
+| `GET/POST /api/gallery/events/` | Photographer | photographer dashboard auth | Workspace | Event/gallery metadata | Queryset scoped to `workspace__user`, workspace derived from authenticated user on create, payload workspace ignored | `gallery/tests/test_tenant_isolation.py`, `gallery/tests/test_events_api.py` | High |
+| `GET/PATCH/DELETE /api/gallery/events/{id}/` | Photographer | photographer dashboard auth | Workspace/Event | Event/gallery metadata | Object lookup through scoped queryset, no cross-tenant read/update/delete, generic not found behavior preferred | `gallery/tests/test_tenant_isolation.py` | High |
+| `GET/POST /api/gallery/scenes/` | Photographer | photographer dashboard auth | Workspace/Event | Scene metadata | Queryset scoped through event workspace, create rejects event owned by another user | `gallery/tests/test_tenant_isolation.py`, `gallery/tests/test_events_api.py` | High |
+| `GET/PATCH/DELETE /api/gallery/scenes/{id}/` | Photographer | photographer dashboard auth | Workspace/Event/Scene | Scene metadata | Scoped queryset, update strips event reassignment, no cross-tenant moves | `gallery/tests/test_tenant_isolation.py` | High |
+| `GET/POST /api/gallery/fast-lane/photos/` | Photographer | photographer dashboard auth | Workspace/Event/Scene/Photo | Photo rows, quota ledger, uploaded file | JWT photographer-only permission, scene ownership check, magic-byte validation, quota lock, status starts PENDING, no real provider call in web thread | `gallery/tests/test_fastlane_api.py`, `app/tests/test_api_upload.py`, `gallery/tests/test_asset_hardening.py` | Critical |
+| `GET/DELETE /api/gallery/fast-lane/photos/{id}/` | Photographer | photographer dashboard auth | Workspace/Event/Scene/Photo | Photo metadata/quota | Queryset scoped to workspace owner, delete refunds quota atomically | `gallery/tests/test_tenant_isolation.py`, `gallery/tests/test_fastlane_api.py` | High |
+| `GET /api/gallery/fast-lane/photos/{id}/download-url/` | Photographer or scoped gallery client | photographer dashboard auth and client/gallery-scoped auth | Workspace/Event/Photo/Gallery session | R2 presigned GET URL | Authorization before URL generation, gallery token scope/session revalidated, READY-only, short TTL | `gallery/tests/test_download_authorization.py`, `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py` | Critical |
+| `GET /api/galleries/{gallery_id}/` | Gallery client/guest | client/gallery-scoped auth | Gallery/session | Published gallery payload, scenes, photos | Published/non-expired gallery only, JWT gallery scope enforced, role-based visibility filter, READY-only photos | `gallery/tests/test_dual_lane_auth.py` | Critical |
+| `POST /api/galleries/{gallery_id}/magic-link/` | Anonymous client | anonymous/public access | Gallery/client allowlist | Magic link token/email | Published gallery required, allowlist check, token stored hashed, generic response, send only if allowlisted | `gallery/tests/test_dual_lane_auth.py` | High |
+| `POST /api/galleries/magic-link/consume/` | Anonymous token holder | anonymous/public access | Gallery/client session | Magic link, gallery session, cookies | Single-use token hash lookup, expiry enforced, client session created, secure HttpOnly cookies | `gallery/tests/test_dual_lane_auth.py` | High |
+| `POST /api/galleries/{gallery_id}/guest-access/` | Anonymous guest | anonymous/public access | Gallery/guest session | Guest access session | Published/non-expired gallery required, scoped cookie/token, guest role only | `gallery/tests/test_dual_lane_auth.py` | Medium |
+| `POST /api/galleries/{gallery_id}/favorites/` | Gallery client/guest | client/gallery-scoped auth | Gallery/session/photo | Favorite selection | Gallery scope enforced, session DB revalidated, photo must belong to gallery, role visibility enforced | `gallery/tests/test_favorites_engine.py` | High |
+| `DELETE /api/galleries/{gallery_id}/favorites/{photo_id}/` | Gallery client/guest | client/gallery-scoped auth | Gallery/session/photo | Favorite selection | Session-scoped delete only, photo/gallery validation | `gallery/tests/test_favorites_engine.py` | High |
+| `GET /api/galleries/{gallery_id}/favorites-summary/` | Photographer | photographer dashboard auth | Workspace/Event | Client favorite summary | Photographer JWT required, event scoped to workspace owner | `gallery/tests/test_favorites_engine.py` | High |
+| `POST /api/galleries/{gallery_id}/archive/` | Gallery client | client/gallery-scoped auth | Gallery/client session | Full archive job | Client role required, gallery scope enforced, existing job reused when pending/completed | `gallery/tests/test_archive_engine.py`, `gallery/tests/test_download_workflows.py` | High |
+| `GET /api/galleries/{gallery_id}/archive/status/` | Gallery client | client/gallery-scoped auth | Gallery/client session/archive job | Archive status and short-lived URL | Client role required, gallery scope enforced, short-lived URL only when completed and not expired | `gallery/tests/test_archive_engine.py` | High |
+| `POST /api/galleries/{gallery_id}/archive/favorites/` | Gallery client/guest | client/gallery-scoped auth | Gallery/session/favorites | Favorites archive job | Session revalidated, at least one favorite required, access_session scoped job | `gallery/tests/test_archive_engine.py` | High |
+| `GET /api/galleries/{gallery_id}/archive/favorites/status/` | Gallery client/guest | client/gallery-scoped auth | Gallery/session/archive job | Favorites archive status and URL | Session-scoped job lookup, short-lived URL only when completed and not expired | `gallery/tests/test_archive_engine.py` | High |
+| `POST /api/v1/ingestion/bulk/` | Photographer | photographer dashboard auth | Workspace/Event/Scene/quota | Heavy Lane manifest, MediaAsset rows, upload tickets | Auth required, scene ownership checked before and inside transaction, quota lock, server-generated object keys, batch limits, duplicate client refs rejected | `ingestion/tests/test_views.py`, `ingestion/tests/test_serializers.py`, `ingestion/tests/test_security.py`, `ingestion/tests/test_quota_ledger.py` | Critical |
+| `POST /api/v1/ingestion/webhook/` | Cloudflare R2 | webhook provider access | MediaAsset object key | MediaAsset state | Raw body HMAC, mandatory timestamp, replay window, JSON guard, unknown key ignored, size mismatch quarantine, PENDING-to-READY transition in transaction | `ingestion/tests/test_r2_webhook.py`, `ingestion/tests/test_security.py` | Critical |
+| `POST /api/v1/webhooks/cloudflare/r2/` | Cloudflare R2 | webhook provider access | Photo object key | Photo state | HMAC/timestamp verification and idempotent R2 upload completion handling | `webhooks/tests/test_cloudflare.py`, `webhooks/tests/test_r2_webhook.py` | Critical |
+| `GET /api/checkout/plans/` | Anonymous / photographer | anonymous/public access | None | Active pricing plans | Active plans only, read-only serializer, no inactive/retired variants | `checkout/tests/test_checkout_security.py`, `checkout/tests/test_models.py` | Medium |
+| `POST /api/checkout/generate/` | Photographer | photographer dashboard auth / billing provider access | User subscription | CheckoutSession, Lemon Squeezy checkout request | Auth required, active subscriber blocked, active plan allowlist, redirect allowlist, per-user throttle, cache lock, provider timeout | `checkout/tests/test_checkout_security.py`, `checkout/tests/test_Payment_gateway.py`, `billing/tests/test_transaction_lifecycle.py` | High |
+| `POST /api/billing/webhook/` | Lemon Squeezy | billing provider access | User/subscription/workspace | Subscription, audit log, checkout session | Signature required, primary/secondary secret support, empty secret fail-closed, payload hash idempotency, async task handoff | `billing/tests/test_security.py`, `billing/tests/test_transaction_lifecycle.py`, `billing/tests/test_billing_hardening.py` | Critical |
+| `POST /api/billing/gallery/upload/` | Photographer | photographer dashboard auth | User subscription quota | Subscription storage ledger | Auth required, image magic-byte check, positive size, row lock quota update | `billing/tests/test_subscription py.py`, `user/tests/billing_test_user.py` | Medium |
+| `gallery.tasks.process_fast_lane_asset` | Celery worker | Celery/internal task access | Workspace/Photo/object key | Photo state, R2 object probe, quota refund | UUID normalization, safe key reconstruction, R2 probe bounded by storage client timeout, idempotent status changes | `gallery/tests/test_celery_tasks.py`, `app/tests/test_celery_tasks.py`, `app/tests/test_pipeline_integrity.py` | Critical |
+| `gallery.tasks.generate_photo_web_derivative` | Celery worker | Celery/internal task access | Workspace/Photo/object key | R2 original, derivative, watermark | Photo lookup, image-only path, derived server-generated object key, temporary files cleaned | `gallery/tests/test_watermark_engine.py` | High |
+| `gallery.tasks.build_gallery_archive` | Celery worker | Celery/internal task access | Gallery/session/archive | R2 originals, archive ZIP, archive job | Only READY assets, visibility filtering, favorites session filter, server-generated archive key, temp file cleanup | `gallery/tests/test_archive_engine.py` | Critical |
+| `ingestion.tasks.reap_abandoned_uploads` | Celery worker | Celery/internal task access | Workspace/Photo/quota | Stale pending uploads, quota ledger | R2 existence check, fail-closed on R2 outage, phantom upload quarantine, idempotent refund | `app/tests/test_celery_tasks.py` | High |
+| `billing.tasks.process_lemon_squeezy_webhook` | Celery worker | billing provider access / internal task | User/subscription/checkout session | Entitlement state, audit log, processed webhook ledger | Payload hash idempotency, transaction lock, known subscription events only, unpaid ignored, DLQ on failure | `billing/tests/test_transaction_lifecycle.py`, `billing/tests/test_billing_hardening.py` | Critical |
+| `core.security` scrubbers and Sentry hooks | Insider/developer mistake | internal telemetry | Logs/telemetry | Emails, IPs, bearer tokens, sensitive fields | Hash/scrub sensitive values, Sentry PII disabled, before_send/breadcrumb hooks | `core/tests/test_security_helpers.py` | High |
+| CI scripts and compose gates | Developer/CI | internal build system | Local/CI env | Env placeholders, scans, Docker gates | No secret echo, tracked-file secret scan, env sanity, redacted Bandit | `scripts/ci/*`, local Phase A evidence | High |
+
+## Initial Red-Team Observations
+
+| Area | Observation | Initial Risk | TDD Next Step |
+|---|---|---|---|
+| Host toolchain | Host Poetry virtualenv points at a stale Python 3.12 path; Docker test image remains usable. | Medium | Record in report; use Docker/controlled host Python fallback for Phase B until Poetry env is repaired. |
+| Schema/docs | OpenAPI/docs routes are public. This may be intentional, but schema disclosure should be explicitly reviewed. | Medium | Add a schema exposure test or document intended public docs policy. |
+| Client gallery output | Public serializers return user-controlled text fields as JSON. JSON itself is safe, but frontend rendering contract must forbid unsafe HTML rendering. | Medium | Add output-safety tests for scriptable titles/scene names/filenames before deciding whether backend output sanitization is needed. |
+| Billing checkout | Checkout generation contains a real HTTP call path to Lemon Squeezy in production code; tests must always mock it. | High | Add/verify tests that Phase B never calls real provider services. |
+| Webhook telemetry | Some webhook and task logs include object keys and payload-derived context. Keys are not secrets, but signed URLs/secrets must never appear. | High | Add log redaction tests around signed URL and webhook failures. |
+
+## Phase B Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-001 | High | Client gallery magic-link auth | A client magic link issued while a gallery was published could still be consumed after the gallery was unpublished, creating a gallery session after access revocation. | `gallery/tests/test_dual_lane_auth.py::DualLaneGalleryAuthTests::test_magic_link_consume_rejects_unpublished_gallery` | `GalleryMagicLinkConsumeView` now revalidates gallery publication and gallery expiry before creating a session, consumes stale links, and returns 403. | Targeted test passed; `gallery/tests/test_dual_lane_auth.py` passed; `unit` passed. |
+| PB-002 | High | Billing entitlement custom-data binding | A `subscription_created` webhook with mismatched `custom_data.user_id` and `session_token` could mutate the wrong user's entitlement if the provider sent inconsistent custom data. | `billing/tests/test_transaction_lifecycle.py::FullTransactionLifecycleTests::test_subscription_created_rejects_user_session_mismatch` | Billing task now verifies the checkout session owner matches `custom_data.user_id` before completing checkout or changing subscription state. | Targeted test passed; billing lifecycle tests passed; `unit` passed. |
+| PB-003 | High | Logging / telemetry fallback | If DLQ persistence failed, fallback logging emitted raw provider payload content, including email/custom_data fields. | `billing/tests/test_log_redaction.py::BillingWebhookLogRedactionTests::test_dlq_failure_does_not_log_raw_payload_pii_or_tokens` | DLQ fallback logs event ID, DB error type, and payload fingerprint only; raw payload logging removed. | Targeted test passed; redacted Bandit passed; `security` and `unit` passed. |
+| PB-004 | Medium | Public gallery output safety | Event slugs generated from photographer-controlled titles could include script delimiters from malicious titles and are exposed in API payloads. | `gallery/tests/test_events_api.py::EventApiTests::test_create_event_slug_is_safe_for_scriptable_title` | Event slug generation now uses Django `slugify` with a safe fallback and preserves the random suffix. | Targeted test passed; `gallery/tests/test_events_api.py` passed; `unit` passed. |
+
+## Phase B Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env values only. |
+| redacted Bandit | pass | `bandit issues: 0`. |
+| lint | pass | `flake8` returned `0`. |
+| targeted gallery auth | pass | 9 passed. |
+| targeted gallery events | pass | 6 passed as part of affected suite. |
+| targeted billing lifecycle/logging | pass | 17 passed. |
+| security | pass | 87 passed. |
+| unit | pass | 290 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed after rerun sequentially. |
+| integration | pass | 2 passed after rerun sequentially. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |
+
+## Remaining Red-Team Work
+
+| Area | Remaining Risk | Recommended Next TDD Target |
+|---|---|---|
+| Full endpoint authorization matrix | Matrix exists, but every row has not yet received new Phase B adversarial tests beyond existing coverage. | Add endpoint-by-endpoint authorization matrix tests for dashboard vs gallery-token boundaries. |
+| Output safety | Slug safety was patched; JSON display fields still rely on frontend escaping contract. | Add explicit client-gallery serialization tests for title, scene, captions, and filenames with scriptable values. |
+| Upload and media pipeline | Existing Fast Lane and Heavy Lane tests are strong, but provider-sandbox proof is out of scope here. | Phase C should validate R2/Cloudinary sandbox behavior and object-key policies end to end. |
+| Billing state machine | User/session mismatch was fixed; deeper plan downgrade/over-limit policy still needs product-level decisions. | Add entitlement state-machine tests for cancelled, past-due, downgraded, and over-limit workspaces. |
+| Webhook replay windows | R2 timestamp replay protection exists; Lemon Squeezy relies on signature and payload-hash idempotency. | Confirm provider timestamp/event metadata support and add bounded replay-window tests if available. |
+| Logs and telemetry | DLQ raw payload logging fixed; signed URL and webhook failure logs still need broader redaction assertions. | Add tests for signed URL, webhook signature, token, and email-code absence in logs. |
+
+## Phase B.2 Attack Surface Matrix Update
+
+This update expands the route matrix with object-boundary and missing-test columns before new Phase B.2 patches. The current pass remains limited to red-team security verification; no Darasa domain logic, provider E2E, branch creation, push, or PR is in scope.
+
+| Route/Service | Actor | Auth Domain | Tenant Boundary | Object Boundary | Data Touched | Expected Protection | Existing Tests | Missing Tests | Risk |
+|---|---|---|---|---|---|---|---|---|---|
+| `GET /api/gallery/fast-lane/photos/{id}/download-url/` | Photographer or scoped gallery client | photographer dashboard JWT/session auth and client/gallery-scoped auth | Workspace and gallery | Photo, scene, event, gallery access session, R2 object key | R2 presigned GET URL | Authorization before URL generation, photographer ownership or gallery token scope/session revalidated, published/non-expired gallery for clients, READY-only asset, short TTL, no signed URL logging | `gallery/tests/test_download_authorization.py`, `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py` | Client signed URL after gallery unpublish/expiry; signed URL log redaction | Critical |
+| `GET /api/galleries/{gallery_id}/` | Gallery client/guest | client/gallery-scoped auth | Gallery | Gallery, scenes, photos, access session | Client gallery payload | Published and non-expired gallery, gallery token scope, role visibility, READY-only photos, JSON-safe serialization | `gallery/tests/test_dual_lane_auth.py` | Full scriptable field serialization matrix | Critical |
+| `POST /api/galleries/{gallery_id}/favorites/` | Gallery client/guest | client/gallery-scoped auth | Gallery | Gallery access session, photo, favorite selection | Favorites | Gallery scope, DB session revalidation, role visibility, photo belongs to gallery, published/non-expired gallery | `gallery/tests/test_favorites_engine.py` | Unpublished/expired gallery favorite mutation regression test | High |
+| `POST /api/galleries/{gallery_id}/archive/` | Gallery client | client/gallery-scoped auth | Gallery | Gallery archive job, R2 archive key | Archive job | Client role, gallery scope, published/non-expired gallery, deduplicated pending/completed job, no unauthorized photos | `gallery/tests/test_archive_engine.py`, `gallery/tests/test_download_workflows.py` | Archive spam/resource-abuse bound; unpublished/expired gallery regression test | High |
+| `POST /api/checkout/generate/` | Photographer | photographer dashboard auth and billing provider access | User/subscription | Pricing plan, checkout session, redirect URL | Checkout URL | Auth required, active subscriber blocked, active plan allowlist, redirect allowlist, cache lock, provider timeout, no real provider in tests | `checkout/tests/test_checkout_security.py`, `checkout/tests/test_Payment_gateway.py`, `billing/tests/test_transaction_lifecycle.py` | Workspace ownership/entity mapping tests if workspace checkout is introduced | High |
+| `POST /api/billing/webhook/` | Lemon Squeezy | billing provider access | User/subscription/checkout session | Provider event, checkout session, subscription, audit ledger | Entitlement state | HMAC verification, empty-secret fail-closed, payload-hash idempotency, user/session custom-data match, DLQ redaction | `billing/tests/test_security.py`, `billing/tests/test_transaction_lifecycle.py`, `billing/tests/test_log_redaction.py` | Provider timestamp/replay-window support verification; out-of-order downgrade matrix | Critical |
+| `POST /api/v1/ingestion/bulk/` | Photographer | photographer dashboard auth | Workspace/event/scene | Upload manifest, MediaAsset, object key, quota ledger | Heavy Lane presigned upload tickets | Scene ownership, quota lock, batch limits, server-generated object keys, duplicate client refs rejected, no provider call required | `ingestion/tests/test_views.py`, `ingestion/tests/test_security.py`, `ingestion/tests/test_quota_ledger.py` | Provider-sandbox prefix proof; quota race expansion | Critical |
+| `POST /api/v1/ingestion/webhook/` | Cloudflare R2 | webhook provider access | Media asset object key | MediaAsset, R2 object key, upload status | Ingestion state | Raw body HMAC, timestamp/replay protection where supported, unknown keys ignored/quarantined, idempotent mutation | `ingestion/tests/test_r2_webhook.py`, `ingestion/tests/test_security.py` | Duplicate namespace canonical-path proof; log redaction expansion | Critical |
+| `gallery.tasks.build_gallery_archive` | Celery worker | Celery/internal task access | Gallery/session | Archive job, favorite selections, R2 originals, archive ZIP | Generated archive | READY-only assets, visibility and favorites session filters, server-generated archive key, temp cleanup, idempotent failure state | `gallery/tests/test_archive_engine.py` | Transaction/failure invariant under R2 partial failure; provider-sandbox proof | Critical |
+| CI gate orchestration | Developer/CI | internal build system | Test DB/Redis/Docker services | Test database, Redis keys, Toxiproxy toxics | Gate evidence | No secret echo, deterministic scripts, no concurrent shared DB gates unless isolated, toxic cleanup before/after | `scripts/ci/*`, local Phase A/B evidence | DB namespace isolation for parallel smoke/integration | Medium |
+
+## Phase B.2 Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-005 | High | Signed URL / client gallery lifecycle | A previously authenticated gallery client could request a fresh R2 signed download URL after the gallery was unpublished or expired because `download_url` revalidated session scope but not gallery lifecycle. | `gallery/tests/test_download_workflows.py::DownloadWorkflowTests::test_client_download_url_rejects_unpublished_gallery_before_presign`; `test_client_download_url_rejects_expired_gallery_before_presign` | `PhotoFastLaneViewSet.download_url` now checks gallery `is_published` and `expires_at` before any presign operation for gallery principals. | New tests failed first with `200 != 403`, then passed; affected gallery signed URL/archive/favorites tests passed; unit passed. |
+| PB-006 | Medium | Dashboard/client auth-domain separation | Phase B.2 needed explicit regression proof that client-gallery credentials cannot use dashboard APIs and photographer identities cannot perform client-only mutations. | `gallery/tests/test_auth_domain_boundaries.py` | No code patch required; current auth separation already denies both paths. | 2 auth-domain boundary tests passed; unit passed. |
+| PB-007 | High | R2 webhook replay / resource abuse | Duplicate object-created webhooks for already READY assets did not mutate state, but they re-enqueued derivative tasks, allowing retry storms to fan out unnecessary Celery work. | `webhooks/tests/test_cloudflare.py::CloudflareWebhookSecurityTests::test_duplicate_object_created_does_not_enqueue_duplicate_derivative`; `ingestion/tests/test_r2_webhook.py::R2WebhookIdempotencyTests::test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative` | Both Cloudflare webhook namespaces now return `already_ready` without scheduling duplicate derivative work in the already-READY branch. | New tests failed first with duplicate task calls, then passed; webhooks/ingestion suites passed; Celery and unit gates passed. |
+
+## Phase B.2 Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env values only; no values printed. |
+| redacted Bandit | pass | `bandit issues: 0`. |
+| lint | pass | Docker `flake8` returned `0`. |
+| security | pass | 87 passed. |
+| affected gallery | pass | 25 passed. |
+| affected ingestion/webhooks | pass | 44 passed. |
+| unit | pass | 295 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed using the configured `--ds=app.settings` smoke command. |
+| integration | pass | 2 passed. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |
+
+## Phase B.3A Output Surface Matrix
+
+This pass focused only on output safety, scriptable content, signed URL leakage, and client gallery delivery boundaries. No provider calls, branch creation, push, PR, Darasa domain logic, or secret output were performed.
+
+| Surface | Route/Serializer/Service | Actor | Auth Domain | Input Source | Output Field | Risk | Existing Test | Missing Test |
+|---|---|---|---|---|---|---|---|---|
+| Event/gallery title | `GalleryPublicSerializer` via `GET /api/galleries/{gallery_id}/` | Gallery client/guest | client/gallery-scoped auth | Photographer-controlled `Event.title` | `title` | Scriptable title could be rendered unsafely by clients. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Frontend must still avoid `v-html`/raw HTML rendering. |
+| Event slug | `EventSerializer`, event creation APIs | Photographer and client gallery payload consumers | photographer dashboard auth / client-gallery output | Photographer-controlled title | `slug` | Unsafe URL path segments or script-like slug fragments. | `gallery/tests/test_events_api.py::EventApiTests::test_create_event_slug_is_safe_for_scriptable_title` | None for current backend policy. |
+| Scene title | `GalleryPublicSceneSerializer` | Gallery client/guest | client/gallery-scoped auth | Photographer-controlled `Scene.title` | `title` | Scriptable scene name could be rendered unsafely by clients. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Frontend escaping contract remains required. |
+| Scene slug | Scene APIs and public scene payload | Photographer and gallery client | photographer dashboard auth / client-gallery output | Photographer-controlled scene title | `slug` | Unsafe URL path segment if slug generation regresses. | Existing gallery scene/event API tests cover safe creation path. | Add explicit scene scriptable slug regression if scene slugs become route-critical. |
+| Gallery description/caption | Not present in current `Event`/public gallery model fields | N/A | N/A | N/A | N/A | If added later, rich text could become XSS surface. | Not applicable in current schema. | Phase B follow-up if description/caption fields are introduced. |
+| Photo filename | `GalleryPublicPhotoSerializer` | Gallery client/guest | client/gallery-scoped auth | Photographer upload filename | `original_filename` | Scriptable filename could be rendered unsafely or expose path-like content. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename`; upload filename tests in `app/tests/test_api_upload.py` | Frontend display must still render as text, not HTML. |
+| Photo display name/caption | Not present in current public photo serializer | N/A | N/A | N/A | N/A | Future captions/display labels could become XSS surfaces. | Not applicable in current schema. | Phase B follow-up if caption/display fields are introduced. |
+| Photo metadata / EXIF | `Photo.exif_data`, internal model field | Gallery client/guest if exposed later | client-gallery output | Uploaded image metadata | Not exposed by `GalleryPublicPhotoSerializer` | Raw EXIF can carry HTML/JS-like strings or PII. | `test_client_gallery_payload_excludes_internal_keys_and_download_urls` verifies public payload excludes internal metadata. | Phase C should test EXIF extraction/sanitization if metadata is surfaced. |
+| Delivery URL | `Photo.delivery_url`, `GalleryPublicPhotoSerializer` | Gallery client/guest | client/gallery-scoped auth | Server-generated Cloudinary fetch URL or legacy optimized URL | `delivery_url` | Legacy stored URL fields could return `javascript:` or `data:` scheme payloads. | `test_client_gallery_payload_rejects_scriptable_legacy_delivery_url`; `gallery/tests/test_security_cloud.py` | Phase C provider-sandbox proof for Cloudinary/R2 URL behavior. |
+| Cover URLs | `GalleryPublicSerializer.cover_image_url`, `cover_photo` | Gallery client/guest | client/gallery-scoped auth | Workspace branding URL / event cover URL | `cover_image_url`, `cover_photo` | Scriptable branding/cover URLs could be returned to clients. | `test_client_gallery_payload_rejects_scriptable_cover_urls`; `gallery/tests/test_watermark_engine.py` | None for current HTTP(S)-only backend policy. |
+| Download URL | `PhotoFastLaneViewSet.download_url`, archive status views | Photographer or scoped gallery client | photographer dashboard auth and client/gallery-scoped auth | R2 object key after auth checks | signed `download_url` | Unauthorized or stale sessions could receive temporary capability URLs. | `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py`, `gallery/tests/test_storage_unit.py` | Phase C/G provider proof for live R2 TTL and cache behavior. |
+| Signed URL logs | `generate_r2_presigned_get_url` | Internal service/log consumer | internal storage helper | Provider/client exception details | Logs | Exception paths could include full signed URL query strings. | `gallery/tests/test_storage_unit.py::R2StorageUnitTests::test_generate_presigned_get_url_failure_redacts_signed_query` | Add broader structured logging tests if signed URL generation moves to new services. |
+| Archive download endpoint | Gallery archive views/tasks | Gallery client | client/gallery-scoped auth | Archive job, R2 archive key | archive status URL | Archive URL or media set could cross gallery/session boundary. | `gallery/tests/test_archive_engine.py`, `gallery/tests/test_download_workflows.py` | Phase C should verify provider-backed archive object existence and TTL behavior. |
+| Favorites payload | Favorites APIs and archive favorites flow | Gallery client/guest and photographer summary | client/gallery-scoped auth or photographer dashboard auth | FavoriteSelection rows | favorites summary/archive | Favorites could leak across gallery/session or include hidden media. | `gallery/tests/test_favorites_engine.py`, `gallery/tests/test_archive_engine.py` | Add unpublished/expired favorite mutation regression if lifecycle policy changes. |
+| Magic link / gallery access response | `GalleryMagicLinkConsumeView`, public gallery views | Anonymous/client | anonymous to client-gallery session | Magic link token and gallery state | session response/cookie | Stale links could continue access after lifecycle changes. | `gallery/tests/test_dual_lane_auth.py` | None for current stale-link revocation coverage. |
+| R2 object key exposure | Public gallery serializers and download services | Gallery client/guest | client-gallery output | Private object keys | Public JSON fields | Object keys should not be unnecessarily exposed in client payloads. | `test_client_gallery_payload_excludes_internal_keys_and_download_urls` | Phase C provider proof should revisit delivery URL key disclosure policy. |
+| Error responses | Gallery/download/upload views | Anonymous/client/photographer | mixed | Access failures and validation failures | response body | Errors could leak private object existence or stack traces. | Existing upload response safety tests; signed URL lifecycle tests use 403/generic denial. | Add dedicated output error response matrix in Phase B.3B if endpoint behavior changes. |
+
+## Phase B.3A Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-008 | High | Client gallery text output | Photographer-controlled gallery title, scene title, or filename containing scriptable HTML was returned raw in public gallery JSON and could be executed by a careless frontend renderer. | `gallery/tests/test_client_gallery_serialization.py::ClientGallerySerializationSafetyTests::test_client_gallery_payload_escapes_scriptable_titles_and_filename` | Public gallery serializers now return sanitized client text using tag stripping plus HTML escaping for `title`, scene `title`, and `original_filename`; stored originals are preserved. | New test failed first on raw `<script>` output, then passed; gallery suite passed. |
+| PB-009 | High | Client gallery URL output | Legacy stored delivery/cover URL fields could return scriptable `javascript:` or `data:` URLs to public clients. | `test_client_gallery_payload_rejects_scriptable_legacy_delivery_url`; `test_client_gallery_payload_rejects_scriptable_cover_urls` | Client-facing URL fields now allow only absolute HTTP(S) URLs; unsafe legacy `optimized_url`, cover image, and cover photo values are suppressed. | New tests failed first with scriptable URLs in payload, then passed; existing safe Cloudinary/cover tests still passed. |
+| PB-010 | Medium | Signed URL failure redaction | A provider/client exception during signed URL generation could propagate or include a full signed URL query string in error paths. | `gallery/tests/test_storage_unit.py::R2StorageUnitTests::test_generate_presigned_get_url_failure_redacts_signed_query` | `generate_r2_presigned_get_url` now fails closed, returns `None`, and logs only object key and exception type without exception message/query string. | New test failed first with uncaught exception, then passed; storage/security/unit gates passed. |
+
+## Phase B.3A Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env passed; plain ignored `.env` still has invalid `DEBUG` and should be fixed locally without committing secrets. |
+| redacted Bandit | pass | Docker redacted Bandit reported `bandit issues: 0`. |
+| lint | pass | Docker `flake8 .` returned `0`. |
+| targeted output/signed URL/archive/favorites | pass | 41 passed. |
+| security | pass | 88 passed. |
+| gallery | pass | 117 passed. |
+| unit | pass | 300 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed. |
+| integration | pass | 2 passed. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |
+
+## Phase B.3A Remaining Risks
+
+| Area | Remaining Risk | Recommended Next TDD Target |
+|---|---|---|
+| Frontend rendering contract | Backend now sanitizes current public gallery text fields, but Vue/frontend must still render untrusted strings as text and avoid raw HTML rendering. | Add frontend contract tests when frontend implementation exists. |
+| EXIF/metadata | Current public serializer does not expose EXIF, but future metadata display must sanitize PII and scriptable values. | Phase C metadata extraction/output tests. |
+| Provider-backed URL behavior | Docker tests mock/localize provider behavior; live R2/Cloudinary sandbox proof is out of scope. | Phase C provider sandbox URL and object-key proof. |
+| Error response matrix | Existing tests cover upload/signed URL paths, but a full endpoint-by-endpoint error message equivalence matrix remains open. | Phase B.3B enumeration/error response expansion. |
+
+## Phase B.3B Billing, Webhook, Enumeration, CSRF, And Resource-Abuse Surface Matrix
+
+This pass maps billing, webhook, auth, browser-session, and expensive-operation surfaces before patching. No provider calls, branch creation, push, PR, Darasa domain logic, or secret output are in scope.
+
+| Surface | Route/Service/Task | Actor | Auth Domain | Trust Boundary | Tenant Boundary | Expensive Operation? | Expected Protection | Existing Tests | Missing Tests | Risk |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Photographer login | `POST /api/user/token/` | Anonymous attacker / photographer | anonymous to photographer JWT/cookie | Credentials and refresh cookie | User account | Medium | Generic auth failure, password validation, refresh cookie HttpOnly/Secure/SameSite | `user/tests/test_user_api.py`, `core/tests/test_auth_jwt.py` | Dedicated auth enumeration matrix remains Phase B.3B scope. | High |
+| Password reset request | `POST /api/user/password-reset/` | Anonymous attacker | anonymous/public | Email ownership, reset email | User account | Medium | Generic response, rate limit, no token logging | `user/tests/test_password_reset.py` | Log redaction for reset-token path if logging is added. | High |
+| JWT refresh/logout | SimpleJWT refresh/cookie flow | Photographer | photographer JWT/cookie | Refresh cookie | User account | Low | Refresh rotation and blacklist, HttpOnly/Secure/SameSite cookie | `core/tests/test_auth_jwt.py` | CSRF-specific cookie refresh regression if endpoint becomes browser session based. | High |
+| Client magic link request | `POST /api/galleries/{gallery_id}/magic-link/` | Anonymous client | anonymous/public | Gallery allowlist email | Gallery/client allowlist | Email send | Published/non-expired gallery, generic response, hashed token, throttle | `gallery/tests/test_dual_lane_auth.py` | Enumeration equivalence matrix. | High |
+| Client magic link consume | `POST /api/galleries/magic-link/consume/` | Token holder | anonymous to client-gallery session | Magic token | Gallery/session/email | Low | Single use, expiry, gallery lifecycle revalidation, scoped cookies | `gallery/tests/test_dual_lane_auth.py` | CSRF/browser-session review if cookie auth changes. | High |
+| Checkout creation | `POST /api/checkout/generate/` | Photographer / malicious photographer | photographer dashboard auth and billing provider | Client plan/redirect input, provider API | User checkout session | Provider call | Auth required, plan allowlist, active subscriber block, redirect allowlist, cache lock, no user-controlled entitlement | `checkout/tests/test_checkout_security.py`, `billing/tests/test_transaction_lifecycle.py` | Production localhost redirect rejection; client-submitted workspace/entitlement override assertions. | High |
+| Billing webhook HTTP layer | `POST /api/billing/webhook/` | Lemon Squeezy / forged provider attacker | billing provider access | Raw body HMAC, event headers | User/subscription/checkout session | Celery handoff | Signature required, raw body verification, empty secret fail-closed, payload-size cap, generic external failure | `billing/tests/test_security.py`, `billing/tests/test_transaction_lifecycle.py` | Generic external error bodies; malformed JSON equivalence; signature log redaction. | Critical |
+| Subscription lifecycle task | `billing.tasks.process_lemon_squeezy_webhook` | Celery/internal after verified webhook | billing provider/internal task | Provider payload custom_data, subscription state | User/subscription/checkout session | Entitlement mutation | Payload-hash idempotency, user/session match, known statuses only, transaction lock, audit trail | `billing/tests/test_transaction_lifecycle.py`, `billing/tests/test_billing_hardening.py` | DLQ payload redaction at rest; provider event ordering policy expansion. | Critical |
+| Billing audit/event record | `BillingAuditLog`, `ProcessedWebhook`, `DeadLetterQueue` | Internal/operator | internal ledger | Provider event IDs and payload-derived context | User/subscription | Low | Audit immutable, webhook idempotency, DLQ safe persistence | `billing/tests/test_audit_immutability.py`, `billing/tests/test_log_redaction.py` | DLQ must not persist raw sensitive provider payload fields. | High |
+| Storage/R2 webhook canonical namespace | `POST /api/v1/webhooks/cloudflare/r2/` | Cloudflare R2 / forged provider attacker | webhook provider access | Timestamped HMAC, object key payload | Photo/media asset object key | Derivative task fanout | Signature/timestamp required, unknown key ignored, READY idempotency, no duplicate derivative fanout | `webhooks/tests/test_cloudflare.py`, `webhooks/tests/test_r2_webhook.py` | Broader log redaction for object-key/signature failure paths. | Critical |
+| Heavy Lane ingestion webhook | `POST /api/v1/ingestion/webhook/` | Cloudflare R2 / forged provider attacker | webhook provider access | Timestamped HMAC, object key payload | MediaAsset object key | Derivative task fanout | Signature/timestamp required, pending asset match, size quarantine, READY idempotency | `ingestion/tests/test_r2_webhook.py`, `ingestion/tests/test_security.py` | Canonical namespace decision remains Phase C/F handoff. | Critical |
+| Upload init / Heavy Lane manifest | `POST /api/v1/ingestion/bulk/` | Photographer | photographer dashboard auth | Manifest body and scene ID | Workspace/event/scene/quota | HMAC ticket generation and DB writes | Scene ownership, batch limits, duplicate client refs, quota lock, server object keys, throttle | `ingestion/tests/test_views.py`, `ingestion/tests/test_security.py`, `ingestion/tests/test_quota_ledger.py` | Provider sandbox proof deferred to Phase C. | Critical |
+| Signed URL issuance | `GET /api/gallery/fast-lane/photos/{id}/download-url/` | Photographer/client/guest | photographer dashboard or gallery-scoped auth | Photo ID and gallery session | Workspace/gallery/photo | R2 presign | Auth before presign, lifecycle checks, READY-only, TTL cap, no signed URL logs | `gallery/tests/test_download_workflows.py`, `gallery/tests/test_presigned_url_security.py`, B.3A storage tests | Enumeration equivalence for missing/private/unauthorized responses remains B.3B. | Critical |
+| Archive generation | Gallery archive request/status views and `build_gallery_archive` | Gallery client | client-gallery scoped auth | Gallery session and archive job | Gallery/session/photo | Celery archive build and R2 ZIP | Session scope, dedupe pending/completed jobs, READY/visible-only media, short URL | `gallery/tests/test_archive_engine.py` | Resource-abuse bounds and enumeration equivalence expansion. | High |
+| Favorites mutation | Gallery favorites views | Gallery client/guest | client-gallery scoped auth | Photo ID, notes | Gallery/session/photo | Low/medium | Session scope, visibility, role, throttle, no cross-gallery selection | `gallery/tests/test_favorites_engine.py` | Enumeration equivalence for missing/hidden/private photo. | High |
+| CORS/CSRF/cookie settings | `app.settings`, allauth/dj-rest-auth/browser flows | Browser attacker | browser credential boundary | Origin, cookies, CSRF headers | User/gallery session | Low | Production secure cookies, explicit CORS/CSRF origins, no wildcard credentials, allauth middleware | `core/tests/test_settings_boot.py`, smoke checks | Dedicated production settings tests for localhost/test exceptions and redirect behavior. | High |
+| Error/log paths | `user.exceptions`, billing/webhook/task logs, storage helpers | Developer/operator/attacker observing logs | telemetry boundary | Exception messages, payloads, tokens | All tenants | Low | Scrubbers, redacted Bandit, no raw signatures/tokens/signed URLs | `core/tests/test_security_helpers.py`, B.3A/B billing log tests | Expand DLQ-at-rest and generic webhook response coverage. | High |
+
+## Phase B.3B Findings And Fixes
+
+| ID | Severity | Area | Threat | Failing Test Added | Patch | Verification |
+|---|---|---|---|---|---|---|
+| PB-011 | High | Checkout redirect policy | Production checkout redirect validation accepted localhost as a development exception even when `DEBUG=False`, allowing a production open-redirect primitive if a hostile client supplied a localhost return URL. | `checkout/tests/test_checkout_security.py::CheckoutAPISecurityTests::test_production_checkout_redirect_rejects_localhost` | `CheckoutRequestSerializer.validate_success_url` now treats localhost as DEBUG-only, requires HTTP(S), requires HTTPS in production, and allows only configured first-party hosts / `FRONTEND_URL`. | Test failed first with provider path reached (`502`), then passed; checkout/billing suites passed. |
+| PB-012 | High | Billing DLQ at-rest redaction | Billing DLQ persistence received raw provider payload fields, including session tokens and email-like fields, even though fallback logging was redacted. | `billing/tests/test_log_redaction.py::BillingWebhookLogRedactionTests::test_dlq_record_does_not_persist_raw_sensitive_provider_payload` | `safe_create_dlq` now stores `scrub_value(payload_data)` and fingerprints the scrubbed payload; sensitive-key coverage includes session token, customer email, and signatures. | Test failed first with raw values in persisted payload, then passed; billing and unit suites passed. |
+| PB-013 | Medium | Billing webhook enumeration / external errors | Billing webhook rejection bodies exposed verification internals such as `Invalid signature` and `Malformed JSON`, making provider-verification behavior externally distinguishable. | `WebhookReceiverHTTPTests.test_rejected_webhook_response_body_is_generic`; `test_malformed_webhook_response_body_is_generic` | Billing webhook HTTP layer now returns generic external rejection bodies for missing/invalid signatures, malformed JSON, and payload-size rejection while preserving status codes. | Tests failed first on `signature`/`json` response bodies, then passed; security and billing suites passed. |
+
+## Phase B.3B Gate Evidence
+
+| Gate | Result | Notes |
+|---|---|---|
+| secret-hygiene | pass | Host Python fallback; no tracked likely real secrets. |
+| env-sanity | pass | Controlled placeholder env passed; ignored local `.env` still needs local `DEBUG` cleanup. |
+| redacted Bandit | pass | Docker redacted Bandit reported `bandit issues: 0`. |
+| lint | pass | Docker `flake8 .` returned `0`. |
+| new B.3B tests | pass | 4 targeted tests passed twice after failing first. |
+| affected checkout/billing | pass | 60 passed. |
+| security | pass | 88 passed. |
+| affected webhooks/ingestion/user/gallery | pass | 216 passed. |
+| unit | pass | 303 passed. |
+| celery | pass | 18 passed. |
+| django-smoke | pass | 5 passed. |
+| integration | pass | 2 passed. |
+| toxiproxy | pass | 7 passed. |
+| docker-build | pass | `docker build .` passed. |
+
+## Phase B.3B Remaining Risks
+
+| Area | Remaining Risk | Recommended Next TDD Target |
+|---|---|---|
+| Provider ordering semantics | Current out-of-order subscription tests cover cancel then renewal; full Lemon Squeezy event timestamp/version semantics need provider-specific review. | Phase E billing state-machine hardening. |
+| Webhook namespaces | Both storage webhook namespaces have security/idempotency tests, but canonical path consolidation is not part of B.3B. | Phase F webhook/API cleanup or Phase C provider proof. |
+| CSRF/browser contract | Current settings and auth tests cover secure cookies and CORS basics; if refresh/logout become browser cookie-only mutation endpoints, add explicit CSRF tests. | Phase D auth/browser hardening. |
+| Resource abuse | Existing local throttles cover login, password reset, magic links, favorites, checkout, uploads, and manifests; production still needs CDN/WAF limits and provider-side webhook allowlisting. | Phase G operations hardening. |
+| Local toolchain | Host Poetry still points to a stale Python path; Docker is authoritative until host env is repaired. | Phase A maintenance. |

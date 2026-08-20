@@ -7,6 +7,7 @@ import logging
 from django.db import transaction
 from django.db.models import F
 from django.db.models.functions import Greatest
+from django.utils import timezone
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from rest_framework import mixins, parsers, status, viewsets
@@ -344,8 +345,14 @@ class PhotoFastLaneViewSet(
 
         requester_kind = "photographer"
         if getattr(request.user, "gallery_id", None) is not None:
-            if str(request.user.gallery_id) != str(photo.scene.event_id):
+            gallery = photo.scene.event
+            if str(request.user.gallery_id) != str(gallery.id):
                 raise PermissionDenied("Gallery scope mismatch.")
+
+            if not gallery.is_published or (
+                gallery.expires_at and gallery.expires_at <= timezone.now()
+            ):
+                raise PermissionDenied("Gallery access unavailable.")
 
             session_id = get_gallery_access_session_id(request)
             if session_id is None:
