@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -205,6 +206,28 @@ class CloudflareWebhookSecurityTests(APITestCase):
         self.assertEqual(res2.status_code, status.HTTP_200_OK)
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, "READY")
+
+    @patch("webhooks.views.generate_photo_web_derivative.delay")
+    def test_duplicate_object_created_does_not_enqueue_duplicate_derivative(self, mock_delay):
+        payload = {
+            "r2_object_key": self.asset.r2_object_key,
+            "size": 50000,
+            "action": "PutObject",
+        }
+        timestamp = int(time.time())
+        signature = self._generate_signature(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            timestamp,
+        )
+
+        first = self._post(payload, signature=signature, timestamp=timestamp)
+        second = self._post(payload, signature=signature, timestamp=timestamp)
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, "READY")
+        self.assertEqual(mock_delay.call_count, 1)
 
     def test_size_mismatch_quarantine(self):
         payload = {

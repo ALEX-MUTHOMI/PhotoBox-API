@@ -212,6 +212,35 @@ class FullTransactionLifecycleTests(TransactionTestCase):
         self.sub.refresh_from_db()
         self.assertFalse(self.sub.is_pro)  # Must remain FREE
 
+    def test_subscription_created_rejects_user_session_mismatch(self):
+        """
+        SECURITY: custom_data user_id and session_token must anchor the same
+        checkout session owner. A mismatched token must not upgrade another user.
+        """
+        attacker = User.objects.create_user(
+            email="attacker@example.com",
+            password="SecurePass123!",
+        )
+        attacker_session = CheckoutSession.objects.create(
+            user=attacker,
+            plan=self.plan,
+        )
+
+        payload = _make_ls_payload(
+            'subscription_created',
+            self.user.id,
+            attacker_session.session_token,
+        )
+        process_lemon_squeezy_webhook(payload, 'evt_mismatch_001')
+
+        self.sub.refresh_from_db()
+        attacker.subscription.refresh_from_db()
+        self.assertFalse(self.sub.is_pro)
+        self.assertFalse(attacker.subscription.is_pro)
+        self.assertTrue(
+            DeadLetterQueue.objects.filter(event_id='evt_mismatch_001').exists()
+        )
+
     # ─────────────────────────────────────────
     # 4. SECURITY: Payment Failure Grace Period
     # ─────────────────────────────────────────
@@ -327,6 +356,32 @@ class WebhookReceiverHTTPTests(TransactionTestCase):
             HTTP_X_SIGNATURE='forged_abc123', HTTP_X_EVENT_ID='evt_http_003',
         )
         self.assertEqual(resp.status_code, 401)
+
+    def test_rejected_webhook_response_body_is_generic(self):
+        resp = self.client.post(
+            self.url, data=self.payload, content_type='application/json',
+            HTTP_X_SIGNATURE='forged_abc123', HTTP_X_EVENT_ID='evt_http_generic',
+        )
+
+        rendered = resp.content.decode("utf-8").lower()
+        self.assertEqual(resp.status_code, 401)
+        self.assertNotIn("signature", rendered)
+        self.assertNotIn("headers", rendered)
+        self.assertNotIn("json", rendered)
+
+    def test_malformed_webhook_response_body_is_generic(self):
+        malformed_payload = b'{"meta":'
+        sig = self._sign(malformed_payload)
+        resp = self.client.post(
+            self.url, data=malformed_payload, content_type='application/json',
+            HTTP_X_SIGNATURE=sig, HTTP_X_EVENT_ID='evt_http_malformed',
+        )
+
+        rendered = resp.content.decode("utf-8").lower()
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("signature", rendered)
+        self.assertNotIn("headers", rendered)
+        self.assertNotIn("json", rendered)
 
     @override_settings(
         LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY='',

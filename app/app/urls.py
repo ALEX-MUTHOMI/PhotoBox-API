@@ -13,6 +13,7 @@ from core import views as core_views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('health/', core_views.health_check, name='health'),
     path('api/health-check/', core_views.health_check, name='health-check'),
     path('api/schema/', SpectacularAPIView.as_view(), name='api-schema'),
     path(

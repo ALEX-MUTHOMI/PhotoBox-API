@@ -1,4 +1,6 @@
 from rest_framework import serializers
+from django.utils.html import escape, strip_tags
+from urllib.parse import urlparse
 
 from gallery.client_auth import normalize_gallery_email
 from gallery.models import (
@@ -9,6 +11,19 @@ from gallery.models import (
     Scene,
     VisibilityChoices,
 )
+
+
+def safe_client_text(value: str | None) -> str:
+    return escape(strip_tags(value or ""))
+
+
+def safe_client_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(str(value))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return str(value)
 
 
 class MagicLinkRequestSerializer(serializers.Serializer):
@@ -32,6 +47,10 @@ class GuestAccessSerializer(serializers.Serializer):
 class GalleryPublicPhotoSerializer(serializers.ModelSerializer):
     delivery_url = serializers.ReadOnlyField()
     aspect_ratio = serializers.ReadOnlyField()
+    original_filename = serializers.SerializerMethodField()
+
+    def get_original_filename(self, obj):
+        return safe_client_text(obj.original_filename)
 
     class Meta:
         model = Photo
@@ -49,6 +68,10 @@ class GalleryPublicPhotoSerializer(serializers.ModelSerializer):
 
 class GalleryPublicSceneSerializer(serializers.ModelSerializer):
     photos = GalleryPublicPhotoSerializer(many=True, read_only=True)
+    title = serializers.SerializerMethodField()
+
+    def get_title(self, obj):
+        return safe_client_text(obj.title)
 
     class Meta:
         model = Scene
@@ -57,6 +80,18 @@ class GalleryPublicSceneSerializer(serializers.ModelSerializer):
 
 class GalleryPublicSerializer(serializers.ModelSerializer):
     scenes = GalleryPublicSceneSerializer(many=True, read_only=True)
+    title = serializers.SerializerMethodField()
+    cover_image_url = serializers.SerializerMethodField()
+    cover_photo = serializers.SerializerMethodField()
+
+    def get_title(self, obj):
+        return safe_client_text(obj.title)
+
+    def get_cover_image_url(self, obj):
+        return safe_client_url(obj.cover_image_url)
+
+    def get_cover_photo(self, obj):
+        return safe_client_url(obj.cover_photo)
 
     class Meta:
         model = Event

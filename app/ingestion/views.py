@@ -383,7 +383,7 @@ def _verify_webhook_hmac(
         payload_bytes,
         timestamp,
         signature_header,
-        secret_setting="CLOUDFLARE_WEBHOOK_SECRET",
+        secret_setting="CLOUDFLARE_WEBHOOK_SECRET",  # nosec B106 - setting name, not a secret value.
     )
 
 
@@ -697,8 +697,6 @@ class R2WebhookView(APIView):
                         "[R2-WEBHOOK] Already READY — idempotent skip. key=%r",
                         r2_object_key,
                     )
-                    if locked.media_type == "IMAGE":
-                        generate_photo_web_derivative.delay(str(locked.id))
                     return Response(
                         {"status": "already_ready"},
                         status=status.HTTP_200_OK,

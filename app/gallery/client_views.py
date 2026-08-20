@@ -158,19 +158,37 @@ class GalleryMagicLinkConsumeView(APIView):
 
             if magic_link.expires_at <= timezone.now():
                 magic_link.delete()
-                raise PermissionDenied("Magic link expired.")
+                return Response(
+                    {"detail": "Invalid or already-used magic link."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            gallery = magic_link.gallery
+            if gallery.expires_at and gallery.expires_at <= timezone.now():
+                magic_link.delete()
+                return Response(
+                    {"detail": "Invalid or already-used magic link."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if not gallery.is_published:
+                magic_link.delete()
+                return Response(
+                    {"detail": "Invalid or already-used magic link."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
             session = GalleryAccessSession.objects.create(
-                gallery=magic_link.gallery,
+                gallery=gallery,
                 email=magic_link.email,
                 role=GalleryAccessRole.CLIENT,
             )
             token = issue_gallery_access_token(
-                gallery_id=magic_link.gallery_id,
+                gallery_id=gallery.id,
                 email=magic_link.email,
                 role=GalleryAccessRole.CLIENT,
             )
-            gallery_id = str(magic_link.gallery_id)
+            gallery_id = str(gallery.id)
             email = magic_link.email
             magic_link.delete()
 

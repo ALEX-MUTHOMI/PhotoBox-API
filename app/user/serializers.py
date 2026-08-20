@@ -69,15 +69,19 @@ class UserSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         """Securely update profile, enforcing password verification."""
-        password = validated_data.pop('password', None)
-        old_password = validated_data.pop('old_password', None)
-        validated_data.pop('cf_turnstile_response', None) # Just in case
+        password = validated_data.pop('password', None)  # nosec B105 - request field name.
+        old_password = validated_data.pop('old_password', None)  # nosec B105 - request field name.
+        validated_data.pop('cf_turnstile_response', None)  # Just in case
 
         if password:
             if not old_password:
-                raise serializers.ValidationError({'old_password': 'Old password is required to change password.'})
+                raise serializers.ValidationError({
+                    'old_password': 'Old password is required to change password.',  # nosec B105
+                })
             if not instance.check_password(old_password):
-                raise serializers.ValidationError({'old_password': 'Old password is incorrect.'})
+                raise serializers.ValidationError({
+                    'old_password': 'Old password is incorrect.',  # nosec B105
+                })
             instance.set_password(password)
 
         if validated_data.get('accepted_terms') and not instance.tos_accepted_at:
