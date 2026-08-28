@@ -5,7 +5,6 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
-from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import F, Prefetch, Window
 from django.db.models.functions import RowNumber
@@ -18,10 +17,8 @@ from rest_framework.views import APIView
 
 from gallery.client_auth import (
     GalleryCookieJWTAuthentication,
-    get_gallery_access_session_id,
     hash_magic_link_token,
     issue_gallery_access_token,
-    normalize_gallery_email,
     resolve_gallery_access_session,
     set_gallery_access_cookie,
     set_gallery_access_session_cookie,
@@ -52,9 +49,10 @@ from gallery.models import (
     VisibilityChoices,
 )
 from gallery.storage import generate_r2_presigned_get_url
-from gallery.tasks import build_gallery_archive
+from gallery.tasks import _enqueue_archive_job, send_gallery_magic_link_email
 from gallery.throttles import (
     FavoriteSelectionThrottle,
+    GallerySessionReadThrottle,
     GuestAccessThrottle,
     MagicLinkConsumeThrottle,
     MagicLinkSendThrottle,
@@ -133,15 +131,10 @@ class GalleryMagicLinkRequestView(PublishedGalleryMixin, APIView):
                 )
                 frontend_url = getattr(settings, "FRONTEND_URL", "https://app.photobox.app").rstrip("/")
                 magic_url = f"{frontend_url}/gallery-access#token={raw_token}"
-                send_mail(
-                    subject=f"Your secure access link for {gallery.title}",
-                    message=(
-                        f"Use this single-use link within 15 minutes to access {gallery.title}: "
-                        f"{magic_url}"
-                    ),
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[email],
-                    fail_silently=False,
+                send_gallery_magic_link_email.delay(
+                    email,
+                    gallery.title,
+                    magic_url,
                 )
 
         return Response(
@@ -275,6 +268,7 @@ class GalleryGuestAccessView(PublishedGalleryMixin, APIView):
 class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientOrGuestGalleryAccess]
+    throttle_classes = [GallerySessionReadThrottle]
 
     def get(self, request, *args, **kwargs):
         self.enforce_gallery_scope(request)
@@ -438,7 +432,7 @@ class GalleryArchiveRequestView(PublishedGalleryMixin, APIView):
             gallery=gallery,
             archive_type=GalleryArchiveType.FULL,
         )
-        build_gallery_archive.delay(str(job.id))
+        _enqueue_archive_job(job.id)
         return Response(
             {"archive_job_id": job.id, "status": job.status},
             status=status.HTTP_202_ACCEPTED,
@@ -537,7 +531,7 @@ class GalleryFavoritesArchiveRequestView(PublishedGalleryMixin, APIView):
             access_session=access_session,
             archive_type=GalleryArchiveType.FAVORITES,
         )
-        build_gallery_archive.delay(str(job.id))
+        _enqueue_archive_job(job.id)
         return Response(
             {"archive_job_id": job.id, "status": job.status},
             status=status.HTTP_202_ACCEPTED,
