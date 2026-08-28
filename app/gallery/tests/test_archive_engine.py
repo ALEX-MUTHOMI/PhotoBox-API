@@ -260,8 +260,8 @@ class GalleryArchiveEngineTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    @patch("gallery.client_views.build_gallery_archive.delay")
-    def test_archive_request_queues_job_for_client(self, mock_delay):
+    @patch("gallery.client_views._enqueue_archive_job")
+    def test_archive_request_queues_job_for_client(self, mock_enqueue):
         self._set_gallery_session_cookie()
         response = self.client.post(
             reverse("gallery_public:archive-request", args=[self.gallery.id]),
@@ -270,7 +270,7 @@ class GalleryArchiveEngineTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(GalleryArchiveJob.objects.filter(gallery=self.gallery).count(), 1)
         job = GalleryArchiveJob.objects.get(gallery=self.gallery)
-        mock_delay.assert_called_once_with(str(job.id))
+        mock_enqueue.assert_called_once_with(job.id)
 
     @patch("gallery.storage.get_r2_client")
     def test_favorites_archive_task_streams_only_current_session_selections(
@@ -321,8 +321,8 @@ class GalleryArchiveEngineTests(TestCase):
             self.assertTrue(any("public-" in name for name in archived_names))
             self.assertFalse(any("client-" in name for name in archived_names))
 
-    @patch("gallery.client_views.build_gallery_archive.delay")
-    def test_favorites_archive_request_queues_job_for_scoped_session(self, mock_delay):
+    @patch("gallery.client_views._enqueue_archive_job")
+    def test_favorites_archive_request_queues_job_for_scoped_session(self, mock_enqueue):
         session = self._set_gallery_session_cookie(
             role=GalleryAccessRole.CLIENT,
             email="bride@example.com",
@@ -339,7 +339,7 @@ class GalleryArchiveEngineTests(TestCase):
             archive_type=GalleryArchiveType.FAVORITES,
             access_session=session,
         )
-        mock_delay.assert_called_once_with(str(job.id))
+        mock_enqueue.assert_called_once_with(job.id)
 
     @patch("gallery.client_views.generate_r2_presigned_get_url")
     def test_favorites_archive_status_uses_matching_session_job(self, mock_presign):

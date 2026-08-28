@@ -250,6 +250,11 @@ class TestProcessFastLaneAsset:
     def test_task_is_bound_to_image_processing_queue(self):
         assert getattr(process_fast_lane_asset, "queue", None) == "image-processing"
 
+    def test_archive_task_is_bound_to_archive_zip_queue(self):
+        from gallery.tasks import build_gallery_archive
+
+        assert getattr(build_gallery_archive, "queue", None) == "archive-zip"
+
 
 class TestReapAbandonedUploads:
     def test_reaper_returns_clean_when_no_assets_are_stale(self):

@@ -663,11 +663,13 @@ def _archive_photos_queryset(job: GalleryArchiveJob):
 
 
 def _get_archive_photos_queryset(job: GalleryArchiveJob):
-    return (
-        _archive_photos_queryset(job)
-        .order_by("scene__display_order", "uploaded_at")
-        .iterator()
-    )
+    """Stable pk-ordered queryset for ZIP builds (no named-cursor iterator)."""
+    return _archive_photos_queryset(job).order_by("pk")
+
+
+def _enqueue_archive_job(job_id) -> None:
+    queue = getattr(settings, "ARCHIVE_ZIP_QUEUE", "archive-zip")
+    build_gallery_archive.apply_async(args=[str(job_id)], queue=queue)
 
 
 @shared_task(
@@ -675,12 +677,21 @@ def _get_archive_photos_queryset(job: GalleryArchiveJob):
     max_retries=3,
     default_retry_delay=60,
     name="gallery.tasks.build_gallery_archive",
+    queue="archive-zip",
     acks_late=True,
     reject_on_worker_lost=True,
 )
 def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
+    import time
+
+    from gallery.db_batch import iter_pk_batches
     from gallery.models import GalleryArchiveJob  # noqa: PLC0415
     from gallery.storage import get_r2_client, open_multipart_r2_upload  # noqa: PLC0415
+    from gallery.zip_lease import (
+        acquire_zip_lease,
+        heartbeat_zip_lease,
+        release_zip_lease,
+    )
 
     try:
         job = GalleryArchiveJob.objects.select_related(
@@ -701,6 +712,16 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
     if job.status == GalleryArchiveJob.Status.PROCESSING:
         return {"status": "processing", "archive_job_id": archive_job_id}
 
+    lease_decision = acquire_zip_lease(str(job.id), str(job.gallery_id))
+    if not lease_decision.acquired:
+        logger.info(
+            "[ARCHIVE] ZIP lease unavailable for job %s (%s); retrying.",
+            archive_job_id,
+            lease_decision.reason,
+        )
+        raise self.retry(countdown=30, exc=RuntimeError(lease_decision.reason))
+
+    lease = lease_decision.lease
     sink = None
     try:
         GalleryArchiveJob.objects.filter(id=job.id).update(
@@ -736,9 +757,10 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
 
         zip_key = _build_archive_r2_key(job)
         r2_client = get_r2_client()
-        # Materialize first so a mid-stream failure cannot leave a PostgreSQL
-        # named cursor open for a later GC to abort another transaction.
-        photos = list(_get_archive_photos_queryset(job))
+        heartbeat_seconds = int(
+            getattr(settings, "ARCHIVE_ZIP_LEASE_HEARTBEAT_SECONDS", 10)
+        )
+        last_heartbeat = time.monotonic()
         sink = open_multipart_r2_upload(zip_key, "application/zip")
         with zipfile.ZipFile(
             sink,
@@ -746,7 +768,11 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             compression=zipfile.ZIP_STORED,
             allowZip64=True,
         ) as archive_file:
-            for photo in photos:
+            for photo in iter_pk_batches(_get_archive_photos_queryset(job)):
+                now = time.monotonic()
+                if now - last_heartbeat >= heartbeat_seconds:
+                    heartbeat_zip_lease(lease)
+                    last_heartbeat = now
                 response = r2_client.get_object(
                     Bucket=settings.CLOUDFLARE_R2_BUCKET_NAME,
                     Key=photo.r2_object_key,
@@ -790,6 +816,37 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
                 "reason": "max_retries_exceeded",
                 "archive_job_id": archive_job_id,
             }
+    finally:
+        if lease is not None:
+            release_zip_lease(lease)
+
+
+build_gallery_archive.queue = "archive-zip"
+
+
+@shared_task(
+    name="gallery.tasks.send_gallery_magic_link_email",
+    acks_late=True,
+)
+def send_gallery_magic_link_email(
+    email: str,
+    gallery_title: str,
+    magic_url: str,
+) -> Dict[str, Any]:
+    """Deliver magic-link mail off the request path (SMTP must not block guests)."""
+    from django.core.mail import send_mail
+
+    send_mail(
+        subject=f"Your secure access link for {gallery_title}",
+        message=(
+            f"Use this single-use link within 15 minutes to access {gallery_title}: "
+            f"{magic_url}"
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[email],
+        fail_silently=False,
+    )
+    return {"status": "sent", "email": email}
 
 
 upload_photo_to_r2 = process_fast_lane_asset

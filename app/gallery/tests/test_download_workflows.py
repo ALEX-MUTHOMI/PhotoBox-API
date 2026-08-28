@@ -158,13 +158,13 @@ class DownloadWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    @patch("gallery.client_views.build_gallery_archive.delay")
-    def test_bulk_download_requires_verified_access_and_returns_archive_job(self, mock_delay):
+    @patch("gallery.client_views._enqueue_archive_job")
+    def test_bulk_download_requires_verified_access_and_returns_archive_job(self, mock_enqueue):
         denied = self.anonymous_client.post(
             reverse("gallery_public:archive-request", args=[self.event.id])
         )
         self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
-        mock_delay.assert_not_called()
+        mock_enqueue.assert_not_called()
 
         self._grant_client_gallery_session()
         allowed = self.client_gallery_client.post(
@@ -175,4 +175,4 @@ class DownloadWorkflowTests(TestCase):
         self.assertEqual(allowed.data["status"], GalleryArchiveJob.Status.PENDING)
         self.assertIn("archive_job_id", allowed.data)
         archive_job = GalleryArchiveJob.objects.get(id=allowed.data["archive_job_id"])
-        mock_delay.assert_called_once_with(str(archive_job.id))
+        mock_enqueue.assert_called_once_with(archive_job.id)
