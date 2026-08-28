@@ -67,6 +67,7 @@ def purge_expired_magic_links() -> Dict[str, Any]:
 @shared_task(name="gallery.retention.purge_expired_archives")
 def purge_expired_archives() -> Dict[str, Any]:
     """Delete archive ZIPs from R2 once their TTL passes, then drop the row."""
+    from gallery.db_batch import iter_pk_batches
     from gallery.models import GalleryArchiveJob
     from gallery.storage import delete_r2_objects
 
@@ -78,7 +79,7 @@ def purge_expired_archives() -> Dict[str, Any]:
 
     purged = 0
     failed = 0
-    for job in expired.iterator():
+    for job in iter_pk_batches(expired):
         if delete_r2_objects([job.r2_zip_key]):
             GalleryArchiveJob.objects.filter(id=job.id).delete()
             purged += 1
@@ -97,6 +98,7 @@ def purge_expired_archives() -> Dict[str, Any]:
 def hard_delete_expired_galleries() -> Dict[str, Any]:
     """Irreversible step: remove bytes for galleries past the grace period."""
     from core.quota import release_workspace_bytes
+    from gallery.db_batch import iter_pk_batches
     from gallery.models import Event, Photo
     from gallery.storage import delete_r2_objects
 
@@ -112,7 +114,7 @@ def hard_delete_expired_galleries() -> Dict[str, Any]:
     bytes_reclaimed = 0
     galleries_failed = 0
 
-    for event in due.iterator():
+    for event in iter_pk_batches(due):
         photos = list(
             Photo.objects.filter(scene__event=event, status="EXPIRED")
             .values("id", "file_size_bytes", "r2_object_key", "web_r2_object_key")

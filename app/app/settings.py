@@ -259,6 +259,9 @@ TEMPLATES = [
 # ============================================================
 # 7. DATABASE
 # ============================================================
+# PgBouncer transaction pooling: hold no server-side cursors and recycle
+# connections every request (CONN_MAX_AGE=0). Direct Postgres can raise
+# DB_CONN_MAX_AGE if desired; never reintroduce .iterator() for archives.
 DATABASES = {
     'default': {
         'ENGINE':   'django.db.backends.postgresql',
@@ -267,7 +270,10 @@ DATABASES = {
         'USER':     os.environ.get('DB_USER'),
         'PASSWORD': os.environ.get('DB_PASS'),
         'PORT':     os.environ.get('DB_PORT', '5432'),
-        'CONN_MAX_AGE': 60,   # Persistent connections: reduces per-request TCP overhead
+        'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '0')),
+        'DISABLE_SERVER_SIDE_CURSORS': _env_flag(
+            'DISABLE_SERVER_SIDE_CURSORS', default=True
+        ),
     }
 }
 
@@ -369,6 +375,7 @@ REST_FRAMEWORK = {
         'magic_link_consume': '10/minute',
         'guest_access': '10/minute',
         'favorite_selection': '30/minute',
+        'gallery_session_read': '120/minute',
         'password_reset_request': '3/minute',  # nosec B105 - throttle scope label, not a secret.
     },
 }
@@ -598,6 +605,13 @@ GALLERY_TTL_DAYS = {
     'ENTERPRISE': 0,
 }
 GALLERY_ARCHIVE_TTL_HOURS = int(os.environ.get('GALLERY_ARCHIVE_TTL_HOURS', 24))
+ARCHIVE_ZIP_GLOBAL_LEASES = int(os.environ.get('ARCHIVE_ZIP_GLOBAL_LEASES', 20))
+ARCHIVE_ZIP_PER_GALLERY_LEASES = int(os.environ.get('ARCHIVE_ZIP_PER_GALLERY_LEASES', 1))
+ARCHIVE_ZIP_LEASE_TTL_SECONDS = int(os.environ.get('ARCHIVE_ZIP_LEASE_TTL_SECONDS', 60))
+ARCHIVE_ZIP_LEASE_HEARTBEAT_SECONDS = int(
+    os.environ.get('ARCHIVE_ZIP_LEASE_HEARTBEAT_SECONDS', 10)
+)
+ARCHIVE_ZIP_QUEUE = os.environ.get('ARCHIVE_ZIP_QUEUE', 'archive-zip')
 GALLERY_PIN_MAX_FAILED_ATTEMPTS = int(os.environ.get('GALLERY_PIN_MAX_FAILED_ATTEMPTS', 10))
 GALLERY_PIN_LOCKOUT_SECONDS = int(os.environ.get('GALLERY_PIN_LOCKOUT_SECONDS', 900))
 GALLERY_MAGIC_LINK_MAX_LIVE = int(os.environ.get('GALLERY_MAGIC_LINK_MAX_LIVE', 5))
