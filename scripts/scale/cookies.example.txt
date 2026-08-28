@@ -1,0 +1,3 @@
+# Pre-minted guest Cookie header values (one per line).
+# Replace with real signed cookies from a staging seed — never production secrets.
+gallery_access=REPLACE; gallery_session=REPLACE
