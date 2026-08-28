@@ -200,6 +200,9 @@ class DualLaneGalleryAuthTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(GalleryAccessSession.objects.count(), 0)
+        # Never issue session cookie before PIN succeeds (session fixation).
+        self.assertNotIn("gallery_session", response.cookies)
+        self.assertNotIn("gallery_access", response.cookies)
 
     def test_guest_access_with_correct_pin_creates_session(self):
         self.gallery.set_pin("4920")
