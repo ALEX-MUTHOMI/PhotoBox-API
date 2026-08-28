@@ -67,8 +67,13 @@ def _rect_variance(
     y0: int,
     box_w: int,
     box_h: int,
+    *,
+    lookup_counter: list[int] | None = None,
 ) -> float:
-    """Variance of inclusive-exclusive pixel box with top-left (x0, y0)."""
+    """Variance of inclusive-exclusive pixel box with top-left (x0, y0).
+
+    Exactly 8 SAT array lookups (4 for sum, 4 for sumsq) — O(1) in box area.
+    """
     x1 = x0 + box_w
     y1 = y0 + box_h
     n = box_w * box_h
@@ -77,6 +82,8 @@ def _rect_variance(
 
     # 1-based SAT: sum over [x0, x1) x [y0, y1) = S(y1,x1)-S(y0,x1)-S(y1,x0)+S(y0,x0)
     def at(s: array, y: int, x: int) -> int:
+        if lookup_counter is not None:
+            lookup_counter[0] += 1
         return s[y * stride + x]
 
     total = at(s1, y1, x1) - at(s1, y0, x1) - at(s1, y1, x0) + at(s1, y0, x0)

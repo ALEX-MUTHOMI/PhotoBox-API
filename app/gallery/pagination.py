@@ -14,7 +14,7 @@ from datetime import datetime
 from uuid import UUID
 
 from django.core import signing
-from django.db.models import Q
+from django.db.models import Q, QuerySet
 from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import BasePagination
@@ -54,6 +54,43 @@ def decode_photo_keyset_cursor(raw: str) -> tuple[datetime, UUID]:
     return uploaded_at, photo_id
 
 
+def apply_desc_keyset(queryset: QuerySet, uploaded_at: datetime, photo_id) -> QuerySet:
+    """Rows strictly older than (uploaded_at, id) for DESC keyset pages.
+
+    Uses a PostgreSQL row comparison so the planner can walk
+    ``(scene, uploaded_at, id)`` as an ordered Index Scan instead of OR+Sort.
+    SQLite falls back to equivalent Q filters.
+    """
+    from django.db import connection
+
+    if connection.vendor == "postgresql":
+        table = queryset.model._meta.db_table
+        return queryset.extra(
+            where=[f"({table}.uploaded_at, {table}.id) < (%s, %s)"],
+            params=[uploaded_at, str(photo_id)],
+        )
+    return queryset.filter(
+        Q(uploaded_at__lt=uploaded_at)
+        | Q(uploaded_at=uploaded_at, id__lt=photo_id)
+    )
+
+
+def apply_asc_keyset(queryset: QuerySet, uploaded_at: datetime, photo_id) -> QuerySet:
+    """Rows strictly newer than (uploaded_at, id) for ASC client scene pages."""
+    from django.db import connection
+
+    if connection.vendor == "postgresql":
+        table = queryset.model._meta.db_table
+        return queryset.extra(
+            where=[f"({table}.uploaded_at, {table}.id) > (%s, %s)"],
+            params=[uploaded_at, str(photo_id)],
+        )
+    return queryset.filter(
+        Q(uploaded_at__gt=uploaded_at)
+        | Q(uploaded_at=uploaded_at, id__gt=photo_id)
+    )
+
+
 class FastLaneKeysetPagination(BasePagination):
     """Newest-first keyset pagination: ORDER BY uploaded_at DESC, id DESC."""
 
@@ -68,10 +105,7 @@ class FastLaneKeysetPagination(BasePagination):
         cursor_raw = request.query_params.get(self.cursor_query_param)
         if cursor_raw:
             uploaded_at, photo_id = decode_photo_keyset_cursor(cursor_raw)
-            queryset = queryset.filter(
-                Q(uploaded_at__lt=uploaded_at)
-                | Q(uploaded_at=uploaded_at, id__lt=photo_id)
-            )
+            queryset = apply_desc_keyset(queryset, uploaded_at, photo_id)
 
         rows = list(queryset.order_by("-uploaded_at", "-id")[: page_size + 1])
         self.has_more = len(rows) > page_size
@@ -103,3 +137,49 @@ class FastLaneKeysetPagination(BasePagination):
             }
         )
 
+
+class ClientScenePhotoKeysetPagination(BasePagination):
+    """Oldest-first keyset for nested client scene photos (matches detail order)."""
+
+    page_size = DEFAULT_PAGE_SIZE
+    page_size_query_param = "page_size"
+    max_page_size = MAX_PAGE_SIZE
+    cursor_query_param = "cursor"
+
+    def paginate_queryset(self, queryset, request, view=None):
+        self.request = request
+        page_size = self.get_page_size(request)
+        cursor_raw = request.query_params.get(self.cursor_query_param)
+        if cursor_raw:
+            uploaded_at, photo_id = decode_photo_keyset_cursor(cursor_raw)
+            queryset = apply_asc_keyset(queryset, uploaded_at, photo_id)
+
+        rows = list(queryset.order_by("uploaded_at", "id")[: page_size + 1])
+        self.has_more = len(rows) > page_size
+        page = rows[:page_size]
+        self.next_cursor = None
+        if self.has_more and page:
+            last = page[-1]
+            self.next_cursor = encode_photo_keyset_cursor(last.uploaded_at, last.id)
+        return page
+
+    def get_page_size(self, request) -> int:
+        raw = request.query_params.get(self.page_size_query_param)
+        if raw is None:
+            return self.page_size
+        try:
+            size = int(raw)
+        except (TypeError, ValueError):
+            return self.page_size
+        if size < 1:
+            return self.page_size
+        return min(size, self.max_page_size)
+
+    def get_paginated_response(self, data):
+        return Response(
+            {
+                "results": data,
+                "next_cursor": self.next_cursor,
+                "has_more": self.has_more,
+            }
+        )
