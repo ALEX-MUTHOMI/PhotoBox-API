@@ -58,6 +58,11 @@ urlpatterns = [
         name="favorites-archive-status",
     ),
     path(
+        "<uuid:gallery_id>/scenes/<uuid:scene_id>/photos/",
+        client_views.PublicScenePhotoListView.as_view(),
+        name="scene-photos",
+    ),
+    path(
         "<uuid:gallery_id>/",
         client_views.PublicGalleryDetailView.as_view(),
         name="detail",

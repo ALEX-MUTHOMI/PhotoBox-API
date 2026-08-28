@@ -30,6 +30,7 @@ from gallery.client_permissions import (
 from gallery.client_serializers import (
     FavoriteSelectionSerializer,
     FavoriteSelectionWriteSerializer,
+    GalleryPublicPhotoSerializer,
     GalleryPublicSerializer,
     GuestAccessSerializer,
     MagicLinkConsumeSerializer,
@@ -48,6 +49,7 @@ from gallery.models import (
     Scene,
     VisibilityChoices,
 )
+from gallery.pagination import ClientScenePhotoKeysetPagination
 from gallery.storage import generate_r2_presigned_get_url
 from gallery.tasks import _enqueue_archive_job, send_gallery_magic_link_email
 from gallery.throttles import (
@@ -332,6 +334,50 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class PublicScenePhotoListView(PublishedGalleryMixin, APIView):
+    """Nested keyset list when the detail Prefetch bound (100/scene) is exceeded."""
+
+    authentication_classes = [GalleryCookieJWTAuthentication]
+    permission_classes = [HasClientOrGuestGalleryAccess]
+    throttle_classes = [GallerySessionReadThrottle]
+    pagination_class = ClientScenePhotoKeysetPagination
+
+    def get(self, request, *args, **kwargs):
+        self.enforce_gallery_scope(request)
+        gallery = self.get_gallery()
+        access_session = self.get_access_session(request, gallery)
+
+        scene = (
+            Scene.objects
+            .filter(id=self.kwargs["scene_id"], event=gallery)
+            .first()
+        )
+        if not scene:
+            raise NotFound("Scene not found.")
+
+        allowed_visibility = [VisibilityChoices.PUBLIC]
+        if access_session.role == GalleryAccessRole.CLIENT:
+            allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
+
+        if scene.visibility not in allowed_visibility:
+            raise NotFound("Scene not found.")
+
+        queryset = (
+            Photo.objects
+            .filter(
+                scene=scene,
+                status="READY",
+                visibility__in=allowed_visibility,
+            )
+            .select_related("scene__event__workspace")
+            .order_by("uploaded_at", "id")
+        )
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = GalleryPublicPhotoSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 class GalleryFavoriteSelectionView(PublishedGalleryMixin, APIView):
