@@ -1,3 +1,5 @@
+"""URL routes for the unauthenticated and client-scoped public gallery API."""
+
 from django.urls import path
 
 from gallery import client_views, views as gallery_views

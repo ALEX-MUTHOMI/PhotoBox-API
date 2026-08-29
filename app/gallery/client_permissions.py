@@ -1,3 +1,5 @@
+"""Role-based permissions for gallery client API views."""
+
 from rest_framework.permissions import BasePermission
 
 

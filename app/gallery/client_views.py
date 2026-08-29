@@ -1,13 +1,16 @@
+"""Public gallery HTTP endpoints for clients and guests."""
+
 import secrets
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied, Throttled
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -18,6 +21,7 @@ from gallery.client_auth import (
     hash_magic_link_token,
     issue_gallery_access_token,
     normalize_gallery_email,
+    resolve_gallery_access_session,
     set_gallery_access_cookie,
     set_gallery_access_session_cookie,
 )
@@ -51,8 +55,22 @@ from gallery.tasks import build_gallery_archive
 from gallery.throttles import (
     FavoriteSelectionThrottle,
     GuestAccessThrottle,
+    MagicLinkConsumeThrottle,
     MagicLinkSendThrottle,
 )
+
+
+def _pin_lock_cache_key(gallery_id) -> str:
+    return f"gallery_pin_failures:{gallery_id}"
+
+
+def _register_failed_pin_attempt(gallery_id) -> int:
+    key = _pin_lock_cache_key(gallery_id)
+    try:
+        return cache.incr(key)
+    except ValueError:
+        cache.set(key, 1, timeout=settings.GALLERY_PIN_LOCKOUT_SECONDS)
+        return 1
 
 
 class PublishedGalleryMixin:
@@ -76,24 +94,7 @@ class PublishedGalleryMixin:
             raise PermissionDenied("Gallery scope mismatch.")
 
     def get_access_session(self, request, gallery):
-        session_id = get_gallery_access_session_id(request)
-        if session_id is None:
-            raise PermissionDenied("Gallery session missing.")
-
-        session = (
-            GalleryAccessSession.objects
-            .filter(
-                id=session_id,
-                gallery=gallery,
-                email=normalize_gallery_email(getattr(request.user, "email", "")),
-                role=getattr(request.user, "role", ""),
-            )
-            .first()
-        )
-        if not session:
-            raise PermissionDenied("Gallery session invalid.")
-
-        return session
+        return resolve_gallery_access_session(request, gallery)
 
 
 class GalleryMagicLinkRequestView(PublishedGalleryMixin, APIView):
@@ -108,26 +109,39 @@ class GalleryMagicLinkRequestView(PublishedGalleryMixin, APIView):
         email = serializer.validated_data["email"]
 
         if ClientAllowlist.objects.filter(gallery=gallery, email=email).exists():
-            raw_token = secrets.token_urlsafe(64)
-            GalleryMagicLink.objects.filter(gallery=gallery, email=email).delete()
-            GalleryMagicLink.objects.create(
+            now = timezone.now()
+            GalleryMagicLink.objects.filter(
                 gallery=gallery,
                 email=email,
-                token_hash=hash_magic_link_token(raw_token),
-                expires_at=timezone.now() + timedelta(minutes=15),
-            )
-            frontend_url = getattr(settings, "FRONTEND_URL", "https://app.photobox.app").rstrip("/")
-            magic_url = f"{frontend_url}/gallery-access?token={raw_token}"
-            send_mail(
-                subject=f"Your secure access link for {gallery.title}",
-                message=(
-                    f"Use this single-use link within 15 minutes to access {gallery.title}: "
-                    f"{magic_url}"
-                ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
-            )
+                expires_at__lte=now,
+            ).delete()
+
+            live_links = GalleryMagicLink.objects.filter(
+                gallery=gallery,
+                email=email,
+                expires_at__gt=now,
+            ).count()
+
+            if live_links < settings.GALLERY_MAGIC_LINK_MAX_LIVE:
+                raw_token = secrets.token_urlsafe(64)
+                GalleryMagicLink.objects.create(
+                    gallery=gallery,
+                    email=email,
+                    token_hash=hash_magic_link_token(raw_token),
+                    expires_at=now + timedelta(minutes=15),
+                )
+                frontend_url = getattr(settings, "FRONTEND_URL", "https://app.photobox.app").rstrip("/")
+                magic_url = f"{frontend_url}/gallery-access#token={raw_token}"
+                send_mail(
+                    subject=f"Your secure access link for {gallery.title}",
+                    message=(
+                        f"Use this single-use link within 15 minutes to access {gallery.title}: "
+                        f"{magic_url}"
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[email],
+                    fail_silently=False,
+                )
 
         return Response(
             {"detail": "If that address is approved, a magic link will be sent."},
@@ -138,6 +152,7 @@ class GalleryMagicLinkRequestView(PublishedGalleryMixin, APIView):
 class GalleryMagicLinkConsumeView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [MagicLinkConsumeThrottle]
 
     def post(self, request, *args, **kwargs):
         serializer = MagicLinkConsumeSerializer(data=request.data)
@@ -219,8 +234,18 @@ class GalleryGuestAccessView(PublishedGalleryMixin, APIView):
         raw_pin = serializer.validated_data.get("pin") or ""
 
         if gallery._hashed_pin:
+            failures = cache.get(_pin_lock_cache_key(gallery.id), 0)
+            if failures >= settings.GALLERY_PIN_MAX_FAILED_ATTEMPTS:
+                raise Throttled(
+                    wait=settings.GALLERY_PIN_LOCKOUT_SECONDS,
+                    detail="Too many failed PIN attempts for this gallery.",
+                )
+
             if not raw_pin or not gallery.check_pin(raw_pin):
+                _register_failed_pin_attempt(gallery.id)
                 raise PermissionDenied("Invalid gallery PIN.")
+
+            cache.delete(_pin_lock_cache_key(gallery.id))
 
         session = GalleryAccessSession.objects.create(
             gallery=gallery,
@@ -253,13 +278,15 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
     def get(self, request, *args, **kwargs):
         self.enforce_gallery_scope(request)
         gallery = self.get_gallery()
+        access_session = self.get_access_session(request, gallery)
 
         allowed_visibility = [VisibilityChoices.PUBLIC]
-        if request.user.role == GalleryAccessRole.CLIENT:
+        if access_session.role == GalleryAccessRole.CLIENT:
             allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
 
         photo_queryset = (
             Photo.objects
+            .select_related("scene__event__workspace")
             .filter(
                 status="READY",
                 visibility__in=allowed_visibility,
@@ -359,6 +386,9 @@ class GalleryArchiveRequestView(PublishedGalleryMixin, APIView):
     def post(self, request, *args, **kwargs):
         self.enforce_gallery_scope(request)
         gallery = self.get_gallery()
+        self.get_access_session(request, gallery)
+        if not gallery.allow_downloads:
+            raise PermissionDenied("Downloads are disabled for this gallery.")
         now = timezone.now()
 
         existing = (
@@ -405,6 +435,9 @@ class GalleryArchiveStatusView(PublishedGalleryMixin, APIView):
     def get(self, request, *args, **kwargs):
         self.enforce_gallery_scope(request)
         gallery = self.get_gallery()
+        self.get_access_session(request, gallery)
+        if not gallery.allow_downloads:
+            raise PermissionDenied("Downloads are disabled for this gallery.")
         job = (
             gallery.archive_jobs
             .filter(archive_type=GalleryArchiveType.FULL)
@@ -445,6 +478,8 @@ class GalleryFavoritesArchiveRequestView(PublishedGalleryMixin, APIView):
         self.enforce_gallery_scope(request)
         gallery = self.get_gallery()
         access_session = self.get_access_session(request, gallery)
+        if not gallery.allow_downloads:
+            raise PermissionDenied("Downloads are disabled for this gallery.")
         now = timezone.now()
 
         has_favorites = FavoriteSelection.objects.filter(session=access_session).exists()
@@ -500,6 +535,8 @@ class GalleryFavoritesArchiveStatusView(PublishedGalleryMixin, APIView):
         self.enforce_gallery_scope(request)
         gallery = self.get_gallery()
         access_session = self.get_access_session(request, gallery)
+        if not gallery.allow_downloads:
+            raise PermissionDenied("Downloads are disabled for this gallery.")
         job = (
             gallery.archive_jobs
             .filter(

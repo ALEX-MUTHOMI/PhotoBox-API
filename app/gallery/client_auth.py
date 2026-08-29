@@ -1,3 +1,5 @@
+"""Gallery access sessions, magic links, and cookie-backed JWT helpers."""
+
 import hashlib
 from dataclasses import dataclass
 from datetime import timedelta
@@ -7,7 +9,7 @@ from django.conf import settings
 from django.core import signing
 from django.utils import timezone
 from rest_framework import authentication
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 
 
 COOKIE_NAME = 'gallery_access'
@@ -126,11 +128,11 @@ class GalleryCookieJWTAuthentication(authentication.BaseAuthentication):
 
 def set_gallery_access_cookie(response, token: str):
     max_age = _token_lifetime_seconds()
+    expires_at = timezone.now() + timedelta(seconds=max_age)
     response.set_cookie(
         key=_cookie_name(),
         value=token,
-        max_age=max_age,
-        expires=max_age,
+        expires=expires_at,
         secure=True,
         httponly=True,
         samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
@@ -149,11 +151,11 @@ def clear_gallery_access_cookie(response):
 def set_gallery_access_session_cookie(response, session_id: int):
     max_age = _token_lifetime_seconds()
     signed_value = encode_gallery_access_session_cookie(session_id)
+    expires_at = timezone.now() + timedelta(seconds=max_age)
     response.set_cookie(
         key=_session_cookie_name(),
         value=signed_value,
-        max_age=max_age,
-        expires=max_age,
+        expires=expires_at,
         secure=True,
         httponly=True,
         samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
@@ -190,3 +192,33 @@ def get_gallery_access_session_id(request) -> int | None:
         raise AuthenticationFailed('Invalid gallery session cookie payload.')
 
     return session_id
+
+
+def resolve_gallery_access_session(request, gallery):
+    """Resolve the live session behind a client JWT and re-authorise it."""
+    from gallery.models import ClientAllowlist, GalleryAccessRole, GalleryAccessSession
+
+    session_id = get_gallery_access_session_id(request)
+    if session_id is None:
+        raise PermissionDenied("Gallery session missing.")
+
+    session = (
+        GalleryAccessSession.objects
+        .filter(
+            id=session_id,
+            gallery=gallery,
+            email=normalize_gallery_email(getattr(request.user, "email", "")),
+            role=getattr(request.user, "role", ""),
+        )
+        .first()
+    )
+    if not session:
+        raise PermissionDenied("Gallery session invalid.")
+
+    if session.role == GalleryAccessRole.CLIENT and not ClientAllowlist.objects.filter(
+        gallery=gallery,
+        email=session.email,
+    ).exists():
+        raise PermissionDenied("Gallery access revoked.")
+
+    return session

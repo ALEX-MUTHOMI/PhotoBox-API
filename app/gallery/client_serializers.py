@@ -1,3 +1,5 @@
+"""Serializers for public gallery responses and client-facing payloads."""
+
 from rest_framework import serializers
 from django.utils.html import escape, strip_tags
 from urllib.parse import urlparse
@@ -107,6 +109,7 @@ class GalleryPublicSerializer(serializers.ModelSerializer):
             'color_theme',
             'slug',
             'expires_at',
+            'allow_downloads',
             'scenes',
         ]
 
@@ -150,6 +153,10 @@ class FavoriteSelectionWriteSerializer(serializers.Serializer):
 
 class FavoriteSelectionSerializer(serializers.ModelSerializer):
     photo_id = serializers.UUIDField(read_only=True)
+    notes = serializers.SerializerMethodField()
+
+    def get_notes(self, obj):
+        return safe_client_text(obj.notes)
 
     class Meta:
         model = FavoriteSelection
