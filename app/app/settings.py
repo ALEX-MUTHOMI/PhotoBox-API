@@ -118,6 +118,8 @@ if not _IS_TEST:
             or os.environ.get('CLOUDFLARE_TURNSTILE_SECRET_KEY')
         ):
             _missing.append('TURNSTILE_SECRET_KEY')
+        if not os.environ.get('FRONTEND_URL'):
+            _missing.append('FRONTEND_URL')
 
     if _missing:
         raise ImproperlyConfigured(
@@ -146,6 +148,9 @@ ALLOWED_HOSTS = [
 
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
+IP_HASH_SALT = os.environ.get('IP_HASH_SALT', '')
+LOG_SCRUBBER_SALT = os.environ.get('LOG_SCRUBBER_SALT', '')
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL    = 'core.User'
 SITE_ID            = 1
@@ -166,6 +171,10 @@ if not DEBUG:
     CSRF_COOKIE_SECURE             = True
     X_FRAME_OPTIONS                = 'DENY'
     SECURE_PROXY_SSL_HEADER        = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_REDIRECT_EXEMPT = [
+        r'^api/health-check/?$',
+        r'^health/?$',
+    ]
 
     if '*' in ALLOWED_HOSTS:
         raise ImproperlyConfigured("ALLOWED_HOSTS must not contain '*' when DEBUG=False.")
@@ -356,6 +365,7 @@ REST_FRAMEWORK = {
         'fast_lane_upload': '30/minute',
         'heavy_lane_ticket': '10/minute',
         'magic_link_send': '3/minute',
+        'magic_link_consume': '10/minute',
         'guest_access': '10/minute',
         'favorite_selection': '30/minute',
         'password_reset_request': '3/minute',  # nosec B105 - throttle scope label, not a secret.
@@ -384,7 +394,7 @@ SIMPLE_JWT = {
 GALLERY_ACCESS_COOKIE_NAME = os.environ.get('GALLERY_ACCESS_COOKIE_NAME', 'gallery_access')
 GALLERY_ACCESS_COOKIE_SAMESITE = os.environ.get('GALLERY_ACCESS_COOKIE_SAMESITE', 'Lax')
 GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS = int(
-    os.environ.get('GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS', 3600)
+    os.environ.get('GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS', 1800)
 )
 
 
@@ -457,6 +467,7 @@ CORS_ALLOW_HEADERS = [
 CLOUDFLARE_R2_ENDPOINT          = os.environ.get('CLOUDFLARE_R2_ENDPOINT', '')
 CLOUDFLARE_R2_BUCKET_NAME       = os.environ.get('CLOUDFLARE_R2_BUCKET_NAME', '')
 CLOUDFLARE_R2_DOMAIN            = os.environ.get('CLOUDFLARE_R2_DOMAIN', '')
+CLOUDFLARE_WORKER_SHARED_SECRET = os.environ.get('CLOUDFLARE_WORKER_SHARED_SECRET', '')
 CLOUDFLARE_ACCESS_KEY_ID        = os.environ.get('CLOUDFLARE_ACCESS_KEY_ID', '')
 CLOUDFLARE_SECRET_ACCESS_KEY    = os.environ.get('CLOUDFLARE_SECRET_ACCESS_KEY', '')
 CLOUDFLARE_WEBHOOK_SECRET       = os.environ.get('CLOUDFLARE_WEBHOOK_SECRET', '')
@@ -513,6 +524,66 @@ CELERY_ACCEPT_CONTENT    = ['json']
 CELERY_TASK_SERIALIZER   = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE          = 'UTC'
+CELERY_WORKER_MAX_TASKS_PER_CHILD = int(
+    os.environ.get('CELERY_WORKER_MAX_TASKS_PER_CHILD', 50)
+)
+
+# Beat schedule registry — Plans 02/04 register into their slots.
+from celery.schedules import crontab  # noqa: E402
+
+GALLERY_LIFECYCLE_BEAT_SCHEDULE = {
+    'gallery-expire-due-galleries': {
+        'task': 'gallery.retention.expire_due_galleries',
+        'schedule': crontab(hour=3, minute=0),
+        'options': {'queue': 'default', 'expires': 60 * 60 * 20},
+    },
+    'gallery-hard-delete-expired': {
+        'task': 'gallery.retention.hard_delete_expired_galleries',
+        'schedule': crontab(hour=4, minute=30),
+        'options': {'queue': 'default', 'expires': 60 * 60 * 20},
+    },
+}
+RETENTION_BEAT_SCHEDULE = {
+    'retention-purge-expired-archives': {
+        'task': 'gallery.retention.purge_expired_archives',
+        'schedule': crontab(minute=15),
+        'options': {'queue': 'default', 'expires': 60 * 50},
+    },
+    'retention-purge-expired-magic-links': {
+        'task': 'gallery.retention.purge_expired_magic_links',
+        'schedule': crontab(hour=2, minute=0),
+        'options': {'queue': 'default', 'expires': 60 * 60 * 20},
+    },
+    'retention-prune-billing-ledgers': {
+        'task': 'billing.retention.prune_billing_ledgers',
+        'schedule': crontab(hour=5, minute=0, day_of_week=0),
+        'options': {'queue': 'default', 'expires': 60 * 60 * 20},
+    },
+}
+HEAVY_LANE_LOCK_TIMEOUT_MS = int(os.environ.get('HEAVY_LANE_LOCK_TIMEOUT_MS', 3000))
+INGESTION_BEAT_SCHEDULE = {
+    'reap-abandoned-uploads': {
+        'task': 'ingestion.tasks.reap_abandoned_uploads',
+        'schedule': crontab(hour='*/6'),
+        'options': {'queue': 'default', 'expires': 60 * 60 * 5},
+    },
+}
+CLIENT_ACCESS_BEAT_SCHEDULE = {
+    'purge-expired-gallery-access-artifacts': {
+        'task': 'gallery.tasks.purge_expired_gallery_access_artifacts',
+        'schedule': crontab(hour=3, minute=0),
+        'options': {'queue': 'default', 'expires': 60 * 60 * 20},
+    },
+}
+
+CELERY_BEAT_SCHEDULE = {
+    **GALLERY_LIFECYCLE_BEAT_SCHEDULE,
+    **RETENTION_BEAT_SCHEDULE,
+    **INGESTION_BEAT_SCHEDULE,
+    **CLIENT_ACCESS_BEAT_SCHEDULE,
+}
+
+PHOTO_MAX_IMAGE_PIXELS = int(os.environ.get('PHOTO_MAX_IMAGE_PIXELS', 89_478_485))
 
 
 # ============================================================
@@ -526,6 +597,13 @@ GALLERY_TTL_DAYS = {
     'ENTERPRISE': 0,
 }
 GALLERY_ARCHIVE_TTL_HOURS = int(os.environ.get('GALLERY_ARCHIVE_TTL_HOURS', 24))
+GALLERY_PIN_MAX_FAILED_ATTEMPTS = int(os.environ.get('GALLERY_PIN_MAX_FAILED_ATTEMPTS', 10))
+GALLERY_PIN_LOCKOUT_SECONDS = int(os.environ.get('GALLERY_PIN_LOCKOUT_SECONDS', 900))
+GALLERY_MAGIC_LINK_MAX_LIVE = int(os.environ.get('GALLERY_MAGIC_LINK_MAX_LIVE', 5))
+GALLERY_SESSION_RETENTION_DAYS = int(os.environ.get('GALLERY_SESSION_RETENTION_DAYS', 30))
+TRUST_CLOUDFLARE_CLIENT_IP = os.environ.get('TRUST_CLOUDFLARE_CLIENT_IP', 'false').lower() in (
+    '1', 'true', 'yes',
+)
 CURRENT_TOS_VERSION = os.environ.get('CURRENT_TOS_VERSION', '2026-04')
 
 # GDPR: soft-delete on expiry, then hard-delete from R2 after this grace period.
@@ -601,7 +679,7 @@ if SENTRY_DSN:
 # ============================================================
 # 25. CUSTOM TEST RUNNER
 # ============================================================
-TEST_RUNNER = 'core.utils.test_runner.EnterpriseTestRunner'
+TEST_RUNNER = 'core.utils.enterprise_runner.EnterpriseTestRunner'
 
 
 # ============================================================
@@ -626,7 +704,7 @@ if _IS_TEST:
     # Keep test uploads entirely off the repository filesystem.
     # Django<4.1 has no built-in InMemoryStorage, so we wire in a tiny
     # process-local backend for FileField/ImageField saves during tests.
-    DEFAULT_FILE_STORAGE = 'core.utils.test_storage.InMemoryTestStorage'
+    DEFAULT_FILE_STORAGE = 'core.utils.inmemory_storage.InMemoryTestStorage'
 
     # Accepted test uploads stay in RAM instead of spilling to temp files.
     FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
@@ -647,6 +725,9 @@ if _IS_TEST:
     CLOUDFLARE_R2_DOMAIN             = os.environ.get('CLOUDFLARE_R2_DOMAIN',             'test-r2-domain.example.com')
     CLOUDFLARE_ACCESS_KEY_ID         = os.environ.get('CLOUDFLARE_ACCESS_KEY_ID',         'test-key-id')
     CLOUDFLARE_SECRET_ACCESS_KEY     = os.environ.get('CLOUDFLARE_SECRET_ACCESS_KEY',     'test-secret-key')
+    CLOUDFLARE_WORKER_SHARED_SECRET  = os.environ.get(
+        'CLOUDFLARE_WORKER_SHARED_SECRET', 'test-worker-shared-secret'
+    )
     CLOUDINARY_CLOUD_NAME            = os.environ.get('CLOUDINARY_CLOUD_NAME',            'test-cloud')
     LEMON_SQUEEZY_API_KEY            = os.environ.get('LEMON_SQUEEZY_API_KEY',            'test-ls-api-key')
     LEMON_SQUEEZY_STORE_ID           = os.environ.get('LEMON_SQUEEZY_STORE_ID',           '1')

@@ -17,8 +17,9 @@ app = Celery('app')
 # 3. Pull Celery config from Django settings, using the CELERY_ namespace prefix
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
-# 4. Autodiscover tasks from all installed apps that define tasks.py
+# 4. Autodiscover tasks from all installed apps.
 app.autodiscover_tasks()
+app.autodiscover_tasks(['gallery.retention', 'billing.retention'], force=True)
 
 @app.task(bind=True, ignore_result=True)
 def debug_task(self):
