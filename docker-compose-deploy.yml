@@ -57,6 +57,12 @@ services:
       - SENTRY_ENVIRONMENT=production
       - DEBUG=0
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
+      - TURNSTILE_SECRET_KEY=${TURNSTILE_SECRET_KEY}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - IP_HASH_SALT=${IP_HASH_SALT}
+      - LOG_SCRUBBER_SALT=${LOG_SCRUBBER_SALT}
     depends_on:
       - db
       - redis
@@ -222,9 +228,11 @@ services:
     depends_on:
       - app
     ports:
-      # HTTPS only — HTTP is redirected to HTTPS in nginx config
-      - "443:443"
-      - "80:80"
+      - "${PROXY_PORT:-8000}:${LISTEN_PORT:-8000}"
+    environment:
+      - LISTEN_PORT=8000
+      - APP_HOST=app
+      - APP_PORT=8000
     volumes:
       - static-data:/vol/static
     networks:
