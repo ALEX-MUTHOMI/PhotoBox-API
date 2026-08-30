@@ -33,9 +33,20 @@ x-app-build: &app-build
     APP_UID: ${APP_UID:-1000}
     APP_GID: ${APP_GID:-1000}
 
+x-repo-mounts: &repo-mounts
+  - ./app:/app
+  - ./tests:/repo-tests:ro
+  - ./pyproject.toml:/repo-config/pyproject.toml:ro
+  - ./docker-compose.yml:/repo-root/docker-compose.yml:ro
+  - ./docker-compose-deploy.yml:/repo-root/docker-compose-deploy.yml:ro
+  - ./proxy:/repo-root/proxy:ro
+  - ./.github:/repo-root/.github:ro
+  - ./scripts:/scripts:ro
+  - dev-static-data:/vol/web
+
 services:
   db:
-    image: postgres:13-alpine
+    image: postgres:16-alpine
     volumes:
       - dev-db-data:/var/lib/postgresql/data
     environment:
@@ -67,11 +78,7 @@ services:
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     ports:
       - "${APP_PORT:-8001}:8000"
-    volumes:
-      - ./app:/app
-      - ./tests:/repo-tests:ro
-      - ./pyproject.toml:/repo-config/pyproject.toml:ro
-      - dev-static-data:/vol/web
+    volumes: *repo-mounts
     command: >
       sh -c "python manage.py wait_for_db &&
              python manage.py migrate &&
@@ -95,11 +102,7 @@ services:
     build: *app-build
     working_dir: /app
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
-    volumes:
-      - ./app:/app
-      - ./tests:/repo-tests:ro
-      - ./pyproject.toml:/repo-config/pyproject.toml:ro
-      - dev-static-data:/vol/web
+    volumes: *repo-mounts
     command: >
       sh -c "python manage.py wait_for_db &&
              python manage.py migrate &&
@@ -125,11 +128,7 @@ services:
     build: *app-build
     working_dir: /app
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
-    volumes:
-      - ./app:/app
-      - ./tests:/repo-tests:ro
-      - ./pyproject.toml:/repo-config/pyproject.toml:ro
-      - dev-static-data:/vol/web
+    volumes: *repo-mounts
     entrypoint: ["/scripts/run-tests.sh"]
     command: ["unit"]
     environment:
