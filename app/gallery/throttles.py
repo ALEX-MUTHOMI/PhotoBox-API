@@ -1,7 +1,9 @@
 """
 gallery/throttles.py
 """
-from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
+from rest_framework.throttling import BaseThrottle, SimpleRateThrottle, UserRateThrottle
+
+from core.rate_limiter import consume_sliding_window
 
 
 class FastLaneUploadThrottle(UserRateThrottle):
@@ -49,3 +51,33 @@ class FavoriteSelectionThrottle(SimpleRateThrottle):
             'scope': self.scope,
             'ident': f"{ident}:{gallery_id}:{email}:{role}",
         }
+
+
+class RedisSlidingWindowThrottle(BaseThrottle):
+    """DRF throttle backed by the atomic Redis sliding window."""
+    scope: str = ""
+    limit: int = 10
+    window_seconds: int = 300
+    fail_open: bool = False
+
+    def get_ident_suffix(self, request, view) -> str:
+        return self.get_ident(request)
+
+    def allow_request(self, request, view) -> bool:
+        decision = consume_sliding_window(
+            f"{self.scope}:{self.get_ident_suffix(request, view)}",
+            limit=self.limit,
+            window_seconds=self.window_seconds,
+            fail_open=self.fail_open,
+        )
+        self._retry_after = decision.retry_after_seconds
+        return decision.allowed
+
+    def wait(self):
+        return getattr(self, "_retry_after", float(self.window_seconds))
+
+
+class MagicLinkConsumeThrottle(RedisSlidingWindowThrottle):
+    scope = "magic_link_consume"
+    limit = 10
+    window_seconds = 300
