@@ -1,3 +1,5 @@
+"""Legacy URL aliases that forward to ingestion webhook handlers."""
+
 from django.urls import path
 from .views import CloudflareWebhookView
 

@@ -28,7 +28,7 @@ description: Completion signals, idempotency, and webhook-specific hardening pat
 **Endpoint:** `POST /api/v1/webhooks/cloudflare/r2/`  
 **URL name:** `r2-webhook-ingress`
 
-This endpoint follows the same verification posture but supports older integration paths that transition assets to `UPLOADED`.
+This endpoint follows the same verification posture as the ingestion webhook and exists for older URL aliases that pointed at the same R2 completion handler.
 
 ## Operational principles
 
