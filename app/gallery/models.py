@@ -1,3 +1,5 @@
+"""Gallery domain models: events, scenes, photos, and client-access artifacts."""
+
 import uuid
 from urllib.parse import urlparse
 from django.conf import settings
@@ -70,6 +72,10 @@ class Event(models.Model):
     # Lifecycle & Security Flags
     is_published = models.BooleanField(default=False)
     expires_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    allow_downloads = models.BooleanField(
+        default=True,
+        help_text="When False, clients and guests may view but not download or export.",
+    )
 
     # The PIN is never accessible in plain text.
     _hashed_pin = models.CharField(max_length=128, blank=True, null=True, db_column='hashed_pin')
@@ -97,12 +103,14 @@ class Event(models.Model):
         """Hashes the PIN using Django's secure cryptographic hasher."""
         if raw_pin:
             self._hashed_pin = make_password(str(raw_pin))
-            self.save(update_fields=['_hashed_pin'])
+        else:
+            self._hashed_pin = ''
+        self.save(update_fields=['_hashed_pin'])
 
     def check_pin(self, raw_pin):
         """Verifies the PIN in constant time to prevent timing attacks."""
         if not self._hashed_pin:
-            return True
+            return False
         return check_password(str(raw_pin), self._hashed_pin)
 
     def __str__(self):
@@ -197,24 +205,20 @@ class Photo(models.Model):
             models.Index(fields=['scene', 'status']),       # New EDA frontend polling query
         ]
 
+    def _watermark_is_required(self) -> bool:
+        """True when the owning workspace brands its deliverables."""
+        return bool(self.scene.event.workspace.watermark_logo)
+
     @property
     def delivery_url(self):
         """
         PHASE 3: Cloudinary Fetch Proxy URL.
-
-        Cloudinary acts as a transform + CDN cache layer ONLY.
-        It fetches the file from R2 on first request, transcodes to WebP,
-        applies quality optimisation, and caches at the edge.
-        No SDK upload ever occurs — Cloudinary never stores the original.
-
-        URL format:
-          https://res.cloudinary.com/{cloud_name}/image/fetch/q_auto,f_webp/{r2_public_url}
-
-        Falls back to optimized_url for legacy Cloudinary SDK-uploaded photos
-        (backward compatibility during migration).
         """
         cloud_name = getattr(settings, 'CLOUDINARY_CLOUD_NAME', '')
         r2_domain = getattr(settings, 'CLOUDFLARE_R2_DOMAIN', '').rstrip('/')
+
+        if not self.web_r2_object_key and self._watermark_is_required():
+            return None
 
         delivery_key = self.web_r2_object_key or self.r2_object_key
         if delivery_key and cloud_name and r2_domain:

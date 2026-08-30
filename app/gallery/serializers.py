@@ -22,7 +22,7 @@ class EventSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'event_type', 'event_date', 'cover_image_url',
             'cover_photo', 'typography_theme', 'color_theme',
-            'slug', 'is_published', 'expires_at', 'gallery_pin', 'created_at',
+            'slug', 'is_published', 'expires_at', 'allow_downloads', 'gallery_pin', 'created_at',
             'client_email', 'client_name',
         ]
         read_only_fields = ['id', 'created_at', 'slug']
