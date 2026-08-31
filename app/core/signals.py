@@ -1,3 +1,5 @@
+"""Signal handlers for workspace lifecycle and photographer asset cleanup."""
+
 from django.db import transaction
 from django.db.models.signals import post_delete, pre_delete
 from django.dispatch import receiver

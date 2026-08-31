@@ -1,3 +1,5 @@
+"""Core Celery tasks shared across apps (for example GDPR asset purge)."""
+
 import logging
 from typing import Iterable
 
