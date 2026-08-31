@@ -23,8 +23,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.utils import OperationalError
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -32,6 +33,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.quota import release_workspace_bytes
 from core.security import (
     verify_webhook_signature as verify_signed_webhook_signature,
     verify_webhook_timestamp as validate_signed_webhook_timestamp,
@@ -40,6 +42,7 @@ from gallery.models import MediaAsset, Scene, Workspace
 from gallery.storage import (
     R2KeyValidationError,
     generate_r2_presigned_post,
+    r2_object_size,
     validate_r2_key,
 )
 from gallery.tasks import generate_photo_web_derivative
@@ -188,10 +191,10 @@ def _phase1_prepare_assets(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        max_bytes = (
-            MAX_IMAGE_SIZE_BYTES if media_type == "IMAGE" else MAX_VIDEO_SIZE_BYTES
-        )
+        max_bytes = file_size
         mime_prefix = "image/" if media_type == "IMAGE" else "video/"
+        from gallery.storage import infer_content_type
+        content_type = infer_content_type(sanitized_name)
 
         # Pure HMAC computation — no network call, safe outside DB transaction
         presigned = generate_r2_presigned_post(
@@ -199,12 +202,12 @@ def _phase1_prepare_assets(
             max_size_bytes=max_bytes,
             expires_in=_UPLOAD_TICKET_TTL,
             extra_conditions=[
-                ["starts-with", "$Content-Type", mime_prefix],
+                ["eq", "$Content-Type", content_type],
             ],
             extra_fields={
                 "x-amz-meta-media-type": media_type,
                 "x-amz-meta-client-ref": str(client_ref or ""),
-                "Content-Type": f"{mime_prefix}*",
+                "Content-Type": content_type,
             },
         )
 
@@ -261,13 +264,19 @@ def _phase2_commit(
     """
     try:
         with transaction.atomic():
+            lock_timeout_ms = int(
+                getattr(settings, "HEAVY_LANE_LOCK_TIMEOUT_MS", 3000)
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('lock_timeout', %s, true)",
+                    [str(lock_timeout_ms)],
+                )
 
-            # Acquire row lock — nowait=True raises OperationalError immediately
-            # on contention rather than queuing. We return 409 so the client
-            # retries with backoff rather than stacking up waiting connections.
+            # Bounded wait — lock_timeout converts blocking to OperationalError → 409.
             workspace = (
                 Workspace.objects
-                .select_for_update(nowait=True)
+                .select_for_update()
                 .get(user=user)
             )
 
@@ -290,11 +299,11 @@ def _phase2_commit(
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # Quota check uses fresh workspace data from the locked row.
-            # Phase 1's total_incoming_bytes is trusted — it was computed
-            # from serialiser-validated file sizes, not from raw user input.
-            projected_usage = workspace.storage_used_bytes + total_incoming_bytes
-            if projected_usage > workspace.storage_limit_bytes:
+            try:
+                from core.quota import QuotaExceededError, reserve_workspace_bytes
+
+                reserve_workspace_bytes(workspace.id, total_incoming_bytes)
+            except QuotaExceededError:
                 return None, Response(
                     {"detail": "Storage quota exceeded. Please upgrade your plan."},
                     status=status.HTTP_402_PAYMENT_REQUIRED,
@@ -313,10 +322,6 @@ def _phase2_commit(
                 )
                 for a in prepared_assets
             ]
-
-            # Atomic quota deduction (inside lock — cannot race)
-            workspace.storage_used_bytes = projected_usage
-            workspace.save(update_fields=["storage_used_bytes"])
 
             # O(1) bulk insert — one SQL statement regardless of batch size
             MediaAsset.objects.bulk_create(db_assets)
@@ -672,26 +677,72 @@ class R2WebhookView(APIView):
             return Response({"status": "ignored"}, status=status.HTTP_200_OK)
 
         # ------------------------------------------------------------------
-        # Step 11: Atomic idempotency + size check + state transition
+        # Step 11: Authoritative size from R2 (before any DB row lock)
         #
-        # All three operations in ONE select_for_update transaction.
-        # Eliminates the TOCTOU race between idempotency check and save.
-        #
-        # Size policy:
-        #   absent / None     → allow (Cloudflare may omit this field)
-        #   0                 → quarantine (zero-byte upload is suspicious)
-        #   > declared size   → quarantine (possible file substitution)
-        #   <= declared size  → allow
+        # Payload "size" is telemetry only — never gate READY on it.
         # ------------------------------------------------------------------
+        declared_size = asset.file_size_bytes or 0
+        try:
+            authoritative_size = r2_object_size(r2_object_key)
+        except (ClientError, BotoCoreError) as exc:
+            logger.error(
+                "[R2-WEBHOOK] R2 head_object failed — fail closed. key=%r err=%s",
+                r2_object_key,
+                exc,
+            )
+            return Response(
+                {"detail": "Object store unavailable."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        if reported_size is not None:
+            try:
+                reported_int = int(reported_size)
+                if (
+                    authoritative_size is not None
+                    and reported_int != authoritative_size
+                ):
+                    logger.warning(
+                        "[R2-WEBHOOK] Payload size disagrees with R2 HEAD. "
+                        "key=%r payload=%d head=%d",
+                        r2_object_key,
+                        reported_int,
+                        authoritative_size,
+                    )
+            except (ValueError, TypeError):
+                logger.warning(
+                    "[R2-WEBHOOK] Unparseable payload size field. key=%r size=%r",
+                    r2_object_key,
+                    reported_size,
+                )
+
+        size_is_anomaly = (
+            authoritative_size is None
+            or authoritative_size == 0
+            or authoritative_size > declared_size
+        )
+
+        # ------------------------------------------------------------------
+        # Step 12: Atomic idempotency + state transition
+        #
+        # Size policy uses R2 HEAD only:
+        #   missing / zero / oversize → QUARANTINED (200, terminal)
+        #   undersize                 → READY + refund delta (winner only)
+        #   exact                     → READY
+        # ------------------------------------------------------------------
+        ready_asset_id: Optional[str] = None
+        ready_media_type: Optional[str] = None
+        undersize_refund = 0
+
         try:
             with transaction.atomic():
                 locked = (
                     MediaAsset.objects
+                    .select_related("scene__event__workspace")
                     .select_for_update()
                     .get(id=asset.id)
                 )
 
-                # Idempotency — inside lock, safe from race
                 if locked.status == "READY":
                     logger.info(
                         "[R2-WEBHOOK] Already READY — idempotent skip. key=%r",
@@ -702,58 +753,59 @@ class R2WebhookView(APIView):
                         status=status.HTTP_200_OK,
                     )
 
-                # Size mismatch quarantine
-                if reported_size is not None:
-                    try:
-                        actual_size = int(reported_size)
-                        declared = locked.file_size_bytes or 0
+                if size_is_anomaly:
+                    logger.error(
+                        "[R2-WEBHOOK] Size anomaly from R2 HEAD. key=%r "
+                        "declared=%d actual=%r. QUARANTINING.",
+                        r2_object_key,
+                        declared_size,
+                        authoritative_size,
+                    )
+                    MediaAsset.objects.filter(id=locked.id).update(
+                        status="QUARANTINED"
+                    )
+                    return Response(
+                        {"status": "quarantined"},
+                        status=status.HTTP_200_OK,
+                    )
 
-                        if actual_size == 0 or actual_size > declared:
-                            logger.error(
-                                "[R2-WEBHOOK] Size anomaly. key=%r "
-                                "declared=%d actual=%d. QUARANTINING.",
-                                r2_object_key,
-                                declared,
-                                actual_size,
-                            )
-                            MediaAsset.objects.filter(
-                                id=locked.id
-                            ).update(status="QUARANTINED")
-                            return Response(
-                                {"status": "quarantined"},
-                                status=status.HTTP_200_OK,
-                            )
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            "[R2-WEBHOOK] Unparseable size field. "
-                            "key=%r size=%r",
-                            r2_object_key,
-                            reported_size,
-                        )
+                update_kwargs: Dict[str, Any] = {
+                    "status": "READY",
+                    "is_processed": True,
+                }
+                if (
+                    authoritative_size is not None
+                    and authoritative_size < declared_size
+                ):
+                    update_kwargs["file_size_bytes"] = authoritative_size
+                    undersize_refund = declared_size - authoritative_size
 
-                # Atomic PENDING → READY
-                # .update() on the locked queryset is one SQL statement.
-                # The status="PENDING" guard prevents overwriting QUARANTINED.
                 updated = MediaAsset.objects.filter(
                     id=locked.id,
                     status="PENDING",
-                ).update(
-                    status="READY",
-                    is_processed=True,
-                )
+                ).update(**update_kwargs)
 
                 if updated == 0:
-                    # Status changed between lock acquisition and update
-                    # (extremely rare — another thread beat us to it)
                     logger.warning(
                         "[R2-WEBHOOK] Update had no effect — status changed "
                         "concurrently. key=%r",
                         r2_object_key,
                     )
+                    return Response(
+                        {"status": "processing"},
+                        status=status.HTTP_200_OK,
+                    )
+
+                if undersize_refund > 0:
+                    release_workspace_bytes(
+                        locked.scene.event.workspace_id,
+                        undersize_refund,
+                    )
+
+                ready_asset_id = str(locked.id)
+                ready_media_type = locked.media_type
 
         except OperationalError:
-            # Lock contention: Fast Lane task or another webhook processing now.
-            # Return 200 — the concurrent processor will complete the transition.
             logger.warning(
                 "[R2-WEBHOOK] Lock contention — concurrent processor detected. "
                 "key=%r Returning 200.",
@@ -764,7 +816,7 @@ class R2WebhookView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        if asset.media_type == "IMAGE":
-            generate_photo_web_derivative.delay(str(asset.id))
+        if ready_asset_id and ready_media_type == "IMAGE":
+            generate_photo_web_derivative.delay(ready_asset_id)
         logger.info("[R2-WEBHOOK] ✅ Asset marked READY. key=%r", r2_object_key)
         return Response({"status": "success"}, status=status.HTTP_200_OK)

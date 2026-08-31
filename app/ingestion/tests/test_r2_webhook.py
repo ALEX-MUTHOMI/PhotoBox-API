@@ -6,10 +6,11 @@ SECURITY CONTRACTS BEING TESTED:
   2. 5-minute replay attack window.
   3. Idempotency — duplicate webhooks do not corrupt asset state.
   4. Ghost key tolerance — unknown R2 keys return 200 (not 404) to halt retries.
-  5. Size mismatch quarantine — oversized actual upload triggers QUARANTINED.
+  5. Size mismatch quarantine — oversized R2 object triggers QUARANTINED.
   6. Missing/invalid signature → strict 403.
   7. Content-Length guard against OOM payloads.
   8. Only PutObject actions flip assets to READY.
+  9. Authoritative size from R2 head_object — payload size is telemetry only.
 """
 import json
 import hmac
@@ -17,6 +18,7 @@ import hashlib
 import time
 from unittest.mock import patch
 
+from botocore.exceptions import ClientError
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -29,7 +31,9 @@ from gallery.models import Event, Scene, Photo
 User = get_user_model()
 
 WEBHOOK_URL = reverse('r2-ingestion-webhook')
+ALIAS_WEBHOOK_URL = reverse('r2-webhook-ingress')
 TEST_SECRET = 'test-webhook-secret-do-not-use-in-prod'
+HEAD_PATCH = 'ingestion.views.r2_object_size'
 
 
 def _make_payload(**kwargs) -> dict:
@@ -106,7 +110,8 @@ class R2WebhookHappyPathTests(TestCase):
         )
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    def test_valid_webhook_transitions_asset_to_ready(self):
+    @patch(HEAD_PATCH, return_value=1000)
+    def test_valid_webhook_transitions_asset_to_ready(self, _mock_head):
         """
         HAPPY PATH: A valid signed PutObject webhook must flip the asset
         from PENDING to READY and set is_processed=True.
@@ -122,17 +127,84 @@ class R2WebhookHappyPathTests(TestCase):
         self.assertTrue(self.asset.is_processed)
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    def test_putobject_without_size_field_still_transitions_ready(self):
+    @patch(HEAD_PATCH, return_value=1000)
+    def test_putobject_without_size_field_requires_r2_head(self, mock_head):
         """
-        EDGE CASE: If Cloudflare omits the 'size' field, we must still process
-        the webhook (no size mismatch check without declared size).
+        When Cloudflare omits payload size, READY still requires a successful
+        R2 head_object reconciliation.
         """
         payload = {'action': 'PutObject', 'r2_object_key': self.asset.r2_object_key}
         res = _post_webhook(self.client, payload)
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
+        mock_head.assert_called_once_with(self.asset.r2_object_key)
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, 'READY')
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch(HEAD_PATCH, return_value=1024)
+    def test_smaller_r2_object_still_transitions_to_ready(self, _mock_head):
+        """Authoritative size comes from R2 HEAD — a smaller object must not block READY."""
+        self.asset.file_size_bytes = 5000
+        self.asset.save(update_fields=['file_size_bytes'])
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1024)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'success')
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'READY')
+        self.assertTrue(self.asset.is_processed)
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch("ingestion.views.generate_photo_web_derivative.delay")
+    @patch(HEAD_PATCH, return_value=1024)
+    def test_putobject_enqueues_derivative_task(self, _mock_head, mock_delay):
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1024)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        mock_delay.assert_called_once_with(str(self.asset.id))
+
+
+class R2WebhookAliasRouteTests(TestCase):
+    """Smoke test: legacy ingress URL name still resolves to the same webhook handler."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email='alias@example.com', password='pass')
+        self.workspace = Workspace.objects.create(user=self.user, business_name='Alias Studio')
+        self.event = Event.objects.create(workspace=self.workspace, title='Gig', slug='alias-gig')
+        self.scene = Scene.objects.create(event=self.event, title='Stage')
+        self.asset = Photo.objects.create(
+            scene=self.scene,
+            original_filename='alias.jpg',
+            file_size_bytes=50000,
+            r2_object_key='raw/tenant_alias/scene/alias.jpg',
+            status='PENDING',
+            is_processed=False,
+        )
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch(HEAD_PATCH, return_value=50000)
+    def test_valid_signature_via_ingress_alias(self, _mock_head):
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=50000)
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode('utf-8')
+        ts = int(time.time())
+        sig = _sign(ts, payload_bytes)
+
+        res = self.client.post(
+            ALIAS_WEBHOOK_URL,
+            data=payload_bytes,
+            content_type='application/json',
+            HTTP_X_CLOUDFLARE_SIGNATURE=sig,
+            HTTP_WEBHOOK_TIMESTAMP=str(ts),
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'READY')
+        self.assertTrue(self.asset.is_processed)
 
 
 class R2WebhookIdempotencyTests(TestCase):
@@ -155,7 +227,8 @@ class R2WebhookIdempotencyTests(TestCase):
         )
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    def test_duplicate_webhook_returns_already_ready(self):
+    @patch(HEAD_PATCH, return_value=2048)
+    def test_duplicate_webhook_returns_already_ready(self, _mock_head):
         """
         IDEMPOTENCY: If the asset is already READY, the webhook must return
         'already_ready' and not flip is_processed back to False.
@@ -173,7 +246,10 @@ class R2WebhookIdempotencyTests(TestCase):
 
     @patch("ingestion.views.generate_photo_web_derivative.delay")
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    def test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative(self, mock_delay):
+    @patch(HEAD_PATCH, return_value=2048)
+    def test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative(
+        self, _mock_head, mock_delay
+    ):
         """
         IDEMPOTENCY: Replayed object-created events for an already READY asset
         must not fan out duplicate derivative tasks.
@@ -262,6 +338,30 @@ class R2WebhookSecurityTests(TestCase):
         self.assertEqual(self.asset.status, "PENDING")
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    def test_payload_tampering_rejection(self):
+        """SECURITY: HMAC binds timestamp + raw body — tampering invalidates the signature."""
+        original_payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=5000)
+        payload_bytes = json.dumps(original_payload, separators=(",", ":")).encode('utf-8')
+        ts = int(time.time())
+        sig = _sign(ts, payload_bytes)
+
+        tampered_payload = original_payload.copy()
+        tampered_payload['size'] = 999999
+        tampered_bytes = json.dumps(tampered_payload, separators=(",", ":")).encode('utf-8')
+
+        res = self.client.post(
+            WEBHOOK_URL,
+            data=tampered_bytes,
+            content_type='application/json',
+            HTTP_X_CLOUDFLARE_SIGNATURE=sig,
+            HTTP_WEBHOOK_TIMESTAMP=str(ts),
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'PENDING')
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
     def test_wrong_signature_returns_403(self):
         """SECURITY (Forgery): A webhook signed with the wrong secret → 403."""
         payload = _make_payload(r2_object_key=self.asset.r2_object_key)
@@ -292,7 +392,8 @@ class R2WebhookSecurityTests(TestCase):
         self.assertEqual(self.asset.status, 'PENDING', "FATAL: Replayed webhook mutated asset state!")
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    def test_fresh_timestamp_within_window_accepted(self):
+    @patch(HEAD_PATCH, return_value=5000)
+    def test_fresh_timestamp_within_window_accepted(self, _mock_head):
         """
         SECURITY (Replay Window): A valid webhook with a timestamp from 2 minutes ago
         must be accepted (within the 5-minute window).
@@ -318,13 +419,12 @@ class R2WebhookSecurityTests(TestCase):
         self.assertEqual(res.data['status'], 'ignored')
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    def test_size_mismatch_quarantines_asset(self):
+    @patch(HEAD_PATCH, return_value=99999)
+    def test_size_mismatch_quarantines_asset(self, _mock_head):
         """
         SECURITY (Size Mismatch / File Substitution Attack):
-        If the actual uploaded file size exceeds the declared size in the manifest,
-        the user may have substituted a different file. Asset must be QUARANTINED.
+        If the R2 object is larger than the declared manifest size, quarantine.
         """
-        # actual size (99999) is larger than declared file_size_bytes (5000)
         payload = _make_payload(
             r2_object_key=self.asset.r2_object_key,
             size=99999,
@@ -336,8 +436,34 @@ class R2WebhookSecurityTests(TestCase):
 
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, 'QUARANTINED')
-        # is_processed must remain False — quarantined assets are not ready
         self.assertFalse(self.asset.is_processed)
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch(HEAD_PATCH)
+    def test_r2_head_failure_returns_503(self, mock_head):
+        """Fail closed when R2 is unreachable — Cloudflare may retry."""
+        mock_head.side_effect = ClientError(
+            {"Error": {"Code": "503", "Message": "slow down"}},
+            "HeadObject",
+        )
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'PENDING')
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch(HEAD_PATCH, return_value=None)
+    def test_missing_r2_object_quarantines_asset(self, _mock_head):
+        """Phantom upload: DB row exists but R2 object does not."""
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'quarantined')
+        self.asset.refresh_from_db()
+        self.assertEqual(self.asset.status, 'QUARANTINED')
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
     def test_non_putobject_action_silently_ignored(self):
@@ -384,3 +510,37 @@ class R2WebhookSecurityTests(TestCase):
             res = _post_webhook(self.client, payload, secret='')
 
         self.assertEqual(res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class R2WebhookLostTransitionTests(TestCase):
+    """Concurrent transition losers must not enqueue duplicate derivative work."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email='race@example.com', password='pass')
+        self.workspace = Workspace.objects.create(user=self.user, business_name='Race Studio')
+        self.event = Event.objects.create(workspace=self.workspace, title='Gig', slug='race-gig')
+        self.scene = Scene.objects.create(event=self.event, title='Stage')
+        self.asset = Photo.objects.create(
+            scene=self.scene,
+            original_filename='race.jpg',
+            file_size_bytes=1024,
+            r2_object_key='raw/tenant_race/scene/race.jpg',
+            status='PENDING',
+            is_processed=False,
+            media_type='IMAGE',
+        )
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch("ingestion.views.generate_photo_web_derivative.delay")
+    @patch(HEAD_PATCH, return_value=1024)
+    def test_lost_transition_does_not_enqueue_derivative(self, _mock_head, mock_delay):
+        """Another worker already moved the row out of PENDING."""
+        self.asset.status = 'PROCESSING'
+        self.asset.save(update_fields=['status'])
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'processing')
+        mock_delay.assert_not_called()

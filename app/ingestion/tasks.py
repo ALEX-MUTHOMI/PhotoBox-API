@@ -1,3 +1,5 @@
+"""Celery maintenance tasks for abandoned heavy-lane uploads."""
+
 import logging
 from typing import Dict, Any
 from celery import shared_task
@@ -77,11 +79,8 @@ def reap_abandoned_uploads(self) -> Dict[str, Any]:
 
                 refund = locked_asset.file_size_bytes or 0
                 if refund > 0:
-                    # ATOMIC QUOTA REFUND: Delegates math to Postgres. 
-                    # `Greatest(0, ...)` ensures unexpected math never drops quota below 0.
-                    Workspace.objects.filter(id=workspace.id).update(
-                        storage_used_bytes=Greatest(0, F("storage_used_bytes") - refund)
-                    )
+                    from core.quota import release_workspace_bytes
+                    release_workspace_bytes(workspace.id, refund)
 
                 # Preserve the row for forensics and make the refund idempotent:
                 # only PENDING assets are ever reaped, so once marked FAILED the

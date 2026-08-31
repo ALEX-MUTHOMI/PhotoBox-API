@@ -1,5 +1,6 @@
 import io
 import os
+from unittest.mock import patch
 
 import django
 import pytest
@@ -19,6 +20,40 @@ def clear_shared_cache():
     cache.clear()
     yield
     cache.clear()
+
+
+_WEBHOOK_TEST_MARKERS = (
+    "webhook",
+    "r2_webhook",
+    "cloudflare",
+    "ingestion/tests/test_r2_webhook.py",
+    "ingestion/tests/test_security.py",
+    "gallery/tests/test_asset_hardening.py",
+    "gallery/tests/test_watermark_engine.py",
+)
+
+
+@pytest.fixture(autouse=True)
+def mock_r2_object_size_for_webhook_tests(request):
+    """Webhook tests reconcile size via R2 HEAD — stub it unless a test patches explicitly."""
+    nodeid = request.node.nodeid
+    if "mismatch" in request.node.name:
+        yield
+        return
+    if not any(marker in nodeid for marker in _WEBHOOK_TEST_MARKERS):
+        yield
+        return
+
+    from gallery.models import Photo
+
+    def _head_size(key):
+        photo = Photo.objects.filter(r2_object_key=key).first()
+        if photo is not None:
+            return photo.file_size_bytes
+        return 1024
+
+    with patch("ingestion.views.r2_object_size", side_effect=_head_size) as mock_head:
+        yield mock_head
 
 
 @pytest.fixture

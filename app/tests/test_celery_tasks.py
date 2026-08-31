@@ -125,6 +125,26 @@ class TestProcessFastLaneAsset:
         workspace.refresh_from_db()
         assert workspace.storage_used_bytes == 512
 
+    def test_task_refund_clamps_storage_at_zero(self, r2_client_stub):
+        photo = PhotoFactory(
+            r2_object_key=f"fast-lane/tenant_1/{uuid.uuid4()}/overshoot.jpg",
+            file_size_bytes=500,
+        )
+        workspace = photo.scene.event.workspace
+        workspace.storage_used_bytes = 100
+        workspace.save(update_fields=["storage_used_bytes"])
+
+        r2_client_stub.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}},
+            "HeadObject",
+        )
+
+        result = process_fast_lane_asset.apply(args=[str(photo.pk)])
+
+        assert result.successful()
+        workspace.refresh_from_db()
+        assert workspace.storage_used_bytes == 0
+
     def test_task_marks_failed_after_retry_budget_is_exhausted(self, r2_client_stub):
         photo = PhotoFactory(r2_object_key=f"fast-lane/tenant_1/{uuid.uuid4()}/retry.jpg")
         r2_client_stub.head_object.side_effect = OSError("ssl handshake failure")

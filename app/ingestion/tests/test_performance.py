@@ -227,15 +227,13 @@ class IngestionPerformanceAndScaleTests(TransactionTestCase):
     # slow request can hold a DB connection open, starving the connection pool
     # and causing a de-facto DoS against all concurrent users of the workspace.
     # -----------------------------------------------------------------------
+    @override_settings(HEAVY_LANE_LOCK_TIMEOUT_MS=250)
     @patch('ingestion.views.generate_r2_presigned_post')
     def test_db_lock_contention_survival(self, mock_get_r2):
         """
-        THE THREAT: A slow external call (boto3/Cloudflare) holds a
-        SELECT FOR UPDATE on the workspace row.  A second in-flight upload
-        from the same workspace must get 409 Conflict immediately — never
-        block, never return 500, never exhaust the connection pool.
-
-        Proves select_for_update(nowait=True) + OperationalError → 409.
+        THE THREAT: A slow external call holds a SELECT FOR UPDATE on the
+        workspace row. A second in-flight upload must get 409 Conflict after
+        lock_timeout — never block indefinitely or return 500.
         """
         mock_client = MagicMock()
         mock_client.generate_presigned_post.return_value = _PRESIGNED_POST_RESPONSE
@@ -300,8 +298,7 @@ class IngestionPerformanceAndScaleTests(TransactionTestCase):
                 res.status_code,
                 status.HTTP_409_CONFLICT,
                 f'Expected 409 Conflict under lock contention, got {res.status_code}. '
-                'Ensure the view calls select_for_update(nowait=True) and '
-                'catches django.db.OperationalError to return HTTP 409.',
+                'Ensure the view sets lock_timeout and catches OperationalError → 409.',
             )
 
             # Response body must give the client enough context to retry.
