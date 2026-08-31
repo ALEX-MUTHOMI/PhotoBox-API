@@ -258,10 +258,15 @@ def generate_r2_presigned_post(
 
     try:
         client = get_r2_client()
+        fields = dict(extra_fields or {})
+        conditions = [["content-length-range", 1, max_size_bytes]] + (extra_conditions or [])
+        for key, value in fields.items():
+            conditions.append(["eq", f"${key}", value])
         result = client.generate_presigned_post(
             Bucket=bucket,
             Key=r2_object_key,
-            Conditions=[["content-length-range", 1, max_size_bytes]] + (extra_conditions or []),
+            Fields=fields,
+            Conditions=conditions,
             ExpiresIn=expires_in,
         )
     except (ClientError, BotoCoreError) as exc:
@@ -295,6 +300,27 @@ def r2_object_exists(r2_object_key: str) -> bool:
         raise
 
 
+def r2_object_size(r2_object_key: str) -> int | None:
+    """
+    Return the authoritative ContentLength from R2, or None if the object does not exist.
+
+    Raises ClientError / BotoCoreError on transport or configuration failures — callers
+    should fail closed (503) rather than acknowledging the upload.
+    """
+    validate_r2_key(r2_object_key)
+    _, _, _, bucket = _assert_credentials()
+
+    try:
+        client = get_r2_client()
+        response = client.head_object(Bucket=bucket, Key=r2_object_key)
+        return int(response.get("ContentLength", 0))
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey", "Not Found"):
+            return None
+        raise
+
+
 def delete_r2_objects(object_keys: list[str], bucket: Optional[str] = None) -> bool:
     try:
         _, _, _, configured_bucket = _assert_delete_credentials()
@@ -322,6 +348,9 @@ _CONTENT_TYPE_MAP: Dict[str, str] = {
     "jpeg": "image/jpeg",
     "png": "image/png",
     "webp": "image/webp",
+    "tiff": "image/tiff",
+    "tif": "image/tiff",
+    "mkv": "video/x-matroska",
     "mp4": "video/mp4",
     "mov": "video/quicktime",
     "avi": "video/x-msvideo",

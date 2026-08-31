@@ -1,6 +1,9 @@
+"""Bulk-ingest request validation and presigned upload ticket serialization."""
+
 import os
 import re
 import logging
+import unicodedata
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from gallery.models import Scene
@@ -13,7 +16,18 @@ MAX_IMAGE_SIZE_BYTES = 50 * 1024 * 1024         # 50 MB
 MAX_VIDEO_SIZE_BYTES = 5 * 1024 * 1024 * 1024   # 5 GB
 
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
-VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.tiff', '.cr2', '.nef', '.arw'}
+VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif'}
+
+
+def _ascii_fold_stem(raw_stem: str) -> str:
+    """Fold a filename stem to ASCII characters safe for R2 keys."""
+    normalized = unicodedata.normalize('NFKD', raw_stem)
+    ascii_only = normalized.encode('ascii', errors='ignore').decode('ascii')
+    folded = re.sub(r'[\s]+', '_', ascii_only.strip())
+    folded = re.sub(r'[^A-Za-z0-9._-]', '', folded)
+    folded = re.sub(r'_+', '_', folded).strip('._-')
+    return folded or 'unnamed_asset'
+
 
 class ManifestFileItemSerializer(serializers.Serializer):
     """THE BARE METAL SANITIZER: Validates individual file payloads."""
@@ -29,31 +43,26 @@ class ManifestFileItemSerializer(serializers.Serializer):
         if '\x00' in raw_filename:
             raise ValidationError({"filename": "FATAL: Null byte detected."})
 
-        # 2. XSS Stripping & URL-Safe Slugification
+        # 2. XSS stripping, then ASCII-fold the stem (Unicode must not fail the batch)
         base_name = os.path.basename(raw_filename)
         no_scripts = re.sub(r'<[^>]+>', '', base_name)
-        sanitized_name = re.sub(r'[^\w\s.-]', '', no_scripts).strip()
-        sanitized_name = re.sub(r'[\s]+', '_', sanitized_name)
+        pre_fold_stem, pre_fold_ext = os.path.splitext(no_scripts)
+        ext_part = pre_fold_ext.lower()
 
-        # 3. Media Type Routing & Spoof Defense
-        name_part, ext_part = os.path.splitext(sanitized_name)
-        ext_part = ext_part.lower()
-
-        # THE FIX 1: Strip leading dots to completely eradicate Unix hidden-file exploits
+        name_part = _ascii_fold_stem(pre_fold_stem)
         name_part = name_part.lstrip('.')
         if not name_part:
             name_part = "unnamed_asset"
 
+        # 3. Media type routing uses the pre-fold extension
         if ext_part in VIDEO_EXTENSIONS:
             media_type = 'VIDEO'
         elif ext_part in VALID_IMAGE_EXTENSIONS:
             media_type = 'IMAGE'
         else:
-            # Neutralize unknown/executable extensions by forcing them to .jpg
             media_type = 'IMAGE'
             ext_part = '.jpg'
 
-        # Reconstruct the final, safely sanitized filename
         sanitized_name = f"{name_part}{ext_part}"
 
         # 4. Asymmetric MIME Bomb Defense (OOM Protection)

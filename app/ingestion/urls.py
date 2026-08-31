@@ -1,3 +1,5 @@
+"""URL routes for bulk ingestion and the canonical R2 completion webhook."""
+
 from django.urls import path
 from .views import BulkIngestionView, R2WebhookView
 

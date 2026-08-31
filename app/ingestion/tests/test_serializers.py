@@ -58,6 +58,18 @@ class ManifestFileItemSerializerTests(TestCase):
         # It should strip the emojis, spaces, and parentheses, keeping it R2-safe
         self.assertEqual(sanitized, "Wedding_Photo_Copy_2.jpg")
 
+    def test_unicode_filename_folds_to_ascii(self):
+        """Accented or CJK characters must not reject the manifest item."""
+        payload = {
+            "filename": "café-résumé.jpg",
+            "file_size": 50000,
+            "client_reference_id": "uuid-unicode",
+        }
+        serializer = ManifestFileItemSerializer(data=payload)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data['sanitized_filename'], "cafe-resume.jpg")
+        self.assertEqual(serializer.validated_data['media_type'], 'IMAGE')
+
 
     # --- THE HACKER'S EXPLOITS (SECURITY) ---
 
@@ -135,6 +147,16 @@ class BulkManifestSerializerTests(TestCase):
         payload = {"scene_id": str(self.scene.id), "files": files}
         serializer = BulkManifestSerializer(data=payload, context={'request': self.mock_request})
         self.assertTrue(serializer.is_valid(), f"Failed on valid bulk payload: {serializer.errors}")
+
+    def test_bulk_manifest_accepts_unicode_filename_among_ascii(self):
+        """One non-ASCII filename must not 400 the entire batch."""
+        files = [
+            {"filename": "img_0.jpg", "file_size": 1000, "client_reference_id": "0"},
+            {"filename": "婚礼照.jpg", "file_size": 1000, "client_reference_id": "1"},
+        ]
+        payload = {"scene_id": str(self.scene.id), "files": files}
+        serializer = BulkManifestSerializer(data=payload, context={'request': self.mock_request})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
 
     def test_tenant_isolation_cuckoo_attack(self):
         victim = User.objects.create_user(email="victim@photobox.com", password="password123")
