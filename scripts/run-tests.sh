@@ -86,7 +86,8 @@ case "$SUITE" in
       gallery/tests/ \
       billing/tests/ \
       user/tests/ \
-      webhooks/tests/ \
+      checkout/tests/ \
+      ingestion/tests/ \
       tests/ \
       --timeout=60 -v --tb=short \
       --ignore=tests/test_cloudinary_integration.py \
@@ -101,7 +102,6 @@ case "$SUITE" in
       gallery/tests/ \
       billing/tests/ \
       user/tests/ \
-      webhooks/tests/ \
       tests/test_api_upload.py \
       --timeout=60 -v --tb=short $EXTRA_ARGS
     ;;
@@ -113,7 +113,7 @@ case "$SUITE" in
       gallery/tests/test_tenant_isolation.py \
       gallery/tests/test_storage_unit.py \
       gallery/tests/test_presigned_url_security.py \
-      gallery/tests/test_security_cloud.py \
+      gallery/tests/test_model.py \
       gallery/tests/test_download_authorization.py \
       gallery/tests/test_asset_hardening.py \
       billing/tests/test_security.py \
@@ -121,7 +121,7 @@ case "$SUITE" in
       core/tests/test_auth_jwt.py \
       user/tests/test_social_adapter.py \
       user/tests/test_user_api.py \
-      webhooks/tests/test_r2_webhook.py \
+      ingestion/tests/test_r2_webhook.py \
       --timeout=60 -v --tb=short $EXTRA_ARGS
     ;;
 
@@ -130,7 +130,6 @@ case "$SUITE" in
     echo "[RUNNING] Celery pipeline tests..."
     exec python -m pytest \
       tests/test_celery_tasks.py \
-      tests/test_pipeline_integrity.py \
       --timeout=60 -v --tb=short $EXTRA_ARGS
     ;;
 
@@ -158,7 +157,8 @@ case "$SUITE" in
       gallery/tests/ \
       billing/tests/ \
       user/tests/ \
-      webhooks/tests/ \
+      checkout/tests/ \
+      ingestion/tests/ \
       tests/ \
       --cov=. \
       --cov-report=term-missing \
@@ -178,7 +178,8 @@ case "$SUITE" in
       gallery/tests/ \
       billing/tests/ \
       user/tests/ \
-      webhooks/tests/ \
+      checkout/tests/ \
+      ingestion/tests/ \
       tests/ \
       --timeout=180 -v --tb=short $EXTRA_ARGS
     ;;
