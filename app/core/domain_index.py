@@ -50,7 +50,6 @@ def get_workspace_id_by_domain(hostname: str) -> Optional[str]:
         clean_host = hostname.strip().lower().split(":")[0]
         workspace = Workspace.objects.filter(
             custom_domain__iexact=clean_host,
-            is_deleted=False
         ).values_list("id", flat=True).first()
 
         result_id = str(workspace) if workspace else ""

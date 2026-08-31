@@ -35,6 +35,7 @@ urlpatterns = [
     # --- EDA ROUTES ---
     path('api/v1/ingestion/', include('ingestion.urls')),
     path('api/v1/webhooks/', include('webhooks.urls')),
+    path('api/v1/core/', include('core.urls')),
 
 ]
 if settings.DEBUG:
