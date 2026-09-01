@@ -21,6 +21,7 @@ from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 
+from core.api_errors import dual_key_error
 from core.security import scrub_email, scrub_ip
 from core.turnstile import verify_turnstile_token
 from user.password_reset_serializers import (
@@ -47,12 +48,15 @@ class CreateUserView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         # 1. Extract IP (Strips comma-separated spoofed proxy blocks)
         cf_ip = request.META.get('HTTP_CF_CONNECTING_IP', '')
-        raw_ip = cf_ip.split(',')[0].strip() if cf_ip else request.META.get('REMOTE_ADDR', '127.0.0.1')
+        if getattr(settings, 'TRUST_CLOUDFLARE_CLIENT_IP', False) and cf_ip:
+            raw_ip = cf_ip.split(',')[0].strip()
+        else:
+            raw_ip = request.META.get('REMOTE_ADDR', '127.0.0.1')
         if not raw_ip:
-            return Response({'error': 'Direct access blocked.'}, status=status.HTTP_403_FORBIDDEN)
+            return dual_key_error('Direct access blocked.', status_code=status.HTTP_403_FORBIDDEN)
 
         # 2. Redis Velocity Lock (Anti-Botnet)
-        salt = getattr(settings, 'IP_HASH_SALT', 'default_salt')
+        salt = settings.IP_HASH_SALT
         ip_hash = hashlib.sha256((raw_ip + salt).encode('utf-8')).hexdigest()
         redis_key = f"reg_lock_{ip_hash}"
 
@@ -64,7 +68,7 @@ class CreateUserView(generics.CreateAPIView):
             current_burst_count = 1
 
         if current_burst_count > 5:
-            return Response({'error': 'High network volume.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return dual_key_error('High network volume.', status_code=status.HTTP_429_TOO_MANY_REQUESTS)
 
         # 3. Validate Serializer
         serializer = self.get_serializer(data=request.data)
@@ -73,10 +77,21 @@ class CreateUserView(generics.CreateAPIView):
         # 4. Turnstile Bot Check
         token = serializer.validated_data.get('cf_turnstile_response')
         if not token or not self.verify_turnstile(token, raw_ip):
-            return Response({'error': 'Security challenge failed.'}, status=status.HTTP_403_FORBIDDEN)
+            return dual_key_error('Security challenge failed.', status_code=status.HTTP_403_FORBIDDEN)
 
         # 5. Execute Creation
         self.perform_create(serializer)
+
+        try:
+            from billing.models import RegistrationLog
+            RegistrationLog.objects.create(
+                email=serializer.validated_data.get('email', ''),
+                ip_hash=ip_hash,
+                user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:512],
+            )
+        except Exception:
+            logger.exception("Failed to persist registration audit log.")
+
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 

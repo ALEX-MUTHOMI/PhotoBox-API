@@ -1,3 +1,5 @@
+"""Checkout API views for pricing plans and Lemon Squeezy payment links."""
+
 import requests
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -6,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.throttling import UserRateThrottle
 from django.core.cache import cache
 from django.conf import settings
+from core.api_errors import dual_key_error
 from .models import PricingPlan, CheckoutSession
 from .serializers import PricingPlanSerializer, CheckoutRequestSerializer
 
@@ -36,7 +39,10 @@ class GenerateCheckoutLinkView(APIView):
         # 1. STATE EXPLOITATION DEFENSE (Double-Bill Glitch)
         subscription = getattr(request.user, 'subscription', None)
         if subscription and subscription.is_pro:
-            return Response({"error": "You already have an active subscription."}, status=status.HTTP_400_BAD_REQUEST)
+            return dual_key_error(
+                "You already have an active subscription.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
         # 2. THE BOUNCER (Delegating to the Input Serializer)
         serializer = CheckoutRequestSerializer(data=request.data)
@@ -44,7 +50,10 @@ class GenerateCheckoutLinkView(APIView):
             # To maintain backward compatibility with our strict strict security tests,
             # if the plan is missing/retired, we return a 404 instead of a standard 400.
             if 'plan_id' in serializer.errors and serializer.errors['plan_id'][0].code == 'does_not_exist':
-                return Response({"error": "Invalid or retired plan selected."}, status=status.HTTP_404_NOT_FOUND)
+                return dual_key_error(
+                    "Invalid or retired plan selected.",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         # Extract the securely validated objects
@@ -54,13 +63,19 @@ class GenerateCheckoutLinkView(APIView):
         # 3. RACE CONDITION DEFENSE (The Double-Tap Cache Lock)
         lock_key = f"checkout_lock_{request.user.id}"
         if not cache.add(lock_key, "locked", timeout=5):
-            return Response({"error": "Request already processing. Please wait."}, status=status.HTTP_409_CONFLICT)
+            return dual_key_error(
+                "Request already processing. Please wait.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
 
         try:
             # 4. AMATEUR DEVOPS DEFENSE (Environment Sabotage)
             api_key = getattr(settings, 'LEMON_SQUEEZY_API_KEY', None)
             if not api_key:
-                return Response({"error": "Payment gateway not configured."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return dual_key_error(
+                    "Payment gateway not configured.",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
             # Log the intent in the database (Failsafe for Webhooks)
             session = CheckoutSession.objects.create(user=request.user, plan=plan)
@@ -110,7 +125,10 @@ class GenerateCheckoutLinkView(APIView):
                 )
 
                 if ls_response.status_code >= 500:
-                    return Response({"error": "Payment provider is currently degraded."}, status=status.HTTP_502_BAD_GATEWAY)
+                    return dual_key_error(
+                        "Payment provider is currently degraded.",
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                    )
 
                 ls_response.raise_for_status()
 
@@ -119,9 +137,15 @@ class GenerateCheckoutLinkView(APIView):
                 return Response({"url": checkout_url}, status=status.HTTP_200_OK)
 
             except requests.exceptions.Timeout:
-                return Response({"error": "Payment gateway timed out."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                return dual_key_error(
+                    "Payment gateway timed out.",
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             except requests.exceptions.RequestException:
-                return Response({"error": "Failed to communicate with payment provider."}, status=status.HTTP_502_BAD_GATEWAY)
+                return dual_key_error(
+                    "Failed to communicate with payment provider.",
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                )
 
         finally:
             # SECURITY FIX: Was `pass` — cache lock was NEVER released!
