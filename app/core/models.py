@@ -8,7 +8,6 @@ from django.db import models
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
-from django.contrib.auth.hashers import make_password, check_password
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
 
@@ -21,9 +20,11 @@ def workspace_watermark_file_path(instance, filename):
     ext = os.path.splitext(filename)[1]
     return os.path.join('uploads', 'workspace', 'watermarks', f'{uuid.uuid4()}{ext}')
 
+
 def workspace_image_file_path(instance, filename):
+    """Legacy upload_to kept for historical migrations referencing core.Image."""
     ext = os.path.splitext(filename)[1]
-    return os.path.join('uploads', 'workspace', str(instance.gallery.workspace.id), f'{uuid.uuid4()}{ext}')
+    return os.path.join('uploads', 'workspace', 'legacy', f'{uuid.uuid4()}{ext}')
 
 
 def validate_png_watermark(uploaded_file):
@@ -55,6 +56,19 @@ def validate_png_watermark(uploaded_file):
 # ==========================================
 # 1. ABSTRACT BASE MODELS (Audit & Data Retention)
 # ==========================================
+class SoftDeleteQuerySet(models.QuerySet):
+    def alive(self):
+        return self.filter(is_deleted=False)
+
+    def dead(self):
+        return self.filter(is_deleted=True)
+
+
+class SoftDeleteManager(models.Manager.from_queryset(SoftDeleteQuerySet)):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
 class SoftDeleteModel(models.Model):
     """Base model providing UUIDs, audit timestamps, and soft-delete capabilities."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -62,8 +76,12 @@ class SoftDeleteModel(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     is_deleted = models.BooleanField(default=False)
 
+    objects = SoftDeleteManager()
+    all_objects = models.Manager()
+
     class Meta:
         abstract = True
+        base_manager_name = 'all_objects'
 
 
 # ==========================================
@@ -155,44 +173,4 @@ class Workspace(SoftDeleteModel):
 
     def __str__(self):
         return self.business_name
-
-
-# ==========================================
-# 4. APPLICATION RESOURCES (LEGACY SUPPORT)
-# ==========================================
-class Gallery(SoftDeleteModel):
-    """A collection of images with strict Client UX controls."""
-    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name='galleries')
-    title = models.CharField(max_length=255)
-    slug = models.SlugField(max_length=255, unique=True)
-
-    is_public = models.BooleanField(default=False)
-    gallery_pin = models.CharField(max_length=128, blank=True)
-    expires_at = models.DateTimeField(null=True, blank=True)
-    allow_downloads = models.BooleanField(default=False)
-
-    def save(self, *args, **kwargs):
-        if self.gallery_pin and not self.gallery_pin.startswith(('pbkdf2_', 'argon2')):
-            self.gallery_pin = make_password(self.gallery_pin)
-        super().save(*args, **kwargs)
-
-    def verify_pin(self, raw_pin):
-        return check_password(raw_pin, self.gallery_pin)
-
-    def __str__(self):
-        return self.title
-
-class Image(SoftDeleteModel):
-    """Individual photo files (Legacy)."""
-    gallery = models.ForeignKey(Gallery, on_delete=models.CASCADE, related_name='images')
-    title = models.CharField(max_length=255, blank=True)
-    image = models.ImageField(upload_to=workspace_image_file_path)
-    file_size_bytes = models.BigIntegerField(default=0)
-    order = models.IntegerField(default=0)
-
-    class Meta:
-        ordering = ['order', '-created_at']
-
-    def __str__(self):
-        return self.title if self.title else str(self.id)
 
