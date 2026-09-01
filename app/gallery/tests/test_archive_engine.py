@@ -16,6 +16,7 @@ from gallery.client_auth import (
     issue_gallery_access_token,
 )
 from gallery.models import (
+    ClientAllowlist,
     Event,
     FavoriteSelection,
     GalleryAccessRole,
@@ -123,6 +124,7 @@ class GalleryArchiveEngineTests(TestCase):
         )
 
     def _set_gallery_session_cookie(self, role="CLIENT", email="bride@example.com"):
+        ClientAllowlist.objects.get_or_create(gallery=self.gallery, email=email)
         session = GalleryAccessSession.objects.create(
             gallery=self.gallery,
             email=email,
@@ -181,6 +183,18 @@ class GalleryArchiveEngineTests(TestCase):
         self.assertFalse(any("hidden" in name for name in archived_names))
         self.assertFalse(any("pending" in name for name in archived_names))
 
+    @patch("gallery.tasks.shutil.disk_usage")
+    def test_archive_fails_cleanly_when_temp_disk_is_insufficient(self, mock_disk_usage):
+        mock_disk_usage.return_value = type("Usage", (), {"free": 1024})()
+        job = GalleryArchiveJob.objects.create(gallery=self.gallery)
+
+        result = build_gallery_archive(archive_job_id=str(job.id))
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["reason"], "insufficient_disk_space")
+        job.refresh_from_db()
+        self.assertEqual(job.status, GalleryArchiveJob.Status.FAILED)
+
     @patch("gallery.client_views.generate_r2_presigned_get_url")
     def test_archive_status_returns_short_lived_url_for_matching_gallery_scope(self, mock_presign):
         GalleryArchiveJob.objects.create(
@@ -190,10 +204,10 @@ class GalleryArchiveEngineTests(TestCase):
             expires_at=timezone.now() + timedelta(hours=1),
         )
         mock_presign.return_value = "https://signed.example.com/archive.zip"
+        self._set_gallery_session_cookie()
 
         response = self.client.get(
             reverse("gallery_public:archive-status", args=[self.gallery.id]),
-            HTTP_AUTHORIZATION=f"Bearer {self._client_token()}",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -222,9 +236,9 @@ class GalleryArchiveEngineTests(TestCase):
 
     @patch("gallery.client_views.build_gallery_archive.delay")
     def test_archive_request_queues_job_for_client(self, mock_delay):
+        self._set_gallery_session_cookie()
         response = self.client.post(
             reverse("gallery_public:archive-request", args=[self.gallery.id]),
-            HTTP_AUTHORIZATION=f"Bearer {self._client_token()}",
         )
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)

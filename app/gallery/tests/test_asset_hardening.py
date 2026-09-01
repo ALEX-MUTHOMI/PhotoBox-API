@@ -149,7 +149,8 @@ class HeavyLaneSizeMismatchQuarantineTests(TestCase):
             is_processed=False,
         )
 
-    def test_heavy_lane_size_mismatch_quarantines_asset(self):
+    @patch("ingestion.views.r2_object_size", return_value=5 * 1024 * 1024 * 1024)
+    def test_heavy_lane_size_mismatch_quarantines_asset(self, _mock_head):
         response = _post_signed_webhook(
             self.client,
             {
@@ -166,7 +167,8 @@ class HeavyLaneSizeMismatchQuarantineTests(TestCase):
         self.assertEqual(self.asset.status, "QUARANTINED")
         self.assertFalse(self.asset.is_processed)
 
-    def test_smaller_actual_size_transitions_to_ready(self):
+    @patch("ingestion.views.r2_object_size", return_value=1024)
+    def test_smaller_actual_size_transitions_to_ready(self, _mock_head):
         response = _post_signed_webhook(
             self.client,
             {

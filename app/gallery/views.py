@@ -4,12 +4,9 @@ Views for the Gallery API (The Pixieset Standard).
 import io
 import logging
 
+from django.conf import settings
 from django.db import transaction
-from django.db.models import F
-from django.db.models.functions import Greatest
 from django.utils import timezone
-from django.views.generic import TemplateView
-from django.contrib.auth.mixins import LoginRequiredMixin
 from rest_framework import mixins, parsers, status, viewsets
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -18,18 +15,19 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.quota import QuotaExceededError, release_workspace_bytes, reserve_workspace_bytes
 from core.models import Workspace
 from gallery.client_auth import (
     GalleryCookieJWTAuthentication,
-    get_gallery_access_session_id,
-    normalize_gallery_email,
+    resolve_gallery_access_session,
 )
+from gallery.client_serializers import safe_client_text
+from gallery.permissions import IsPhotographerUser
 from gallery.filename_utils import sanitize_gallery_filename
 from gallery.models import (
     Event,
     FavoriteSelection,
     GalleryAccessRole,
-    GalleryAccessSession,
     Photo,
     Scene,
     VisibilityChoices,
@@ -41,6 +39,10 @@ from gallery.throttles import FastLaneUploadThrottle
 # Enterprise Image Inspection
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
+
+PILImage.MAX_IMAGE_PIXELS = int(
+    getattr(settings, "PHOTO_MAX_IMAGE_PIXELS", 89_478_485)
+)
 
 logger = logging.getLogger(__name__)
 FAST_LANE_ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
@@ -79,38 +81,9 @@ def _assert_no_trailing_payload(image_format: str, image_bytes: bytes) -> None:
         )
 
 
-class IsPhotographerUser(IsAuthenticated):
-    def has_permission(self, request, view):
-        if not super().has_permission(request, view):
-            return False
-
-        return getattr(request.user, "gallery_id", None) is None
-
-
 # ==========================================
 # 1. PIXIESET STANDARD: EVENT (The Collection)
 # ==========================================
-
-class PhotographerDashboardView(LoginRequiredMixin, TemplateView):
-    template_name = 'gallery/dashboard.html'
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        user = self.request.user
-        
-        # Aggregate data if workspace exists
-        if hasattr(user, 'workspace'):
-            workspace = user.workspace
-            context['total_events'] = Event.objects.filter(workspace=workspace).count()
-            context['recent_photos'] = Photo.objects.filter(scene__event__workspace=workspace).order_by('-uploaded_at')[:5]
-            context['total_heavy_assets'] = Photo.objects.filter(scene__event__workspace=workspace, r2_object_key__isnull=False).count()
-            
-            # Simulated storage pulling from Subscription
-            if hasattr(user, 'subscription'):
-                storage_bytes = user.subscription.storage_used_bytes
-                context['storage_used_gb'] = round(storage_bytes / (1024**3), 2)
-        
-        return context
 
 # The rest of DRF views
 class EventViewSet(viewsets.ModelViewSet):
@@ -119,7 +92,7 @@ class EventViewSet(viewsets.ModelViewSet):
     queryset = Event.objects.all()
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsPhotographerUser]
 
     # RATE LIMITING: Prevent Denial of Database Rows (No infinite bot creation)
     throttle_classes = [FastLaneUploadThrottle]
@@ -207,7 +180,7 @@ class PhotographerFavoritesSummaryView(APIView):
                 {
                     "email": selection.session.email,
                     "role": selection.session.role,
-                    "notes": selection.notes,
+                    "notes": safe_client_text(selection.notes),
                     "selected_at": selection.created_at,
                 }
             )
@@ -319,7 +292,9 @@ class PhotoFastLaneViewSet(
         be retrieved if the authenticated user owns the workspace that owns the event
         that owns the scene that owns the photo. No shortcuts.
         """
-        queryset = self.queryset.filter(
+        queryset = self.queryset.select_related(
+            "scene__event__workspace"
+        ).filter(
             scene__event__workspace__user=self.request.user
         )
 
@@ -354,25 +329,13 @@ class PhotoFastLaneViewSet(
             ):
                 raise PermissionDenied("Gallery access unavailable.")
 
-            session_id = get_gallery_access_session_id(request)
-            if session_id is None:
-                raise PermissionDenied("Gallery session missing.")
+            if not gallery.allow_downloads:
+                raise PermissionDenied("Downloads are disabled for this gallery.")
 
-            access_session = (
-                GalleryAccessSession.objects
-                .filter(
-                    id=session_id,
-                    gallery_id=photo.scene.event_id,
-                    email=normalize_gallery_email(getattr(request.user, "email", "")),
-                    role=getattr(request.user, "role", ""),
-                )
-                .first()
-            )
-            if access_session is None:
-                raise PermissionDenied("Gallery session invalid.")
+            access_session = resolve_gallery_access_session(request, gallery)
 
             allowed_visibility = [VisibilityChoices.PUBLIC]
-            if request.user.role == GalleryAccessRole.CLIENT:
+            if access_session.role == GalleryAccessRole.CLIENT:
                 allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
                 requester_kind = "client"
             else:
@@ -457,8 +420,8 @@ class PhotoFastLaneViewSet(
 
             # PASS 2: Metadata inspection — reopen because verify() destroys the object
             with PILImage.open(io.BytesIO(image_bytes)) as img:
-                if img.width * img.height > (10000 * 10000):
-                    raise ValidationError("Decompression Bomb detected: image pixel count exceeds 100MP.")
+                if img.width * img.height > PILImage.MAX_IMAGE_PIXELS:
+                    raise ValidationError("Decompression Bomb detected: image pixel count exceeds limit.")
                 if img.format not in FAST_LANE_ALLOWED_IMAGE_FORMATS:
                     raise ValidationError("Invalid Magic Bytes. Not a genuine JPEG, PNG, or WEBP.")
                 _assert_no_trailing_payload(img.format, image_bytes)
@@ -474,22 +437,15 @@ class PhotoFastLaneViewSet(
         # Hold the workspace row lock only across the quota math + photo insert so
         # concurrent uploads for the same tenant cannot double-spend the ledger.
         with transaction.atomic():
-            locked_workspace = Workspace.objects.select_for_update().get(id=workspace.id)
-            projected_usage = locked_workspace.storage_used_bytes + image_file.size
-            if projected_usage > locked_workspace.storage_limit_bytes:
+            try:
+                reserve_workspace_bytes(workspace.id, image_file.size)
+            except QuotaExceededError:
                 raise ValidationError("Storage quota exceeded. Please upgrade your subscription.")
 
-            Workspace.objects.filter(id=locked_workspace.id).update(
-                storage_used_bytes=F('storage_used_bytes') + image_file.size
-            )
-
-
-            # 5. DB WRITE — is_processed=False (the Celery task will flip this to True)
-            # This is the LAST thing the web thread does. No Cloudinary. No external I/O.
             photo = serializer.save(
                 file_size_bytes=image_file.size,
                 original_filename=safe_filename,
-                is_processed=False,   # Honest: processing hasn't happened yet
+                is_processed=False,
                 status='PENDING',
             )
 
@@ -530,10 +486,5 @@ class PhotoFastLaneViewSet(
         """
         file_size = instance.file_size_bytes
         workspace = instance.scene.event.workspace
-        
-        # Atomically strip the bytes from the ledger
-        Workspace.objects.filter(id=workspace.id).update(
-            storage_used_bytes=Greatest(0, F('storage_used_bytes') - file_size)
-        )
-        
+        release_workspace_bytes(workspace.id, file_size)
         instance.delete()

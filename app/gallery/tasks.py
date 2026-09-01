@@ -4,6 +4,7 @@ Async processing for gallery assets and gallery archives.
 """
 import logging
 import os
+import shutil
 import tempfile
 import zipfile
 from datetime import timedelta
@@ -16,13 +17,17 @@ from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
 from django.db import OperationalError, transaction
-from django.db.models import F, Value
+from django.db.models import F, Sum, Value
 from django.db.models.functions import Greatest
 from django.utils import timezone
 from django.utils.text import slugify
 from PIL import Image as PILImage
 from PIL import ImageOps
 from PIL import UnidentifiedImageError
+
+PILImage.MAX_IMAGE_PIXELS = int(
+    getattr(settings, "PHOTO_MAX_IMAGE_PIXELS", 89_478_485)
+)
 
 from gallery.filename_utils import sanitize_gallery_filename
 from gallery.models import GalleryArchiveJob, GalleryArchiveType, Photo, VisibilityChoices
@@ -288,7 +293,11 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
                 temp_source_file.write(chunk)
 
         with PILImage.open(temp_source_path) as raw_image:
-            prepared = ImageOps.exif_transpose(raw_image)
+            raw_image.draft(
+                "RGB",
+                (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
+            )
+            prepared = ImageOps.exif_transpose(raw_image, in_place=True) or raw_image
             prepared.thumbnail(
                 (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
                 PILImage.Resampling.LANCZOS,
@@ -420,7 +429,7 @@ def _build_archive_r2_key(job: GalleryArchiveJob) -> str:
     )
 
 
-def _get_archive_photos_queryset(job: GalleryArchiveJob):
+def _archive_photos_queryset(job: GalleryArchiveJob):
     queryset = (
         Photo.objects
         .select_related("scene")
@@ -452,7 +461,15 @@ def _get_archive_photos_queryset(job: GalleryArchiveJob):
             ],
         )
 
-    return queryset.order_by("scene__display_order", "uploaded_at").iterator()
+    return queryset
+
+
+def _get_archive_photos_queryset(job: GalleryArchiveJob):
+    return (
+        _archive_photos_queryset(job)
+        .order_by("scene__display_order", "uploaded_at")
+        .iterator()
+    )
 
 
 @shared_task(
@@ -492,6 +509,24 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             status=GalleryArchiveJob.Status.PROCESSING
         )
 
+        required_bytes = (
+            _archive_photos_queryset(job).aggregate(
+                total=Sum("file_size_bytes")
+            )["total"]
+            or 0
+        )
+        margin = int(getattr(settings, "ARCHIVE_DISK_MARGIN_BYTES", 50 * 1024 * 1024))
+        available_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        if required_bytes + margin > available_bytes:
+            GalleryArchiveJob.objects.filter(id=job.id).update(
+                status=GalleryArchiveJob.Status.FAILED
+            )
+            return {
+                "status": "error",
+                "reason": "insufficient_disk_space",
+                "archive_job_id": archive_job_id,
+            }
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
             temp_zip_path = temp_zip.name
 
@@ -499,7 +534,7 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
         with zipfile.ZipFile(
             temp_zip_path,
             mode="w",
-            compression=zipfile.ZIP_DEFLATED,
+            compression=zipfile.ZIP_STORED,
             allowZip64=True,
         ) as archive_file:
             photos = _get_archive_photos_queryset(job)
@@ -559,3 +594,36 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
 
 
 upload_photo_to_r2 = process_fast_lane_asset
+
+
+# Plan 03 registers this on CLIENT_ACCESS_BEAT_SCHEDULE — daily 03:00 UTC.
+@shared_task(
+    name="gallery.tasks.purge_expired_gallery_access_artifacts",
+    acks_late=True,
+)
+def purge_expired_gallery_access_artifacts() -> Dict[str, Any]:
+    """Delete expired magic links and inert access sessions."""
+    from gallery.models import GalleryAccessSession, GalleryMagicLink
+
+    now = timezone.now()
+    expired_links, _ = GalleryMagicLink.objects.filter(expires_at__lte=now).delete()
+
+    cutoff = now - timedelta(days=int(getattr(settings, "GALLERY_SESSION_RETENTION_DAYS", 30)))
+    stale_sessions, _ = (
+        GalleryAccessSession.objects
+        .filter(created_at__lt=cutoff)
+        .exclude(favorite_selections__isnull=False)
+        .exclude(archive_jobs__isnull=False)
+        .delete()
+    )
+
+    logger.info(
+        "[RETENTION] Purged %d expired magic links and %d inert access sessions.",
+        expired_links,
+        stale_sessions,
+    )
+    return {
+        "status": "completed",
+        "expired_magic_links": expired_links,
+        "stale_access_sessions": stale_sessions,
+    }

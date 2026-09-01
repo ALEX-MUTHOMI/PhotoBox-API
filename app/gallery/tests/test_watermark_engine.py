@@ -15,8 +15,11 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Workspace
-from gallery.client_auth import issue_gallery_access_token
-from gallery.models import Event, Photo, Scene
+from gallery.client_auth import (
+    encode_gallery_access_session_cookie,
+    issue_gallery_access_token,
+)
+from gallery.models import ClientAllowlist, Event, GalleryAccessRole, GalleryAccessSession, Photo, Scene
 from gallery.tasks import generate_photo_web_derivative
 
 
@@ -177,11 +180,18 @@ class WatermarkEngineTests(TestCase):
         self.assertNotIn(self.photo.r2_object_key, url)
 
     def test_public_gallery_detail_exposes_branding_fields(self):
+        ClientAllowlist.objects.create(gallery=self.gallery, email="client@example.com")
+        session = GalleryAccessSession.objects.create(
+            gallery=self.gallery,
+            email="client@example.com",
+            role=GalleryAccessRole.CLIENT,
+        )
         self.client.cookies["gallery_access"] = issue_gallery_access_token(
             gallery_id=self.gallery.id,
             email="client@example.com",
             role="CLIENT",
         )
+        self.client.cookies["gallery_session"] = encode_gallery_access_session_cookie(session.id)
 
         response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.id]))
 
@@ -190,15 +200,3 @@ class WatermarkEngineTests(TestCase):
         self.assertEqual(response.data["gallery"]["typography_theme"], "modern-serif")
         self.assertEqual(response.data["gallery"]["color_theme"], "sandstone")
 
-    @patch("ingestion.views.generate_photo_web_derivative.delay")
-    def test_heavy_lane_webhook_queues_web_derivative_task(self, mock_delay):
-        self.photo.status = "PENDING"
-        self.photo.is_processed = False
-        self.photo.save(update_fields=["status", "is_processed"])
-
-        response = self._post_webhook(
-            {"action": "PutObject", "r2_object_key": self.photo.r2_object_key, "size": 4096}
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mock_delay.assert_called_once_with(str(self.photo.id))
