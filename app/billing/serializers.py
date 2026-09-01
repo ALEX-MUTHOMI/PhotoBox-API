@@ -1,17 +1,16 @@
-"""
-Serializers for the Billing & Quota API.
-"""
+"""Serializers for billing subscription status and related API responses."""
+
 from rest_framework import serializers
 from .models import Subscription
 
-# Notice: SecureRegistrationSerializer has been entirely deleted.
-# It lives permanently in the User app now.
 
 class SubscriptionSerializer(serializers.ModelSerializer):
     """
-    OUTBOUND: The Diplomat.
-    Calculates the exact storage math so the React frontend stays lightweight.
+    OUTBOUND: Photographer subscription read model.
+    Storage figures come from the Workspace ledger — the only counter uploads write.
     """
+    storage_limit_bytes = serializers.SerializerMethodField()
+    storage_used_bytes = serializers.SerializerMethodField()
     percentage_used = serializers.SerializerMethodField()
     human_used = serializers.SerializerMethodField()
     human_limit = serializers.SerializerMethodField()
@@ -24,28 +23,36 @@ class SubscriptionSerializer(serializers.ModelSerializer):
             'storage_used_bytes',
             'percentage_used',
             'human_used',
-            'human_limit'
+            'human_limit',
         ]
-        # THE VAULT: Users cannot PUT/PATCH these fields to upgrade themselves.
         read_only_fields = fields
 
+    def _workspace(self, obj):
+        return obj.user.workspace
+
+    def get_storage_used_bytes(self, obj):
+        return self._workspace(obj).storage_used_bytes
+
+    def get_storage_limit_bytes(self, obj):
+        return self._workspace(obj).storage_limit_bytes
+
     def get_percentage_used(self, obj):
-        if obj.storage_limit_bytes == 0:
+        limit = self.get_storage_limit_bytes(obj)
+        if limit == 0:
             return 100
-        # Round to 2 decimal places for clean UI rendering
-        percentage = (obj.storage_used_bytes / obj.storage_limit_bytes) * 100
-        return round(percentage, 2)
+        used = self.get_storage_used_bytes(obj)
+        return round((used / limit) * 100, 2)
 
     def _format_bytes(self, size_in_bytes):
-        """Engineers handle the math, Frontend paints the picture."""
+        size = float(size_in_bytes)
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size_in_bytes < 1024.0:
-                return f"{size_in_bytes:.1f} {unit}"
-            size_in_bytes /= 1024.0
-        return f"{size_in_bytes:.1f} PB"
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} PB"
 
     def get_human_used(self, obj):
-        return self._format_bytes(obj.storage_used_bytes)
+        return self._format_bytes(self.get_storage_used_bytes(obj))
 
     def get_human_limit(self, obj):
-        return self._format_bytes(obj.storage_limit_bytes)
+        return self._format_bytes(self.get_storage_limit_bytes(obj))

@@ -8,8 +8,13 @@ import json
 from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, generics
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
+from gallery.permissions import IsPhotographerUser
+
+from .models import Subscription
+from .serializers import SubscriptionSerializer
 from .tasks import process_lemon_squeezy_webhook
 
 
@@ -71,3 +76,16 @@ class WebhookReceiverView(APIView):
         # Async Handoff
         process_lemon_squeezy_webhook.delay(payload_data, event_id, payload_hash)
         return Response("Payload queued for processing.", status=status.HTTP_202_ACCEPTED)
+
+
+class SubscriptionStatusView(generics.RetrieveAPIView):
+    """GET-only photographer subscription and quota read model."""
+
+    serializer_class = SubscriptionSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsPhotographerUser]
+
+    def get_object(self):
+        return Subscription.objects.select_related('user__workspace').get(
+            user=self.request.user
+        )
