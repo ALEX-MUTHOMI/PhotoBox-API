@@ -49,6 +49,39 @@ class EventApiTests(TestCase):
         event = Event.objects.get(id=res.data['id'])
         self.assertTrue(event.check_pin('1234'))
 
+    def test_patch_empty_gallery_pin_clears_pin(self):
+        """Photographers can remove a gallery PIN by sending an empty string."""
+        event = Event.objects.create(
+            workspace=self.workspace,
+            title='PIN Event',
+            slug='pin-event',
+        )
+        event.set_pin('1234')
+        detail_url = reverse('gallery:event-detail', kwargs={'pk': event.id})
+
+        res = self.client.patch(detail_url, {'gallery_pin': ''}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertNotIn('gallery_pin', res.data)
+        event.refresh_from_db()
+        self.assertEqual(event._hashed_pin, '')
+        self.assertFalse(event.check_pin('1234'))
+
+    def test_patch_without_gallery_pin_leaves_pin_unchanged(self):
+        event = Event.objects.create(
+            workspace=self.workspace,
+            title='Keep PIN',
+            slug='keep-pin',
+        )
+        event.set_pin('5678')
+        detail_url = reverse('gallery:event-detail', kwargs={'pk': event.id})
+
+        res = self.client.patch(detail_url, {'title': 'Renamed'}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        event.refresh_from_db()
+        self.assertTrue(event.check_pin('5678'))
+
     def test_create_event_slug_is_safe_for_scriptable_title(self):
         """SECURITY: Generated slugs must not carry scriptable title content."""
         payload = {

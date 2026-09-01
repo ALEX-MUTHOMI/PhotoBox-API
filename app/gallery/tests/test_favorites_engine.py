@@ -14,6 +14,7 @@ from gallery.client_auth import (
     issue_gallery_access_token,
 )
 from gallery.models import (
+    ClientAllowlist,
     Event,
     FavoriteSelection,
     GalleryAccessRole,
@@ -103,6 +104,8 @@ class FavoritesEngineTests(TestCase):
         self.photographer_client.force_authenticate(user=self.user)
 
     def _set_gallery_cookies(self, role, email):
+        if role == GalleryAccessRole.CLIENT:
+            ClientAllowlist.objects.get_or_create(gallery=self.gallery, email=email)
         session = GalleryAccessSession.objects.create(
             gallery=self.gallery,
             email=email,

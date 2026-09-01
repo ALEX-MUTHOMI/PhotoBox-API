@@ -14,6 +14,7 @@ from gallery.client_auth import (
     issue_gallery_access_token,
 )
 from gallery.models import (
+    ClientAllowlist,
     Event,
     GalleryAccessRole,
     GalleryAccessSession,
@@ -67,6 +68,7 @@ class DownloadWorkflowTests(TestCase):
         self.anonymous_client = APIClient()
 
     def _grant_client_gallery_session(self):
+        ClientAllowlist.objects.create(gallery=self.event, email="client@example.com")
         session = GalleryAccessSession.objects.create(
             gallery=self.event,
             email="client@example.com",

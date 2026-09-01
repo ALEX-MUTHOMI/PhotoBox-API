@@ -10,6 +10,7 @@ from gallery.client_auth import (
     issue_gallery_access_token,
 )
 from gallery.models import (
+    ClientAllowlist,
     Event,
     GalleryAccessRole,
     GalleryAccessSession,
@@ -58,6 +59,7 @@ class ClientGallerySerializationSafetyTests(TestCase):
         )
 
         self.client = APIClient()
+        ClientAllowlist.objects.create(gallery=self.gallery, email="client@example.com")
         session = GalleryAccessSession.objects.create(
             gallery=self.gallery,
             email="client@example.com",

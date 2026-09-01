@@ -12,7 +12,11 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Workspace
-from gallery.client_auth import hash_magic_link_token, issue_gallery_access_token
+from gallery.client_auth import (
+    encode_gallery_access_session_cookie,
+    hash_magic_link_token,
+    issue_gallery_access_token,
+)
 from gallery.models import (
     ClientAllowlist,
     Event,
@@ -85,12 +89,20 @@ class DualLaneGalleryAuthTests(TestCase):
         ClientAllowlist.objects.create(gallery=self.gallery, email="bride@example.com")
 
     def _set_gallery_cookie(self, role, email="viewer@example.com", gallery_id=None):
+        gallery = gallery_id or self.gallery.id
+        session = GalleryAccessSession.objects.create(
+            gallery_id=gallery,
+            email=email,
+            role=role,
+        )
         token = issue_gallery_access_token(
-            gallery_id=gallery_id or self.gallery.id,
+            gallery_id=gallery,
             email=email,
             role=role,
         )
         self.client.cookies["gallery_access"] = token
+        self.client.cookies["gallery_session"] = encode_gallery_access_session_cookie(session.id)
+        return session
 
     def test_magic_link_request_creates_hashed_single_use_token_for_allowlisted_email(self):
         response = self.client.post(
