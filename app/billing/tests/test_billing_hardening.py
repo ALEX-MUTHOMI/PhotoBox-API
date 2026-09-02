@@ -294,14 +294,9 @@ class ConcurrentCheckoutLockTests(APITransactionTestCase):
 @override_settings(TESTING=True)
 class AtomicQuotaDeductionTests(TransactionTestCase):
     """
-    ATTACK VECTOR: 5 simultaneous Celery workers try to deduct 1GB
-    from a 2GB storage limit at the exact same millisecond.
-
-    EXPECTED RESULT:
-      - Exactly 2 succeed (0GB → 1GB → 2GB)
-      - Exactly 3 fail with 402 Payment Required
-      - Final DB state: storage_used_bytes == 2GB (zero remaining)
-      - SQL CHECK constraint prevents negative values at all times
+    The billing gallery-upload stub is gone. Concurrent posts must 404 and
+    must not mutate Subscription.storage_used_bytes. Fast Lane / Heavy Lane
+    own the Workspace ledger (see gallery and ingestion quota tests).
     """
 
     def setUp(self):
@@ -309,30 +304,20 @@ class AtomicQuotaDeductionTests(TransactionTestCase):
         self.user = User.objects.create_user(
             email='quota-race@photographer.com', password='SecurePass123!'
         )
-
-        # Set the subscription to 2GB limit, 0 bytes used
         self.sub = Subscription.objects.get(user=self.user)
         self.sub.storage_limit_bytes = TWO_GB
         self.sub.storage_used_bytes = 0
         self.sub.save()
-
         self.upload_url = '/api/billing/gallery/upload/'
 
     def test_quota_ledger_atomic_deduction_under_load(self):
-        """
-        5 concurrent workers each try to deduct 1GB from a 2GB quota.
-        select_for_update() MUST serialise the transactions so that
-        exactly 2 succeed and the ledger remains mathematically consistent.
-        """
         results = [None] * 5
-
-        # Barrier ensures all 5 threads fire simultaneously
         barrier = Barrier(5, timeout=15)
 
         def fire_upload(index):
             client = APIClient()
             client.force_authenticate(user=self.user)
-            barrier.wait()  # Synchronise all 5 threads
+            barrier.wait()
             resp = client.post(
                 self.upload_url,
                 data={'file_size': ONE_GB},
@@ -346,68 +331,12 @@ class AtomicQuotaDeductionTests(TransactionTestCase):
         for t in threads:
             t.join(timeout=30)
 
-        # ── ASSERTIONS ──────────────────────────────────────────────────
-
-        # Ensure all threads completed
         self.assertTrue(
             all(r is not None for r in results),
             f"Some requests did not complete: {results}"
         )
-
-        # No unexpected error responses (only 201 or 402 are valid)
-        unexpected = [
-            r for r in results
-            if r not in (status.HTTP_201_CREATED, status.HTTP_402_PAYMENT_REQUIRED)
-        ]
-        self.assertEqual(
-            len(unexpected), 0,
-            f"Unexpected status codes detected: {unexpected}. "
-            f"Full results: {results}"
-        )
-
-        successes = results.count(status.HTTP_201_CREATED)
-        rejections = results.count(status.HTTP_402_PAYMENT_REQUIRED)
-
-        self.assertEqual(
-            successes, 2,
-            f"Exactly 2 uploads should fit in 2GB. Got {successes}. "
-            f"Full results: {results}"
-        )
-        self.assertEqual(
-            rejections, 3,
-            f"Exactly 3 should be rejected at quota limit. Got {rejections}. "
-            f"Full results: {results}"
-        )
-
-        # ── MATHEMATICAL PROOF: Final Ledger State ──────────────────────
+        self.assertEqual(results, [status.HTTP_404_NOT_FOUND] * 5)
 
         self.sub.refresh_from_db()
-
-        self.assertEqual(
-            self.sub.storage_used_bytes, TWO_GB,
-            f"Storage used should be exactly 2GB ({TWO_GB} bytes). "
-            f"Got {self.sub.storage_used_bytes} bytes."
-        )
-
-        remaining = self.sub.storage_limit_bytes - self.sub.storage_used_bytes
-        self.assertEqual(
-            remaining, 0,
-            f"Zero bytes remaining expected. Got {remaining}."
-        )
-
-        # NEGATIVE OVERFLOW CHECK:
-        # The SQL CHECK constraint (prevent_negative_storage_used) enforces
-        # this at the database level, but we verify the application logic
-        # also produces a mathematically valid result.
-        self.assertGreaterEqual(
-            self.sub.storage_used_bytes, 0,
-            "CRITICAL: Negative storage_used_bytes detected — "
-            "integer overflow exploit succeeded!"
-        )
-        self.assertLessEqual(
-            self.sub.storage_used_bytes,
-            self.sub.storage_limit_bytes,
-            "CRITICAL: storage_used_bytes exceeds storage_limit_bytes — "
-            "quota enforcement bypass detected!"
-        )
+        self.assertEqual(self.sub.storage_used_bytes, 0)
 

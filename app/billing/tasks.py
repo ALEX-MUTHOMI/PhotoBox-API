@@ -17,6 +17,23 @@ FREE_TIER_BYTES = 1073741824       # 1GB
 FREE_TIER_GB = 1
 
 
+def _apply_workspace_storage_limit(user, limit_bytes):
+    """Workspace is the quota ledger. Billing writes the byte cap here."""
+    from core.models import Workspace
+
+    workspace, created = Workspace.objects.select_for_update().get_or_create(
+        user=user,
+        defaults={
+            'business_name': user.name or (user.email.split('@')[0] if user.email else 'Studio'),
+            'storage_limit_bytes': limit_bytes,
+        },
+    )
+    if not created and workspace.storage_limit_bytes != limit_bytes:
+        workspace.storage_limit_bytes = limit_bytes
+        workspace.save(update_fields=['storage_limit_bytes'])
+    return workspace
+
+
 def _resolve_subscription_for_event(event_name, subscription_id, user_id):
     """
     Resolve the subscription row in a way that survives out-of-order delivery.
@@ -163,10 +180,11 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id, payload_hash=Non
                 sub.storage_limit_bytes = bandwidth_limit
                 sub.save()
 
-                # B. SYNC WITH THE CORE USER APP (Preserving your original DDD logic)
+                # B. SYNC DISPLAY MATH + WORKSPACE LEDGER
                 user.subscription_tier = 'PRO'
                 user.storage_limit_gb = dynamic_gb_limit
                 user.save(update_fields=['subscription_tier', 'storage_limit_gb'])
+                _apply_workspace_storage_limit(user, bandwidth_limit)
 
                 # C. AUDIT LOG
                 if not old_is_pro:
@@ -195,10 +213,11 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id, payload_hash=Non
                     sub.lemon_squeezy_subscription_id = subscription_id
                     sub.save()
 
-                    # B. Sync with the Core User App (Preserving your original DDD logic)
+                    # B. Sync display math + Workspace ledger
                     user.subscription_tier = 'FREE'
                     user.storage_limit_gb = FREE_TIER_GB
                     user.save(update_fields=['subscription_tier', 'storage_limit_gb'])
+                    _apply_workspace_storage_limit(user, FREE_TIER_BYTES)
 
                     # C. Audit Log
                     BillingAuditLog.objects.create(

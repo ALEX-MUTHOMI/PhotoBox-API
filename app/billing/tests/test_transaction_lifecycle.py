@@ -123,6 +123,14 @@ class FullTransactionLifecycleTests(TransactionTestCase):
         self.assertEqual(log.old_state, 'FREE')
         self.assertEqual(log.new_state, 'PRO')
 
+        from core.models import Workspace
+        workspace, _ = Workspace.objects.get_or_create(
+            user=self.user,
+            defaults={'business_name': 'Studio'},
+        )
+        workspace.refresh_from_db()
+        self.assertEqual(workspace.storage_limit_bytes, 50 * 1024 * 1024 * 1024)
+
     def test_subscription_cancelled_downgrades_to_free(self):
         """
         LIFECYCLE: After PRO user cancels, webhook fires subscription_cancelled.
@@ -148,6 +156,14 @@ class FullTransactionLifecycleTests(TransactionTestCase):
 
         self.user.refresh_from_db()
         self.assertEqual(self.user.subscription_tier, 'FREE')
+
+        from core.models import Workspace
+        workspace, _ = Workspace.objects.get_or_create(
+            user=self.user,
+            defaults={'business_name': 'Studio'},
+        )
+        workspace.refresh_from_db()
+        self.assertEqual(workspace.storage_limit_bytes, 1073741824)
 
         log = BillingAuditLog.objects.get(webhook_event_id='evt_cancel_001')
         self.assertEqual(log.old_state, 'PRO')

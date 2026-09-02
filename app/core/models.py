@@ -113,16 +113,12 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def save(self, *args, **kwargs):
         """
-        EDA FIX: Auto-Sync Billing to the Storage Ledger.
-        If Stripe updates storage_limit_gb, automatically sync it to Workspace bytes.
+        Persist the photographer account.
+
+        `storage_limit_gb` is display math only. The Workspace byte ledger is
+        written by billing (Lemon Squeezy) and signup — not overwritten here.
         """
         super().save(*args, **kwargs)
-        # Ensure the user has a workspace, then sync the bytes
-        if hasattr(self, 'workspace'):
-            new_byte_limit = self.storage_limit_gb * 1024 * 1024 * 1024
-            if self.workspace.storage_limit_bytes != new_byte_limit:
-                self.workspace.storage_limit_bytes = new_byte_limit
-                self.workspace.save(update_fields=['storage_limit_bytes'])
 
 
 # ==========================================
