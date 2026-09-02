@@ -43,3 +43,34 @@ class SettingsBootTests(SimpleTestCase):
         result = self._run_manage_check("release")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid boolean value for DEBUG", result.stderr)
+
+    def test_production_boot_requires_turnstile_secret(self):
+        env = os.environ.copy()
+        env.update(
+            {
+                "TESTING": "0",
+                "DEBUG": "false",
+                "DB_NAME": "photobox",
+                "DB_PASS": "change-me-strong-db-password",
+                "SECRET_KEY": "change-me-to-a-50-char-random-string-in-production",
+                "DJANGO_SECRET_KEY": "change-me-to-a-50-char-random-string-in-production",
+                "ALLOWED_HOSTS": "api.example.com",
+                "CORS_ALLOWED_ORIGINS": "https://app.example.com",
+                "CSRF_TRUSTED_ORIGINS": "https://app.example.com",
+                "TURNSTILE_SECRET_KEY": "",
+            }
+        )
+        env.pop("PYTEST_CURRENT_TEST", None)
+        env["TURNSTILE_SECRET_KEY"] = ""
+        env["CLOUDFLARE_TURNSTILE_SECRET_KEY"] = ""
+        result = subprocess.run(
+            [sys.executable, "manage.py", "check"],
+            cwd=APP_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        combined = result.stderr + result.stdout
+        self.assertIn("TURNSTILE_SECRET_KEY", combined)

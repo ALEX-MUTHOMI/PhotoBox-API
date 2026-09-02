@@ -62,9 +62,18 @@ def _detect_test_mode() -> bool:
     `pytest gallery/tests/...` skipped the in-memory storage and eager Celery
     safeguards. That made the suite behave differently in Docker/CI vs local
     Django test runs.
+
+    Explicit TESTING=0/false always wins so production boot checks can run
+    from a pytest-spawned subprocess.
     """
-    if _env_flag("TESTING"):
-        return True
+    testing_raw = os.environ.get("TESTING")
+    if testing_raw is not None:
+        normalized = testing_raw.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
 
@@ -104,6 +113,11 @@ if not _IS_TEST:
             _missing.append('CORS_ALLOWED_ORIGINS')
         if not os.environ.get('CSRF_TRUSTED_ORIGINS'):
             _missing.append('CSRF_TRUSTED_ORIGINS')
+        if not (
+            os.environ.get('TURNSTILE_SECRET_KEY')
+            or os.environ.get('CLOUDFLARE_TURNSTILE_SECRET_KEY')
+        ):
+            _missing.append('TURNSTILE_SECRET_KEY')
 
     if _missing:
         raise ImproperlyConfigured(
@@ -446,6 +460,12 @@ CLOUDFLARE_R2_DOMAIN            = os.environ.get('CLOUDFLARE_R2_DOMAIN', '')
 CLOUDFLARE_ACCESS_KEY_ID        = os.environ.get('CLOUDFLARE_ACCESS_KEY_ID', '')
 CLOUDFLARE_SECRET_ACCESS_KEY    = os.environ.get('CLOUDFLARE_SECRET_ACCESS_KEY', '')
 CLOUDFLARE_WEBHOOK_SECRET       = os.environ.get('CLOUDFLARE_WEBHOOK_SECRET', '')
+TURNSTILE_SECRET_KEY = (
+    os.environ.get('TURNSTILE_SECRET_KEY')
+    or os.environ.get('CLOUDFLARE_TURNSTILE_SECRET_KEY', '')
+)
+CLOUDFLARE_TURNSTILE_SECRET_KEY = TURNSTILE_SECRET_KEY
+TURNSTILE_FAIL_OPEN = _env_flag('TURNSTILE_FAIL_OPEN', default=False)
 CLOUDFLARE_R2_DELETE_ENDPOINT   = os.environ.get('CLOUDFLARE_R2_DELETE_ENDPOINT', '')
 CLOUDFLARE_R2_DELETE_BUCKET_NAME = os.environ.get('CLOUDFLARE_R2_DELETE_BUCKET_NAME', '')
 CLOUDFLARE_R2_DELETE_ACCESS_KEY_ID = os.environ.get('CLOUDFLARE_R2_DELETE_ACCESS_KEY_ID', '')

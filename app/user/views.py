@@ -3,7 +3,6 @@ Views for the user API.
 """
 import logging
 import hashlib
-import requests
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
@@ -23,6 +22,7 @@ from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 
 from core.security import scrub_email, scrub_ip
+from core.turnstile import verify_turnstile_token
 from user.password_reset_serializers import (
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
@@ -42,14 +42,7 @@ class CreateUserView(generics.CreateAPIView):
     def verify_turnstile(self, token, ip_address):
         if getattr(settings, 'TESTING', False) and token == 'valid':  # nosec B105 - test-only sentinel.
             return True
-        try:
-            res = requests.post('https://challenges.cloudflare.com/turnstile/v0/siteverify', data={
-                'secret': getattr(settings, 'TURNSTILE_SECRET_KEY', 'dummy'),
-                'response': token, 'remoteip': ip_address
-            }, timeout=5)
-            return res.json().get('success', False)
-        except requests.RequestException:
-            return False
+        return verify_turnstile_token(token, ip_address)
 
     def create(self, request, *args, **kwargs):
         # 1. Extract IP (Strips comma-separated spoofed proxy blocks)

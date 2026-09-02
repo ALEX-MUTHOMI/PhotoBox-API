@@ -15,16 +15,23 @@ logger = logging.getLogger(__name__)
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
 
+def _turnstile_secret() -> str:
+    for attr in ("TURNSTILE_SECRET_KEY", "CLOUDFLARE_TURNSTILE_SECRET_KEY"):
+        value = getattr(settings, attr, "")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def verify_turnstile_token(token: str | None, remote_ip: str | None = None) -> bool:
     """
     Verify a Cloudflare Turnstile token.
 
-    Returns True if valid or if Turnstile is disabled in development.
+    Fail-closed when the secret is missing outside explicit test overrides.
     """
-    secret_key = getattr(settings, "CLOUDFLARE_TURNSTILE_SECRET_KEY", "")
+    secret_key = _turnstile_secret()
     if not secret_key:
-        # Disabled or in local dev/testing
-        return True
+        return False
 
     if not token:
         return False
@@ -43,5 +50,4 @@ def verify_turnstile_token(token: str | None, remote_ip: str | None = None) -> b
             return bool(data.get("success", False))
     except Exception as exc:
         logger.warning("Turnstile verification connection failed", extra={"error": str(exc)})
-        # Fail-closed in production, fail-open if configured
-        return getattr(settings, "TURNSTILE_FAIL_OPEN", False)
+        return bool(getattr(settings, "TURNSTILE_FAIL_OPEN", False))

@@ -14,14 +14,28 @@ class TestTurnstileBotDefense:
             mock_res.json.return_value = {"success": True}
             mock_client.return_value.__enter__.return_value.post.return_value = mock_res
             with patch("core.turnstile.settings") as mock_settings:
-                mock_settings.CLOUDFLARE_TURNSTILE_SECRET_KEY = "test-secret"
+                mock_settings.TURNSTILE_SECRET_KEY = "test-secret"
+                mock_settings.TESTING = False
+                mock_settings.DEBUG = False
+                mock_settings.TURNSTILE_FAIL_OPEN = False
                 assert verify_turnstile_token("valid-cf-token") is True
 
     def test_empty_token_fails_validation(self):
         with patch("core.turnstile.settings") as mock_settings:
-            mock_settings.CLOUDFLARE_TURNSTILE_SECRET_KEY = "test-secret"
+            mock_settings.TURNSTILE_SECRET_KEY = "test-secret"
+            mock_settings.TESTING = False
+            mock_settings.DEBUG = False
+            mock_settings.TURNSTILE_FAIL_OPEN = False
             assert verify_turnstile_token("") is False
             assert verify_turnstile_token(None) is False
+
+    def test_missing_secret_fails_closed_outside_tests(self):
+        with patch("core.turnstile.settings") as mock_settings:
+            mock_settings.TURNSTILE_SECRET_KEY = ""
+            mock_settings.TESTING = False
+            mock_settings.DEBUG = False
+            mock_settings.TURNSTILE_FAIL_OPEN = False
+            assert verify_turnstile_token("any-token") is False
 
 
 class TestWebhookReplayProtection:
