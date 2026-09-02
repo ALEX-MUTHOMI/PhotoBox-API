@@ -65,6 +65,27 @@ class PublicUserApiTests(TestCase):
         self.assertEqual(user.email, 'hackerstudio@gmail.com')
         self.assertTrue(hasattr(user, 'subscription'))
         self.assertEqual(user.subscription.storage_limit_bytes, 1073741824)
+        self.assertTrue(hasattr(user, 'workspace'))
+        self.assertEqual(user.workspace.business_name, 'Hacker Studio')
+
+    @override_settings(TESTING=True)
+    def test_create_user_provisions_workspace_tenant(self):
+        """Signup must mint the Workspace or Event create fails for a new JWT."""
+        from core.models import Workspace
+
+        payload = {
+            'email': 'studio-owner@example.com',
+            'password': 'StrongPassword123!',
+            'name': 'Studio Owner',
+            'accepted_terms': True,
+            'cf_turnstile_response': 'valid',
+        }
+        res = self.client.post(REGISTER_USER_URL, payload)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(email='studio-owner@example.com')
+        workspace = Workspace.objects.get(user=user)
+        self.assertEqual(workspace.business_name, 'Studio Owner')
+        self.assertEqual(workspace.storage_limit_bytes, 1073741824)
 
     # ---------------------------------------------------------
     # RESTORED FROM OLD CODE: DUPLICATES & ENTROPY

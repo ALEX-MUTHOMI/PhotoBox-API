@@ -3,6 +3,7 @@ Serializers for the user API View.
 """
 from django.contrib.auth import get_user_model
 from django.conf import settings
+from django.db import transaction
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -65,7 +66,18 @@ class UserSerializer(serializers.ModelSerializer):
                 'tos_version',
                 getattr(settings, 'CURRENT_TOS_VERSION', '2026-04'),
             )
-        return get_user_model().objects.create_user(**validated_data)
+        with transaction.atomic():
+            user = get_user_model().objects.create_user(**validated_data)
+            from core.models import Workspace
+            byte_limit = int(getattr(user, 'storage_limit_gb', 1) or 1) * 1024 * 1024 * 1024
+            Workspace.objects.get_or_create(
+                user=user,
+                defaults={
+                    'business_name': user.name or user.email.split('@')[0],
+                    'storage_limit_bytes': byte_limit,
+                },
+            )
+        return user
 
     def update(self, instance, validated_data):
         """Securely update profile, enforcing password verification."""
