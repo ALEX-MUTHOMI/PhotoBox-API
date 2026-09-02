@@ -216,6 +216,11 @@ class GalleryGuestAccessView(PublishedGalleryMixin, APIView):
         serializer = GuestAccessSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
+        raw_pin = serializer.validated_data.get("pin") or ""
+
+        if gallery._hashed_pin:
+            if not raw_pin or not gallery.check_pin(raw_pin):
+                raise PermissionDenied("Invalid gallery PIN.")
 
         session = GalleryAccessSession.objects.create(
             gallery=gallery,

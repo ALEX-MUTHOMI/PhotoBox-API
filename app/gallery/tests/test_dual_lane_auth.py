@@ -169,6 +169,43 @@ class DualLaneGalleryAuthTests(TestCase):
         self.assertEqual(GalleryAccessSession.objects.count(), 0)
         self.assertEqual(GalleryMagicLink.objects.count(), 0)
 
+    def test_guest_access_without_pin_is_rejected_when_gallery_has_pin(self):
+        self.gallery.set_pin("4920")
+        response = self.client.post(
+            reverse("gallery_public:guest-access", args=[self.gallery.id]),
+            {"email": "guest@example.com"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(GalleryAccessSession.objects.count(), 0)
+
+    def test_guest_access_with_wrong_pin_is_rejected(self):
+        self.gallery.set_pin("4920")
+        response = self.client.post(
+            reverse("gallery_public:guest-access", args=[self.gallery.id]),
+            {"email": "guest@example.com", "pin": "0000"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(GalleryAccessSession.objects.count(), 0)
+
+    def test_guest_access_with_correct_pin_creates_session(self):
+        self.gallery.set_pin("4920")
+        response = self.client.post(
+            reverse("gallery_public:guest-access", args=[self.gallery.id]),
+            {"email": "guest@example.com", "pin": "4920"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            GalleryAccessSession.objects.filter(
+                gallery=self.gallery,
+                email="guest@example.com",
+                role=GalleryAccessRole.GUEST,
+            ).count(),
+            1,
+        )
+
     def test_guest_access_creates_guest_session_and_cookie(self):
         response = self.client.post(
             reverse("gallery_public:guest-access", args=[self.gallery.id]),

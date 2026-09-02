@@ -39,6 +39,7 @@ class MagicLinkConsumeSerializer(serializers.Serializer):
 
 class GuestAccessSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    pin = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
     def validate_email(self, value):
         return normalize_gallery_email(value)
