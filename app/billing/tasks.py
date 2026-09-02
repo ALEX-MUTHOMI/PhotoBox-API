@@ -1,3 +1,5 @@
+"""Celery tasks for Lemon Squeezy webhook processing and billing side effects."""
+
 import logging
 import json
 import hashlib

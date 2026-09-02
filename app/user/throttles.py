@@ -1,3 +1,5 @@
+"""DRF throttles for password-reset request and confirm endpoints."""
+
 from rest_framework.throttling import SimpleRateThrottle
 
 

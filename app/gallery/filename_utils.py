@@ -1,3 +1,5 @@
+"""Filename normalization helpers for gallery uploads and downloads."""
+
 import os
 import re
 from typing import Optional

@@ -1,3 +1,5 @@
+"""Domain models for checkout pricing plans and payment session metadata."""
+
 import uuid
 from django.db import models
 from django.conf import settings

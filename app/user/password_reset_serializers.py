@@ -1,3 +1,5 @@
+"""Serializers for password-reset request and confirmation flows."""
+
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers

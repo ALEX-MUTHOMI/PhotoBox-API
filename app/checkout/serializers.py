@@ -1,3 +1,5 @@
+"""Serializers for checkout plans and hosted payment redirect URLs."""
+
 from rest_framework import serializers
 from urllib.parse import urlparse
 from django.conf import settings

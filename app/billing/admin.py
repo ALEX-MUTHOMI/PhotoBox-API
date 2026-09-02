@@ -1,3 +1,5 @@
+"""Django admin registrations for billing and webhook audit tables."""
+
 from django.contrib import admin
 from .models import Subscription, ProcessedWebhook, BillingAuditLog, DeadLetterQueue, RegistrationLog
 

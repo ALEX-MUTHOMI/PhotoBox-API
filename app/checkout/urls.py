@@ -1,3 +1,5 @@
+"""URL routes for checkout plan listing and payment-link generation."""
+
 from django.urls import path
 from .views import PricingPlanListView, GenerateCheckoutLinkView
 
