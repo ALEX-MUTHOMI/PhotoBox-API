@@ -10,6 +10,8 @@
 
 **PhotoBox** is an enterprise-grade, multi-tenant photography SaaS platform built on an **Event-Driven Architecture (EDA)**. It provides professional photographers with a highly resilient, asynchronous backend to upload, curate, and deliver client galleries at massive scale.
 
+Architecture and API reference live in [`photobox-docs-site/`](photobox-docs-site); live OpenAPI is served at `/api/schema/` when the API is running.
+
 
 ## 🏗 Architecture & The Unified Vault Pattern
 
