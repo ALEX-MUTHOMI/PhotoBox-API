@@ -201,8 +201,12 @@ class Photo(models.Model):
     class Meta:
         ordering = ['uploaded_at']
         indexes = [
-            models.Index(fields=['scene', 'is_processed']), # Legacy frontend query
-            models.Index(fields=['scene', 'status']),       # New EDA frontend polling query
+            models.Index(fields=['scene', 'is_processed']),  # Legacy frontend query
+            models.Index(fields=['scene', 'status']),        # New EDA frontend polling query
+            models.Index(
+                fields=['scene', 'uploaded_at', 'id'],
+                name='gal_photo_scene_upload_id_idx',
+            ),
         ]
 
     def _watermark_is_required(self) -> bool:

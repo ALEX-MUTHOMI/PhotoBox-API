@@ -244,6 +244,7 @@ class MultipartUploadSink:
         self._bucket = bucket
         self._key = key
         self._buffer = bytearray()
+        self._read_pos = 0
         self._parts: list[dict[str, Any]] = []
         self._part_number = 1
         self._bytes_written = 0
@@ -267,6 +268,16 @@ class MultipartUploadSink:
     def flush(self) -> None:
         return None
 
+    def _buffered_len(self) -> int:
+        return len(self._buffer) - self._read_pos
+
+    def _compact_buffer(self) -> None:
+        if self._read_pos == 0:
+            return
+        # Drop consumed prefix in one slice; remaining payload is always < 8MiB.
+        del self._buffer[: self._read_pos]
+        self._read_pos = 0
+
     def write(self, data: bytes) -> int:
         if self._aborted or self._completed:
             raise RuntimeError("Cannot write to a closed multipart upload.")
@@ -275,10 +286,13 @@ class MultipartUploadSink:
         payload = data if isinstance(data, (bytes, bytearray)) else bytes(data)
         self._buffer.extend(payload)
         self._bytes_written += len(payload)
-        while len(self._buffer) >= MULTIPART_CHUNK_BYTES:
-            chunk = bytes(self._buffer[:MULTIPART_CHUNK_BYTES])
-            del self._buffer[:MULTIPART_CHUNK_BYTES]
+        while self._buffered_len() >= MULTIPART_CHUNK_BYTES:
+            end = self._read_pos + MULTIPART_CHUNK_BYTES
+            chunk = bytes(self._buffer[self._read_pos : end])
+            self._read_pos = end
             self._flush_part(chunk)
+            if self._read_pos >= MULTIPART_CHUNK_BYTES:
+                self._compact_buffer()
         return len(payload)
 
     def _flush_part(self, chunk: bytes) -> None:
@@ -298,9 +312,12 @@ class MultipartUploadSink:
         if self._completed or self._aborted:
             return
         try:
-            if self._buffer:
-                self._flush_part(bytes(self._buffer))
-                self._buffer.clear()
+            remaining = self._buffered_len()
+            if remaining:
+                chunk = bytes(self._buffer[self._read_pos :])
+                self._read_pos = len(self._buffer)
+                self._flush_part(chunk)
+                self._compact_buffer()
             if not self._parts:
                 self._flush_part(b"")
             self._client.complete_multipart_upload(

@@ -9,7 +9,6 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import mixins, parsers, status, viewsets
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
-from rest_framework.pagination import PageNumberPagination
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -34,6 +33,7 @@ from gallery.models import (
     Scene,
     VisibilityChoices,
 )
+from gallery.pagination import FastLaneKeysetPagination
 from gallery.storage import DOWNLOAD_URL_TTL_SECONDS
 from gallery import serializers
 from gallery.throttles import FastLaneUploadThrottle
@@ -329,18 +329,6 @@ class SceneViewSet(viewsets.ModelViewSet):
 # Then immediately fires a Celery task and returns 202.
 # The web worker is FREE within milliseconds.
 
-class FastLanePhotoPagination(PageNumberPagination):
-    """
-    Fail-closed pagination for tenant photo listings.
-
-    The explicit max_page_size prevents authenticated clients from requesting
-    arbitrarily large result sets and turning the endpoint into a response-body
-    amplification vector.
-    """
-    page_size = 50
-    page_size_query_param = 'page_size'
-    max_page_size = 100
-
 class PhotoFastLaneViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
@@ -364,7 +352,7 @@ class PhotoFastLaneViewSet(
 
     # DRF native Multipart parser for binary
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
-    pagination_class = FastLanePhotoPagination
+    pagination_class = FastLaneKeysetPagination
 
     def get_permissions(self):
         if getattr(self, "action", None) == "download_url":
@@ -388,7 +376,7 @@ class PhotoFastLaneViewSet(
         if scene_id:
             queryset = queryset.filter(scene_id=scene_id)
 
-        return queryset.order_by('-uploaded_at')
+        return queryset.order_by('-uploaded_at', '-id')
 
     def download_url(self, request, pk=None):
         """
@@ -511,6 +499,8 @@ class PhotoFastLaneViewSet(
                 if img.format not in FAST_LANE_ALLOWED_IMAGE_FORMATS:
                     raise ValidationError("Invalid Magic Bytes. Not a genuine JPEG, PNG, or WEBP.")
                 _assert_no_trailing_payload(img.format, image_bytes)
+                photo_width = img.width
+                photo_height = img.height
         except (OSError, UnidentifiedImageError):
             raise ValidationError("Malware Shield: Uploaded file is disguised or structurally corrupted.")
 
@@ -533,6 +523,8 @@ class PhotoFastLaneViewSet(
                 original_filename=safe_filename,
                 is_processed=False,
                 status='PENDING',
+                width=photo_width,
+                height=photo_height,
             )
 
         # 6. FIRE AND FORGET — hand off to Celery worker pool

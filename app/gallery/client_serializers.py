@@ -72,13 +72,25 @@ class GalleryPublicPhotoSerializer(serializers.ModelSerializer):
 class GalleryPublicSceneSerializer(serializers.ModelSerializer):
     photos = GalleryPublicPhotoSerializer(many=True, read_only=True)
     title = serializers.SerializerMethodField()
+    has_more_photos = serializers.SerializerMethodField()
 
     def get_title(self, obj):
         return safe_client_text(obj.title)
 
+    def get_has_more_photos(self, obj):
+        limit = int(self.context.get("photos_per_scene_limit", 100))
+        # Prefetch loads limit+1 rows so we can detect overflow without a COUNT.
+        return len(list(obj.photos.all())) > limit
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        limit = int(self.context.get("photos_per_scene_limit", 100))
+        data["photos"] = data.get("photos", [])[:limit]
+        return data
+
     class Meta:
         model = Scene
-        fields = ['id', 'title', 'display_order', 'photos']
+        fields = ['id', 'title', 'display_order', 'photos', 'has_more_photos']
 
 
 class GalleryPublicSerializer(serializers.ModelSerializer):

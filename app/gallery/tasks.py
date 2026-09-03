@@ -298,6 +298,7 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
                 (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
             )
             prepared = ImageOps.exif_transpose(raw_image, in_place=True) or raw_image
+            width, height = prepared.size
             prepared.thumbnail(
                 (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
                 PILImage.Resampling.LANCZOS,
@@ -318,7 +319,11 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
         if not uploaded:
             raise RuntimeError("Web derivative upload failed.")
 
-        Photo.objects.filter(id=photo.id).update(web_r2_object_key=web_key)
+        Photo.objects.filter(id=photo.id).update(
+            web_r2_object_key=web_key,
+            width=width,
+            height=height,
+        )
         return {"status": "completed", "photo_id": photo_id, "web_r2_object_key": web_key}
     except Exception as exc:
         logger.exception("[WEB DERIVATIVE] Failed for photo %s: %s", photo_id, exc)
@@ -508,11 +513,20 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             )["total"]
             or 0
         )
+        # ZIP is streamed to R2 (no full tempfile). Guard only that the worker
+        # still has a small ephemeral margin for source-chunk spill / OS needs.
         margin = int(getattr(settings, "ARCHIVE_DISK_MARGIN_BYTES", 50 * 1024 * 1024))
         available_bytes = shutil.disk_usage(tempfile.gettempdir()).free
-        if required_bytes + margin > available_bytes:
+        if available_bytes < margin:
             GalleryArchiveJob.objects.filter(id=job.id).update(
                 status=GalleryArchiveJob.Status.FAILED
+            )
+            logger.warning(
+                "[ARCHIVE] Refusing job %s: free disk %s < margin %s (gallery bytes=%s).",
+                archive_job_id,
+                available_bytes,
+                margin,
+                required_bytes,
             )
             return {
                 "status": "error",

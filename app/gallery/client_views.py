@@ -7,7 +7,8 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import F, Prefetch, Window
+from django.db.models.functions import RowNumber
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import NotFound, PermissionDenied, Throttled
@@ -284,14 +285,27 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
         if access_session.role == GalleryAccessRole.CLIENT:
             allowed_visibility.append(VisibilityChoices.CLIENT_ONLY)
 
+        photos_per_scene = int(
+            getattr(settings, "GALLERY_PUBLIC_PHOTOS_PER_SCENE", 100)
+        )
+        # Limit per scene via window function — Prefetch cannot apply a Python
+        # slice (Django must still filter by parent scene_id).
         photo_queryset = (
             Photo.objects
-            .select_related("scene__event__workspace")
             .filter(
                 status="READY",
                 visibility__in=allowed_visibility,
             )
-            .order_by("uploaded_at")
+            .alias(
+                _scene_rn=Window(
+                    expression=RowNumber(),
+                    partition_by=[F("scene_id")],
+                    order_by=[F("uploaded_at").asc(), F("id").asc()],
+                )
+            )
+            .filter(_scene_rn__lte=photos_per_scene + 1)
+            .select_related("scene__event__workspace")
+            .order_by("uploaded_at", "id")
         )
         scene_queryset = (
             Scene.objects
@@ -309,7 +323,10 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
             .get()
         )
 
-        serializer = GalleryPublicSerializer(gallery)
+        serializer = GalleryPublicSerializer(
+            gallery,
+            context={"photos_per_scene_limit": photos_per_scene},
+        )
         return Response(
             {
                 "gallery": serializer.data,

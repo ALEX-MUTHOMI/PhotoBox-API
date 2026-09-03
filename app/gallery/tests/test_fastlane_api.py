@@ -250,8 +250,9 @@ class FastLaneApiTests(TestCase):
         res = self.client.get(FAST_LANE_URL)
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         # Our user has 0 photos — must not see the rival's photo
-        self.assertEqual(res.data['count'], 0)
         self.assertEqual(len(res.data['results']), 0)
+        self.assertFalse(res.data['has_more'])
+        self.assertIsNone(res.data['next_cursor'])
 
     # ==========================================
     # 3. RED TEAM SCRIPTS (THE PERIMETER DEFENSES)

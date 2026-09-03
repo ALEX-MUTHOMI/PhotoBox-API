@@ -169,6 +169,8 @@ class WatermarkEngineTests(TestCase):
         self.photo.refresh_from_db()
         self.assertEqual(self.photo.r2_object_key, "raw/tenant_1/scene_1/hero.jpg")
         self.assertTrue(self.photo.web_r2_object_key.startswith("web/tenant_"))
+        self.assertEqual(self.photo.width, 2800)
+        self.assertEqual(self.photo.height, 1800)
 
     def test_delivery_url_prefers_web_derivative_key_when_available(self):
         self.photo.web_r2_object_key = "web/tenant_1/gallery_test/photo_test.webp"
