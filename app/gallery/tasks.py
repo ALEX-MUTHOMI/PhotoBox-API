@@ -17,8 +17,7 @@ from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
 from django.db import OperationalError, transaction
-from django.db.models import F, Sum, Value
-from django.db.models.functions import Greatest
+from django.db.models import Sum
 from django.utils import timezone
 from django.utils.text import slugify
 from PIL import Image as PILImage
@@ -29,6 +28,7 @@ PILImage.MAX_IMAGE_PIXELS = int(
     getattr(settings, "PHOTO_MAX_IMAGE_PIXELS", 89_478_485)
 )
 
+from core.quota import release_workspace_bytes
 from gallery.filename_utils import sanitize_gallery_filename
 from gallery.models import GalleryArchiveJob, GalleryArchiveType, Photo, VisibilityChoices
 
@@ -337,7 +337,6 @@ def _handle_abandoned_upload(
     workspace_id: Any,
     file_size_bytes: int,
 ) -> Dict[str, Any]:
-    from core.models import Workspace  # noqa: PLC0415
     from gallery.models import Photo  # noqa: PLC0415
 
     logger.info(
@@ -367,13 +366,7 @@ def _handle_abandoned_upload(
 
         refund_bytes: int = photo.file_size_bytes or 0
         photo.delete()
-
-        Workspace.objects.filter(id=workspace_id).update(
-            storage_used_bytes=Greatest(
-                Value(0),
-                F("storage_used_bytes") - refund_bytes,
-            )
-        )
+        release_workspace_bytes(workspace_id, refund_bytes)
 
     return {
         "status": "abandoned_and_refunded",
