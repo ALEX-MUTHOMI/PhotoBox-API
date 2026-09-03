@@ -605,6 +605,22 @@ GALLERY_SESSION_RETENTION_DAYS = int(os.environ.get('GALLERY_SESSION_RETENTION_D
 GALLERY_PUBLIC_PHOTOS_PER_SCENE = int(
     os.environ.get('GALLERY_PUBLIC_PHOTOS_PER_SCENE', 100)
 )
+
+# Web derivative / watermark (Celery generate_photo_web_derivative)
+PHOTO_WEB_MAX_DIMENSION = int(os.environ.get('PHOTO_WEB_MAX_DIMENSION', 2400))
+PHOTO_WEB_QUALITY = int(os.environ.get('PHOTO_WEB_QUALITY', 86))
+PHOTO_WATERMARK_SCALE_RATIO = float(os.environ.get('PHOTO_WATERMARK_SCALE_RATIO', 0.22))
+# Optional SAT corner selection (Phase 3) — default off keeps bottom-right
+PHOTO_WATERMARK_SAT_CORNER_SELECTION = _env_flag(
+    'PHOTO_WATERMARK_SAT_CORNER_SELECTION', default=False
+)
+PHOTO_WATERMARK_SAT_MIN_PIXELS = int(
+    os.environ.get('PHOTO_WATERMARK_SAT_MIN_PIXELS', 160_000)
+)
+PHOTO_WATERMARK_SAT_MAX_SIDE = int(os.environ.get('PHOTO_WATERMARK_SAT_MAX_SIDE', 800))
+PHOTO_WATERMARK_SAT_TIE_EPSILON = float(
+    os.environ.get('PHOTO_WATERMARK_SAT_TIE_EPSILON', 1.0)
+)
 TRUST_CLOUDFLARE_CLIENT_IP = os.environ.get('TRUST_CLOUDFLARE_CLIENT_IP', 'false').lower() in (
     '1', 'true', 'yes',
 )

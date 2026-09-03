@@ -5,8 +5,9 @@ B+ tree descent on (scene, uploaded_at, id) — not OFFSET.
 Filename search (?q=) is a filter-only pg_trgm path; order stays
 (-uploaded_at, -id) so cursors remain valid.
 
+SAT watermark corner selection: gallery.watermark_sat (env-flagged).
+
 Deferred (not implemented here):
-- summed-area-table watermark corner selection
 - LSH + Union-Find near-duplicate burst clustering
 """
 from __future__ import annotations
@@ -103,3 +104,4 @@ class FastLaneKeysetPagination(BasePagination):
                 "has_more": self.has_more,
             }
         )
+

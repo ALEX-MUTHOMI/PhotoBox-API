@@ -100,10 +100,28 @@ def _apply_workspace_watermark(base_image: PILImage.Image, workspace) -> PILImag
         watermark_logo.putalpha(alpha_channel)
 
     margin = max(24, canvas.width // 40, canvas.height // 40)
-    position = (
+    br_position = (
         max(margin, canvas.width - watermark_logo.width - margin),
         max(margin, canvas.height - watermark_logo.height - margin),
     )
+    if getattr(settings, "PHOTO_WATERMARK_SAT_CORNER_SELECTION", False):
+        from gallery.watermark_sat import choose_quietest_corner  # noqa: PLC0415
+
+        position = choose_quietest_corner(
+            canvas,
+            watermark_logo.width,
+            watermark_logo.height,
+            margin,
+            min_pixels=int(
+                getattr(settings, "PHOTO_WATERMARK_SAT_MIN_PIXELS", 160_000)
+            ),
+            max_side=int(getattr(settings, "PHOTO_WATERMARK_SAT_MAX_SIDE", 800)),
+            tie_epsilon=float(
+                getattr(settings, "PHOTO_WATERMARK_SAT_TIE_EPSILON", 1.0)
+            ),
+        )
+    else:
+        position = br_position
     canvas.alpha_composite(watermark_logo, dest=position)
     return canvas.convert("RGB")
 
