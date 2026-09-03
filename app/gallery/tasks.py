@@ -251,7 +251,8 @@ def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:
             photo_id,
         )
 
-    generate_photo_web_derivative.delay(photo_id)
+    generate_photo_web_derivative.apply_async(args=[photo_id], throw=False)
+    compute_photo_phash.apply_async(args=[photo_id], throw=False)
     return {"status": "self_healed", "photo_id": photo_id}
 
 
@@ -353,6 +354,187 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
         for temp_path in (temp_source_path, temp_output_path):
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+
+def _schedule_scene_burst_cluster(scene_id: str) -> None:
+    """Debounce per-scene reclustering after phash writes."""
+    from django.core.cache import cache  # noqa: PLC0415
+
+    debounce = int(getattr(settings, "PHOTO_CLUSTER_DEBOUNCE_SECONDS", 30))
+    lock_key = f"photobox:burst:cluster:pending:{scene_id}"
+    # cache.add is SET NX — first caller schedules; later ones within TTL are no-ops.
+    if cache.add(lock_key, "1", timeout=max(debounce, 1)):
+        cluster_scene_bursts.apply_async(
+            args=[str(scene_id)],
+            countdown=debounce,
+        )
+
+
+@shared_task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    name="gallery.tasks.compute_photo_phash",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="image-processing",
+)
+def compute_photo_phash(self, photo_id: str) -> Dict[str, Any]:
+    """Compute 64-bit pHash from the original R2 object after READY."""
+    from gallery.models import Photo  # noqa: PLC0415
+    from gallery.phash import compute_phash_bytes  # noqa: PLC0415
+    from gallery.storage import get_r2_client  # noqa: PLC0415
+
+    normalized_photo_id = _normalise_photo_id(photo_id)
+    if not normalized_photo_id:
+        return {"status": "invalid_id", "photo_id": photo_id}
+
+    version = int(getattr(settings, "PHOTO_PHASH_VERSION", 1))
+    try:
+        photo = Photo.objects.select_related("scene").get(id=normalized_photo_id)
+    except Photo.DoesNotExist:
+        return {"status": "missing", "photo_id": normalized_photo_id}
+
+    if photo.status != "READY" or photo.media_type != "IMAGE":
+        return {"status": "skipped_not_ready", "photo_id": normalized_photo_id}
+    if not photo.r2_object_key:
+        return {"status": "skipped_no_origin", "photo_id": normalized_photo_id}
+    if photo.phash and photo.phash_version == version:
+        return {"status": "already_hashed", "photo_id": normalized_photo_id}
+
+    temp_source_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".source") as temp_source:
+            temp_source_path = temp_source.name
+
+        r2_client = get_r2_client()
+        response = r2_client.get_object(
+            Bucket=settings.CLOUDFLARE_R2_BUCKET_NAME,
+            Key=photo.r2_object_key,
+        )
+        with response["Body"] as source_stream, open(temp_source_path, "wb") as out:
+            while True:
+                chunk = source_stream.read(ARCHIVE_STREAM_CHUNK_SIZE)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+        with PILImage.open(temp_source_path) as raw_image:
+            prepared = ImageOps.exif_transpose(raw_image) or raw_image
+            prepared.thumbnail((256, 256), PILImage.Resampling.LANCZOS)
+            digest = compute_phash_bytes(prepared)
+
+        Photo.objects.filter(id=photo.id).update(
+            phash=digest,
+            phash_version=version,
+        )
+        _schedule_scene_burst_cluster(str(photo.scene_id))
+        return {
+            "status": "completed",
+            "photo_id": normalized_photo_id,
+            "scene_id": str(photo.scene_id),
+        }
+    except Exception as exc:
+        logger.exception("[PHASH] Failed for photo %s: %s", normalized_photo_id, exc)
+        try:
+            raise self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            return {
+                "status": "error",
+                "photo_id": normalized_photo_id,
+                "reason": "max_retries_exceeded",
+            }
+    finally:
+        if temp_source_path and os.path.exists(temp_source_path):
+            os.remove(temp_source_path)
+
+
+@shared_task(
+    bind=True,
+    max_retries=1,
+    default_retry_delay=30,
+    name="gallery.tasks.cluster_scene_bursts",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    queue="image-processing",
+)
+def cluster_scene_bursts(self, scene_id: str) -> Dict[str, Any]:
+    """Recompute per-scene burst clusters from stored phashes (offline)."""
+    from gallery.burst_cluster import PhashRow, cluster_phash_rows  # noqa: PLC0415
+    from gallery.models import Photo, PhotoBurstCluster, Scene  # noqa: PLC0415
+
+    try:
+        scene_uuid = UUID(str(scene_id))
+    except (AttributeError, TypeError, ValueError):
+        return {"status": "invalid_scene", "scene_id": scene_id}
+
+    hamming_threshold = int(getattr(settings, "PHOTO_PHASH_HAMMING_THRESHOLD", 8))
+    time_window = int(getattr(settings, "PHOTO_BURST_TIME_WINDOW_SECONDS", 90))
+    bands = int(getattr(settings, "PHOTO_PHASH_LSH_BANDS", 8))
+    rows_per_band = int(getattr(settings, "PHOTO_PHASH_LSH_ROWS", 8))
+    version = int(getattr(settings, "PHOTO_PHASH_VERSION", 1))
+
+    try:
+        with transaction.atomic():
+            try:
+                Scene.objects.select_for_update().get(id=scene_uuid)
+            except Scene.DoesNotExist:
+                return {"status": "missing_scene", "scene_id": str(scene_uuid)}
+
+            photos = list(
+                Photo.objects.filter(
+                    scene_id=scene_uuid,
+                    status="READY",
+                    media_type="IMAGE",
+                    phash__isnull=False,
+                ).values_list("id", "phash", "uploaded_at")
+            )
+            rows = [
+                PhashRow(photo_id=pid, phash=bytes(ph), uploaded_at=ts)
+                for pid, ph, ts in photos
+                if ph
+            ]
+            components = cluster_phash_rows(
+                rows,
+                hamming_threshold=hamming_threshold,
+                time_window_seconds=time_window,
+                bands=bands,
+                rows_per_band=rows_per_band,
+            )
+
+            Photo.objects.filter(scene_id=scene_uuid).update(burst_cluster=None)
+            PhotoBurstCluster.objects.filter(scene_id=scene_uuid).delete()
+
+            clustered_ids: list = []
+            for members in components:
+                ordered = sorted(
+                    members,
+                    key=lambda pid: next(
+                        r.uploaded_at for r in rows if r.photo_id == pid
+                    ),
+                )
+                cluster = PhotoBurstCluster.objects.create(
+                    scene_id=scene_uuid,
+                    representative_photo_id=ordered[0],
+                    member_count=len(ordered),
+                    phash_version=version,
+                    hamming_threshold=hamming_threshold,
+                )
+                Photo.objects.filter(id__in=ordered).update(burst_cluster=cluster)
+                clustered_ids.extend(ordered)
+
+        return {
+            "status": "completed",
+            "scene_id": str(scene_uuid),
+            "cluster_count": len(components),
+            "clustered_photos": len(clustered_ids),
+        }
+    except Exception as exc:
+        logger.exception("[BURST] Clustering failed for scene %s: %s", scene_id, exc)
+        try:
+            raise self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            return {"status": "error", "scene_id": str(scene_uuid)}
 
 
 def _handle_abandoned_upload(

@@ -197,6 +197,22 @@ class Photo(models.Model):
         help_text="Image pixel height. Set by Celery worker post-upload."
     )
 
+    # --- PHASE 4: Offline near-duplicate burst clustering ---
+    phash = models.BinaryField(
+        max_length=8,
+        null=True,
+        blank=True,
+        help_text="64-bit perceptual hash (8 bytes). Set offline after READY.",
+    )
+    phash_version = models.PositiveSmallIntegerField(default=1)
+    burst_cluster = models.ForeignKey(
+        'PhotoBurstCluster',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='photos',
+    )
+
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -213,6 +229,10 @@ class Photo(models.Model):
                 fields=['original_filename'],
                 name='gal_photo_orig_fname_trgm_idx',
                 opclasses=['gin_trgm_ops'],
+            ),
+            models.Index(
+                fields=['scene', 'burst_cluster'],
+                name='gal_photo_scene_burst_idx',
             ),
         ]
 
@@ -304,6 +324,39 @@ class Photo(models.Model):
     def cloudinary_thumbnail_url(self):
         """Deprecated alias. Use delivery_url instead."""
         return self.delivery_url
+
+
+class PhotoBurstCluster(models.Model):
+    """Per-scene near-duplicate burst group (offline LSH + Union-Find)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    scene = models.ForeignKey(
+        Scene,
+        on_delete=models.CASCADE,
+        related_name='burst_clusters',
+    )
+    representative_photo = models.ForeignKey(
+        'Photo',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    member_count = models.PositiveIntegerField(default=0)
+    computed_at = models.DateTimeField(auto_now=True)
+    phash_version = models.PositiveSmallIntegerField(default=1)
+    hamming_threshold = models.PositiveSmallIntegerField(default=8)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=['scene', 'computed_at'],
+                name='gal_burst_scene_computed_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Burst {self.id} ({self.member_count} photos)"
 
 
 # --- THE ALIAS BRIDGE ---

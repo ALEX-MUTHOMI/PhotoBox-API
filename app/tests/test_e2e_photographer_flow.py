@@ -83,7 +83,11 @@ class PhotographerFlowE2ETests(TestCase):
         photo = Photo.objects.get(id=response.data["photo_id"])
         mock_delay.assert_called_once_with(str(photo.id))
 
-        with patch("gallery.storage.get_r2_client") as mock_get_r2_client:
+        with patch("gallery.storage.get_r2_client") as mock_get_r2_client, patch(
+            "gallery.tasks.generate_photo_web_derivative.apply_async"
+        ), patch(
+            "gallery.tasks.compute_photo_phash.apply_async"
+        ):
             mock_client = MagicMock()
             mock_client.head_object.return_value = {"ContentLength": photo.file_size_bytes}
             mock_client.generate_presigned_url.return_value = "https://signed.example.com/download"

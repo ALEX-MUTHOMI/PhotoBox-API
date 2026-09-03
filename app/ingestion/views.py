@@ -45,7 +45,7 @@ from gallery.storage import (
     r2_object_size,
     validate_r2_key,
 )
-from gallery.tasks import generate_photo_web_derivative
+from gallery.tasks import compute_photo_phash, generate_photo_web_derivative
 from gallery.throttles import HeavyLaneTicketThrottle
 from .serializers import (
     MAX_IMAGE_SIZE_BYTES,
@@ -817,6 +817,10 @@ class R2WebhookView(APIView):
             )
 
         if ready_asset_id and ready_media_type == "IMAGE":
-            generate_photo_web_derivative.delay(ready_asset_id)
+            # throw=False: never bubble eager-mode Retry/SSL into the webhook HTTP path
+            generate_photo_web_derivative.apply_async(
+                args=[ready_asset_id], throw=False
+            )
+            compute_photo_phash.apply_async(args=[ready_asset_id], throw=False)
         logger.info("[R2-WEBHOOK] ✅ Asset marked READY. key=%r", r2_object_key)
         return Response({"status": "success"}, status=status.HTTP_200_OK)

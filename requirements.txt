@@ -3,6 +3,7 @@ djangorestframework>=3.15.2,<3.16
 psycopg2>=2.9.3,<2.10
 drf-spectacular>=0.22.1,<0.23
 Pillow>=10.2.0
+ImageHash>=4.3.1,<5
 python-dotenv>=1.0.0
 uwsgi>=2.0.23
 djangorestframework-simplejwt>=5.5.1,<5.6

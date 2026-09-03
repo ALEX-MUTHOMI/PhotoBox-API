@@ -621,6 +621,18 @@ PHOTO_WATERMARK_SAT_MAX_SIDE = int(os.environ.get('PHOTO_WATERMARK_SAT_MAX_SIDE'
 PHOTO_WATERMARK_SAT_TIE_EPSILON = float(
     os.environ.get('PHOTO_WATERMARK_SAT_TIE_EPSILON', 1.0)
 )
+
+# Phase 4 burst clustering (offline Celery)
+PHOTO_PHASH_VERSION = int(os.environ.get('PHOTO_PHASH_VERSION', 1))
+PHOTO_PHASH_HAMMING_THRESHOLD = int(os.environ.get('PHOTO_PHASH_HAMMING_THRESHOLD', 8))
+PHOTO_BURST_TIME_WINDOW_SECONDS = int(
+    os.environ.get('PHOTO_BURST_TIME_WINDOW_SECONDS', 90)
+)
+PHOTO_PHASH_LSH_BANDS = int(os.environ.get('PHOTO_PHASH_LSH_BANDS', 8))
+PHOTO_PHASH_LSH_ROWS = int(os.environ.get('PHOTO_PHASH_LSH_ROWS', 8))
+PHOTO_CLUSTER_DEBOUNCE_SECONDS = int(
+    os.environ.get('PHOTO_CLUSTER_DEBOUNCE_SECONDS', 30)
+)
 TRUST_CLOUDFLARE_CLIENT_IP = os.environ.get('TRUST_CLOUDFLARE_CLIENT_IP', 'false').lower() in (
     '1', 'true', 'yes',
 )

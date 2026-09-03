@@ -35,6 +35,20 @@ ALIAS_WEBHOOK_URL = reverse('r2-webhook-ingress')
 TEST_SECRET = 'test-webhook-secret-do-not-use-in-prod'
 HEAD_PATCH = 'ingestion.views.r2_object_size'
 
+# Eager Celery would otherwise run compute_photo_phash against placeholder R2.
+_PHASH_ENQUEUE_PATCHER = None
+
+
+def setUpModule():
+    global _PHASH_ENQUEUE_PATCHER
+    _PHASH_ENQUEUE_PATCHER = patch("ingestion.views.compute_photo_phash.apply_async")
+    _PHASH_ENQUEUE_PATCHER.start()
+
+
+def tearDownModule():
+    if _PHASH_ENQUEUE_PATCHER is not None:
+        _PHASH_ENQUEUE_PATCHER.stop()
+
 
 def _make_payload(**kwargs) -> dict:
     """Build a minimal valid PutObject webhook payload."""
@@ -157,14 +171,16 @@ class R2WebhookHappyPathTests(TestCase):
         self.assertTrue(self.asset.is_processed)
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    @patch("ingestion.views.generate_photo_web_derivative.delay")
+    @patch("ingestion.views.compute_photo_phash.apply_async")
+    @patch("ingestion.views.generate_photo_web_derivative.apply_async")
     @patch(HEAD_PATCH, return_value=1024)
-    def test_putobject_enqueues_derivative_task(self, _mock_head, mock_delay):
+    def test_putobject_enqueues_derivative_task(self, _mock_head, mock_delay, mock_phash):
         payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1024)
         res = _post_webhook(self.client, payload)
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        mock_delay.assert_called_once_with(str(self.asset.id))
+        mock_delay.assert_called_once_with(args=[str(self.asset.id)], throw=False)
+        mock_phash.assert_called_once_with(args=[str(self.asset.id)], throw=False)
 
 
 class R2WebhookAliasRouteTests(TestCase):
@@ -254,11 +270,12 @@ class R2WebhookIdempotencyTests(TestCase):
         self.assertEqual(self.asset.status, 'READY')
         self.assertTrue(self.asset.is_processed)
 
-    @patch("ingestion.views.generate_photo_web_derivative.delay")
+    @patch("ingestion.views.compute_photo_phash.apply_async")
+    @patch("ingestion.views.generate_photo_web_derivative.apply_async")
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
     @patch(HEAD_PATCH, return_value=2048)
     def test_duplicate_ready_webhook_does_not_enqueue_duplicate_derivative(
-        self, _mock_head, mock_delay
+        self, _mock_head, mock_delay, mock_phash
     ):
         """
         IDEMPOTENCY: Replayed object-created events for an already READY asset
@@ -273,6 +290,7 @@ class R2WebhookIdempotencyTests(TestCase):
         self.assertEqual(self.asset.status, 'READY')
         self.assertTrue(self.asset.is_processed)
         mock_delay.assert_not_called()
+        mock_phash.assert_not_called()
 
 
 class R2WebhookSecurityTests(TestCase):
@@ -542,9 +560,12 @@ class R2WebhookLostTransitionTests(TestCase):
         )
 
     @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
-    @patch("ingestion.views.generate_photo_web_derivative.delay")
+    @patch("ingestion.views.compute_photo_phash.apply_async")
+    @patch("ingestion.views.generate_photo_web_derivative.apply_async")
     @patch(HEAD_PATCH, return_value=1024)
-    def test_lost_transition_does_not_enqueue_derivative(self, _mock_head, mock_delay):
+    def test_lost_transition_does_not_enqueue_derivative(
+        self, _mock_head, mock_delay, mock_phash
+    ):
         """Another worker already moved the row out of PENDING."""
         self.asset.status = 'PROCESSING'
         self.asset.save(update_fields=['status'])
@@ -554,3 +575,4 @@ class R2WebhookLostTransitionTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data['status'], 'processing')
         mock_delay.assert_not_called()
+        mock_phash.assert_not_called()

@@ -64,6 +64,23 @@ def r2_object_exists_stub(monkeypatch):
     return exists_mock
 
 
+@pytest.fixture(autouse=True)
+def suppress_post_ready_fanout(monkeypatch):
+    """Self-heal must not eagerly run derivative/phash against real R2."""
+    from gallery import tasks as gallery_tasks
+
+    monkeypatch.setattr(
+        gallery_tasks.generate_photo_web_derivative,
+        "apply_async",
+        MagicMock(name="generate_photo_web_derivative.apply_async"),
+    )
+    monkeypatch.setattr(
+        gallery_tasks.compute_photo_phash,
+        "apply_async",
+        MagicMock(name="compute_photo_phash.apply_async"),
+    )
+
+
 class TestProcessFastLaneAsset:
     def test_task_self_heals_when_r2_object_exists(self, r2_client_stub):
         photo = PhotoFactory(

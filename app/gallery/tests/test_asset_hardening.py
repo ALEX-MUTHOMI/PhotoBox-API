@@ -135,6 +135,8 @@ class CrossTenantAssetHijackTests(TestCase):
 
 
 @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_WEBHOOK_SECRET)
+@patch("ingestion.views.compute_photo_phash.apply_async")
+@patch("ingestion.views.generate_photo_web_derivative.apply_async")
 class HeavyLaneSizeMismatchQuarantineTests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -150,7 +152,9 @@ class HeavyLaneSizeMismatchQuarantineTests(TestCase):
         )
 
     @patch("ingestion.views.r2_object_size", return_value=5 * 1024 * 1024 * 1024)
-    def test_heavy_lane_size_mismatch_quarantines_asset(self, _mock_head):
+    def test_heavy_lane_size_mismatch_quarantines_asset(
+        self, _mock_head, _mock_derivative, _mock_phash
+    ):
         response = _post_signed_webhook(
             self.client,
             {
@@ -168,7 +172,9 @@ class HeavyLaneSizeMismatchQuarantineTests(TestCase):
         self.assertFalse(self.asset.is_processed)
 
     @patch("ingestion.views.r2_object_size", return_value=1024)
-    def test_smaller_actual_size_transitions_to_ready(self, _mock_head):
+    def test_smaller_actual_size_transitions_to_ready(
+        self, _mock_head, mock_derivative, mock_phash
+    ):
         response = _post_signed_webhook(
             self.client,
             {
@@ -184,6 +190,8 @@ class HeavyLaneSizeMismatchQuarantineTests(TestCase):
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, "READY")
         self.assertTrue(self.asset.is_processed)
+        mock_derivative.assert_called_once_with(args=[str(self.asset.id)], throw=False)
+        mock_phash.assert_called_once_with(args=[str(self.asset.id)], throw=False)
 
 
 @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_WEBHOOK_SECRET)

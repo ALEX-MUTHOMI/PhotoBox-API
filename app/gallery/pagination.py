@@ -6,9 +6,7 @@ Filename search (?q=) is a filter-only pg_trgm path; order stays
 (-uploaded_at, -id) so cursors remain valid.
 
 SAT watermark corner selection: gallery.watermark_sat (env-flagged).
-
-Deferred (not implemented here):
-- LSH + Union-Find near-duplicate burst clustering
+Burst clustering: gallery.phash + gallery.burst_cluster (offline Celery).
 """
 from __future__ import annotations
 
