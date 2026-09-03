@@ -91,6 +91,55 @@ class ResolveDomainEndpointTests(TestCase):
         self.assertEqual(response.json()["workspace_id"], "")
 
 
+class DomainCacheInvalidationTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(
+            email="cache@example.com",
+            password="StrongPassword123!",
+            name="Cache",
+            accepted_terms=True,
+        )
+        self.workspace = Workspace.objects.create(
+            user=self.user,
+            business_name="Cache Studio",
+            custom_domain="photos.studio.example",
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_renaming_custom_domain_drops_cached_old_host(self):
+        from core.domain_index import get_workspace_id_by_domain
+
+        self.assertEqual(
+            get_workspace_id_by_domain("photos.studio.example"),
+            str(self.workspace.id),
+        )
+
+        self.workspace.custom_domain = "new.studio.example"
+        self.workspace.save(update_fields=["custom_domain"])
+
+        self.assertIsNone(get_workspace_id_by_domain("photos.studio.example"))
+        self.assertEqual(
+            get_workspace_id_by_domain("new.studio.example"),
+            str(self.workspace.id),
+        )
+
+    def test_clearing_custom_domain_drops_cached_hosts(self):
+        from core.domain_index import get_workspace_id_by_domain
+
+        self.assertEqual(
+            get_workspace_id_by_domain("photos.studio.example"),
+            str(self.workspace.id),
+        )
+
+        self.workspace.custom_domain = None
+        self.workspace.save(update_fields=["custom_domain"])
+
+        self.assertIsNone(get_workspace_id_by_domain("photos.studio.example"))
+
+
 class ResolveDomainMisconfigurationTests(TestCase):
     @override_settings(CLOUDFLARE_WORKER_SHARED_SECRET="")
     def test_unset_shared_secret_rejects_every_request(self):

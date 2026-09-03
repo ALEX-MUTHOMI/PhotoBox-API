@@ -65,6 +65,8 @@ class SoftDeleteQuerySet(models.QuerySet):
 
 
 class SoftDeleteManager(models.Manager.from_queryset(SoftDeleteQuerySet)):
+    use_in_migrations = True
+
     def get_queryset(self):
         return super().get_queryset().filter(is_deleted=False)
 
@@ -173,4 +175,29 @@ class Workspace(SoftDeleteModel):
 
     def __str__(self):
         return self.business_name
+
+    def save(self, *args, **kwargs):
+        previous_domain = None
+        # UUID PKs are assigned before INSERT, so `self.pk` is not a reliable
+        # "this row already exists" check. `_state.adding` is.
+        if not self._state.adding:
+            previous_domain = (
+                type(self).all_objects.filter(pk=self.pk)
+                .values_list("custom_domain", flat=True)
+                .first()
+            )
+        super().save(*args, **kwargs)
+
+        old_host = (previous_domain or "").strip()
+        new_host = (self.custom_domain or "").strip()
+        if old_host.lower() == new_host.lower():
+            return
+
+        from core.domain_index import invalidate_domain_cache
+
+        if old_host:
+            invalidate_domain_cache(old_host)
+        if new_host:
+            invalidate_domain_cache(new_host)
+
 
