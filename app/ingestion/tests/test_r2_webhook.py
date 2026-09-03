@@ -202,9 +202,19 @@ class R2WebhookAliasRouteTests(TestCase):
         )
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res['Deprecation'], 'true')
         self.asset.refresh_from_db()
         self.assertEqual(self.asset.status, 'READY')
         self.assertTrue(self.asset.is_processed)
+
+    @override_settings(CLOUDFLARE_WEBHOOK_SECRET=TEST_SECRET)
+    @patch(HEAD_PATCH, return_value=1024)
+    def test_canonical_webhook_does_not_advertise_deprecation(self, _mock_head):
+        payload = _make_payload(r2_object_key=self.asset.r2_object_key, size=1024)
+        res = _post_webhook(self.client, payload)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.has_header('Deprecation'))
 
 
 class R2WebhookIdempotencyTests(TestCase):

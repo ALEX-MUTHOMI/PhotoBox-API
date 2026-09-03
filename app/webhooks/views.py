@@ -19,4 +19,6 @@ class CloudflareWebhookView(R2WebhookView):
             "[DEPRECATED-ROUTE] POST /api/v1/webhooks/cloudflare/r2/ — "
             "repoint the Cloudflare notification rule to /api/v1/ingestion/webhook/"
         )
-        return super().dispatch(request, *args, **kwargs)
+        response = super().dispatch(request, *args, **kwargs)
+        response['Deprecation'] = 'true'
+        return response
