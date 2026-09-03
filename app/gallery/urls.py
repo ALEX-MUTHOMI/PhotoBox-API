@@ -54,5 +54,15 @@ urlpatterns = [
     # THE API ROUTER
     # Includes all viewsets registered above.
     # -------------------------------------------------------------------------
+    path(
+        'events/<uuid:event_id>/allowlist/<int:pk>/',
+        views.ClientAllowlistDetailView.as_view(),
+        name='event-allowlist-detail',
+    ),
+    path(
+        'events/<uuid:event_id>/allowlist/',
+        views.ClientAllowlistListView.as_view(),
+        name='event-allowlist',
+    ),
     path('', include(router.urls)),
 ]

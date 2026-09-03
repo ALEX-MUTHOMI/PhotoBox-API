@@ -147,3 +147,15 @@ class PhotoFastLaneSerializer(serializers.ModelSerializer):
         validated_data.pop('image_file', None)
 
         return super().update(instance, validated_data)
+
+class ClientAllowlistSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClientAllowlist
+        fields = ["id", "email", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+    def validate_email(self, value):
+        email = normalize_gallery_email(value)
+        if not email:
+            raise serializers.ValidationError("Email is required.")
+        return email

@@ -5,7 +5,7 @@ import io
 import logging
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import mixins, parsers, status, viewsets
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -25,6 +25,7 @@ from gallery.client_serializers import safe_client_text
 from gallery.permissions import IsPhotographerUser
 from gallery.filename_utils import sanitize_gallery_filename
 from gallery.models import (
+    ClientAllowlist,
     Event,
     FavoriteSelection,
     GalleryAccessRole,
@@ -142,6 +143,51 @@ class EventViewSet(viewsets.ModelViewSet):
                 f"to {event.client_email}"
             )
 
+
+def _owned_event_or_404(request, event_id) -> Event:
+    try:
+        return Event.objects.get(id=event_id, workspace__user=request.user)
+    except Event.DoesNotExist:
+        raise NotFound()
+
+
+class ClientAllowlistListView(APIView):
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsPhotographerUser]
+
+    def get(self, request, event_id):
+        event = _owned_event_or_404(request, event_id)
+        entries = event.client_allowlist.order_by("created_at")
+        return Response(
+            serializers.ClientAllowlistSerializer(entries, many=True).data
+        )
+
+    def post(self, request, event_id):
+        event = _owned_event_or_404(request, event_id)
+        serializer = serializers.ClientAllowlistSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+        try:
+            with transaction.atomic():
+                entry = ClientAllowlist.objects.create(gallery=event, email=email)
+        except IntegrityError:
+            raise ValidationError({"email": "This email is already allowlisted."})
+        return Response(
+            serializers.ClientAllowlistSerializer(entry).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ClientAllowlistDetailView(APIView):
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsPhotographerUser]
+
+    def delete(self, request, event_id, pk):
+        event = _owned_event_or_404(request, event_id)
+        deleted, _ = ClientAllowlist.objects.filter(gallery=event, pk=pk).delete()
+        if not deleted:
+            raise NotFound()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 class PhotographerFavoritesSummaryView(APIView):
     authentication_classes = [JWTAuthentication]
