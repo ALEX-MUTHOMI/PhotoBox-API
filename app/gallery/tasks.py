@@ -475,7 +475,7 @@ def _get_archive_photos_queryset(job: GalleryArchiveJob):
 )
 def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
     from gallery.models import GalleryArchiveJob  # noqa: PLC0415
-    from gallery.storage import get_r2_client, upload_local_file_to_r2  # noqa: PLC0415
+    from gallery.storage import get_r2_client, open_multipart_r2_upload  # noqa: PLC0415
 
     try:
         job = GalleryArchiveJob.objects.select_related(
@@ -496,7 +496,7 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
     if job.status == GalleryArchiveJob.Status.PROCESSING:
         return {"status": "processing", "archive_job_id": archive_job_id}
 
-    temp_zip_path = None
+    sink = None
     try:
         GalleryArchiveJob.objects.filter(id=job.id).update(
             status=GalleryArchiveJob.Status.PROCESSING
@@ -520,18 +520,18 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
                 "archive_job_id": archive_job_id,
             }
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
-            temp_zip_path = temp_zip.name
-
+        zip_key = _build_archive_r2_key(job)
         r2_client = get_r2_client()
+        # Materialize first so a mid-stream failure cannot leave a PostgreSQL
+        # named cursor open for a later GC to abort another transaction.
+        photos = list(_get_archive_photos_queryset(job))
+        sink = open_multipart_r2_upload(zip_key, "application/zip")
         with zipfile.ZipFile(
-            temp_zip_path,
+            sink,
             mode="w",
             compression=zipfile.ZIP_STORED,
             allowZip64=True,
         ) as archive_file:
-            photos = _get_archive_photos_queryset(job)
-
             for photo in photos:
                 response = r2_client.get_object(
                     Bucket=settings.CLOUDFLARE_R2_BUCKET_NAME,
@@ -548,14 +548,7 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
                             break
                         zip_entry.write(chunk)
 
-        zip_key = _build_archive_r2_key(job)
-        uploaded = upload_local_file_to_r2(
-            temp_zip_path,
-            zip_key,
-            content_type="application/zip",
-        )
-        if not uploaded:
-            raise RuntimeError("Archive ZIP upload to R2 failed.")
+        sink.close()
 
         expiry = timezone.now() + timedelta(hours=ARCHIVE_TTL_HOURS)
         GalleryArchiveJob.objects.filter(id=job.id).update(
@@ -569,6 +562,8 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             "r2_zip_key": zip_key,
         }
     except Exception as exc:
+        if sink is not None:
+            sink.abort()
         logger.exception("[ARCHIVE] Archive build failed for job %s: %s", archive_job_id, exc)
         GalleryArchiveJob.objects.filter(id=job.id).update(
             status=GalleryArchiveJob.Status.FAILED
@@ -581,9 +576,6 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
                 "reason": "max_retries_exceeded",
                 "archive_job_id": archive_job_id,
             }
-    finally:
-        if temp_zip_path and os.path.exists(temp_zip_path):
-            os.remove(temp_zip_path)
 
 
 upload_photo_to_r2 = process_fast_lane_asset

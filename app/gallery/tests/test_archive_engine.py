@@ -138,11 +138,10 @@ class GalleryArchiveEngineTests(TestCase):
         self.client.cookies["gallery_session"] = encode_gallery_access_session_cookie(session.id)
         return session
 
-    @patch("gallery.storage.upload_local_file_to_r2")
     @patch("gallery.storage.get_r2_client")
-    def test_archive_task_streams_only_allowed_ready_assets(self, mock_get_r2_client, mock_upload):
+    def test_archive_task_streams_only_allowed_ready_assets(self, mock_get_r2_client):
         job = GalleryArchiveJob.objects.create(gallery=self.gallery)
-        archived_names = []
+        parts: list[bytes] = []
 
         mock_client = MagicMock()
         payloads = {
@@ -155,21 +154,14 @@ class GalleryArchiveEngineTests(TestCase):
         def fake_get_object(Bucket, Key):
             return {"Body": _FakeStreamingBody(payloads[Key])}
 
-        def fake_upload(path, key, content_type="application/octet-stream"):
-            with zipfile.ZipFile(path, "r") as archive_file:
-                archived_names.extend(archive_file.namelist())
-                self.assertIn("ceremony/public-", archived_names[0])
-                self.assertEqual(
-                    archive_file.read(archived_names[0]),
-                    b"public-bytes",
-                )
-            self.assertEqual(content_type, "application/zip")
-            self.assertIn(str(job.id), key)
-            return True
+        def fake_upload_part(**kwargs):
+            parts.append(kwargs["Body"])
+            return {"ETag": f'"{len(parts)}"'}
 
         mock_client.get_object.side_effect = fake_get_object
+        mock_client.create_multipart_upload.return_value = {"UploadId": "upload-1"}
+        mock_client.upload_part.side_effect = fake_upload_part
         mock_get_r2_client.return_value = mock_client
-        mock_upload.side_effect = fake_upload
 
         result = build_gallery_archive(archive_job_id=str(job.id))
 
@@ -177,11 +169,24 @@ class GalleryArchiveEngineTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, GalleryArchiveJob.Status.COMPLETED)
         self.assertIsNotNone(job.r2_zip_key)
-        self.assertEqual(len(archived_names), 2)
-        self.assertTrue(any("public-" in name for name in archived_names))
-        self.assertTrue(any("client-" in name for name in archived_names))
-        self.assertFalse(any("hidden" in name for name in archived_names))
-        self.assertFalse(any("pending" in name for name in archived_names))
+        mock_client.create_multipart_upload.assert_called_once()
+        mock_client.complete_multipart_upload.assert_called_once()
+        mock_client.abort_multipart_upload.assert_not_called()
+        mock_client.upload_file.assert_not_called()
+
+        with zipfile.ZipFile(io.BytesIO(b"".join(parts))) as archive_file:
+            archived_names = archive_file.namelist()
+            self.assertEqual(len(archived_names), 2)
+            self.assertTrue(any("public-" in name for name in archived_names))
+            self.assertTrue(any("client-" in name for name in archived_names))
+            self.assertFalse(any("hidden" in name for name in archived_names))
+            self.assertFalse(any("pending" in name for name in archived_names))
+            self.assertEqual(
+                archive_file.read(
+                    next(name for name in archived_names if "public-" in name)
+                ),
+                b"public-bytes",
+            )
 
     @patch("gallery.tasks.shutil.disk_usage")
     def test_archive_fails_cleanly_when_temp_disk_is_insufficient(self, mock_disk_usage):
@@ -192,6 +197,27 @@ class GalleryArchiveEngineTests(TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["reason"], "insufficient_disk_space")
+        job.refresh_from_db()
+        self.assertEqual(job.status, GalleryArchiveJob.Status.FAILED)
+
+    @patch("gallery.storage.get_r2_client")
+    def test_archive_failure_aborts_multipart_upload(self, mock_get_r2_client):
+        from celery.exceptions import MaxRetriesExceededError
+
+        mock_client = MagicMock()
+        mock_client.create_multipart_upload.return_value = {"UploadId": "upload-fail"}
+        mock_client.get_object.side_effect = RuntimeError("R2 get_object failed")
+        mock_get_r2_client.return_value = mock_client
+        job = GalleryArchiveJob.objects.create(gallery=self.gallery)
+
+        with patch.object(
+            build_gallery_archive, "retry", side_effect=MaxRetriesExceededError()
+        ):
+            result = build_gallery_archive(archive_job_id=str(job.id))
+
+        self.assertEqual(result["status"], "error")
+        mock_client.abort_multipart_upload.assert_called_once()
+        mock_client.complete_multipart_upload.assert_not_called()
         job.refresh_from_db()
         self.assertEqual(job.status, GalleryArchiveJob.Status.FAILED)
 
@@ -246,12 +272,10 @@ class GalleryArchiveEngineTests(TestCase):
         job = GalleryArchiveJob.objects.get(gallery=self.gallery)
         mock_delay.assert_called_once_with(str(job.id))
 
-    @patch("gallery.storage.upload_local_file_to_r2")
     @patch("gallery.storage.get_r2_client")
     def test_favorites_archive_task_streams_only_current_session_selections(
         self,
         mock_get_r2_client,
-        mock_upload,
     ):
         session = GalleryAccessSession.objects.create(
             gallery=self.gallery,
@@ -265,7 +289,7 @@ class GalleryArchiveEngineTests(TestCase):
             access_session=session,
             archive_type=GalleryArchiveType.FAVORITES,
         )
-        archived_names = []
+        parts: list[bytes] = []
 
         mock_client = MagicMock()
         payloads = {
@@ -276,23 +300,26 @@ class GalleryArchiveEngineTests(TestCase):
         def fake_get_object(Bucket, Key):
             return {"Body": _FakeStreamingBody(payloads[Key])}
 
-        def fake_upload(path, key, content_type="application/octet-stream"):
-            with zipfile.ZipFile(path, "r") as archive_file:
-                archived_names.extend(archive_file.namelist())
-            self.assertIn("favorites/session_", key)
-            self.assertEqual(content_type, "application/zip")
-            return True
+        def fake_upload_part(**kwargs):
+            parts.append(kwargs["Body"])
+            return {"ETag": f'"{len(parts)}"'}
 
         mock_client.get_object.side_effect = fake_get_object
+        mock_client.create_multipart_upload.return_value = {"UploadId": "upload-fav"}
+        mock_client.upload_part.side_effect = fake_upload_part
         mock_get_r2_client.return_value = mock_client
-        mock_upload.side_effect = fake_upload
 
         result = build_gallery_archive(archive_job_id=str(job.id))
 
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(len(archived_names), 1)
-        self.assertTrue(any("public-" in name for name in archived_names))
-        self.assertFalse(any("client-" in name for name in archived_names))
+        self.assertIn("favorites/session_", job.r2_zip_key or result.get("r2_zip_key", ""))
+        job.refresh_from_db()
+        self.assertIn("favorites/session_", job.r2_zip_key)
+        with zipfile.ZipFile(io.BytesIO(b"".join(parts))) as archive_file:
+            archived_names = archive_file.namelist()
+            self.assertEqual(len(archived_names), 1)
+            self.assertTrue(any("public-" in name for name in archived_names))
+            self.assertFalse(any("client-" in name for name in archived_names))
 
     @patch("gallery.client_views.build_gallery_archive.delay")
     def test_favorites_archive_request_queues_job_for_scoped_session(self, mock_delay):

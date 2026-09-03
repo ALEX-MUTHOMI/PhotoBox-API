@@ -233,6 +233,141 @@ def upload_local_file_to_r2(
         return False
 
 
+MULTIPART_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+class MultipartUploadSink:
+    """Non-seekable write sink that flushes 8MiB parts to R2 multipart upload."""
+
+    def __init__(self, client: Any, bucket: str, key: str, content_type: str):
+        self._client = client
+        self._bucket = bucket
+        self._key = key
+        self._buffer = bytearray()
+        self._parts: list[dict[str, Any]] = []
+        self._part_number = 1
+        self._bytes_written = 0
+        self._completed = False
+        self._aborted = False
+        self._upload_id = client.create_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            ContentType=content_type,
+        )["UploadId"]
+
+    def seekable(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._bytes_written
+
+    def flush(self) -> None:
+        return None
+
+    def write(self, data: bytes) -> int:
+        if self._aborted or self._completed:
+            raise RuntimeError("Cannot write to a closed multipart upload.")
+        if not data:
+            return 0
+        payload = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+        self._buffer.extend(payload)
+        self._bytes_written += len(payload)
+        while len(self._buffer) >= MULTIPART_CHUNK_BYTES:
+            chunk = bytes(self._buffer[:MULTIPART_CHUNK_BYTES])
+            del self._buffer[:MULTIPART_CHUNK_BYTES]
+            self._flush_part(chunk)
+        return len(payload)
+
+    def _flush_part(self, chunk: bytes) -> None:
+        response = self._client.upload_part(
+            Bucket=self._bucket,
+            Key=self._key,
+            PartNumber=self._part_number,
+            UploadId=self._upload_id,
+            Body=chunk,
+        )
+        self._parts.append(
+            {"ETag": response["ETag"], "PartNumber": self._part_number}
+        )
+        self._part_number += 1
+
+    def close(self) -> None:
+        if self._completed or self._aborted:
+            return
+        try:
+            if self._buffer:
+                self._flush_part(bytes(self._buffer))
+                self._buffer.clear()
+            if not self._parts:
+                self._flush_part(b"")
+            self._client.complete_multipart_upload(
+                Bucket=self._bucket,
+                Key=self._key,
+                UploadId=self._upload_id,
+                MultipartUpload={"Parts": self._parts},
+            )
+            self._completed = True
+        except Exception:
+            self.abort()
+            raise
+
+    def abort(self) -> None:
+        if self._aborted or self._completed or not self._upload_id:
+            return
+        try:
+            self._client.abort_multipart_upload(
+                Bucket=self._bucket,
+                Key=self._key,
+                UploadId=self._upload_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[R2] abort_multipart_upload failed for key=%s: %s",
+                self._key,
+                exc,
+            )
+        self._aborted = True
+
+
+def open_multipart_r2_upload(
+    r2_object_key: str,
+    content_type: str = "application/octet-stream",
+) -> MultipartUploadSink:
+    validate_r2_key(r2_object_key)
+    _, _, _, bucket = _assert_credentials()
+    return MultipartUploadSink(
+        get_r2_client(),
+        bucket,
+        r2_object_key,
+        content_type,
+    )
+
+
+def upload_streaming_body_to_r2(
+    fileobj: Any,
+    r2_object_key: str,
+    content_type: str = "application/octet-stream",
+) -> bool:
+    sink = None
+    try:
+        sink = open_multipart_r2_upload(r2_object_key, content_type)
+        while True:
+            chunk = fileobj.read(MULTIPART_CHUNK_BYTES)
+            if not chunk:
+                break
+            sink.write(chunk)
+        sink.close()
+        return True
+    except (ClientError, BotoCoreError, OSError, R2KeyValidationError, RuntimeError) as exc:
+        if sink is not None:
+            sink.abort()
+        logger.error("[R2] streaming upload failed for key=%s: %s", r2_object_key, exc)
+        return False
+
+
 def generate_r2_presigned_post(
     r2_object_key: str,
     max_size_bytes: int,
