@@ -8,6 +8,7 @@ import logging
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.postgres.indexes import GinIndex
 
 # Assuming Workspace is defined in core.models
 from core.models import Workspace
@@ -206,6 +207,12 @@ class Photo(models.Model):
             models.Index(
                 fields=['scene', 'uploaded_at', 'id'],
                 name='gal_photo_scene_upload_id_idx',
+            ),
+            # Photographer filename search (Phase 2) — requires pg_trgm
+            GinIndex(
+                fields=['original_filename'],
+                name='gal_photo_orig_fname_trgm_idx',
+                opclasses=['gin_trgm_ops'],
             ),
         ]
 

@@ -34,6 +34,7 @@ from gallery.models import (
     VisibilityChoices,
 )
 from gallery.pagination import FastLaneKeysetPagination
+from gallery.search import apply_filename_search
 from gallery.storage import DOWNLOAD_URL_TTL_SECONDS
 from gallery import serializers
 from gallery.throttles import FastLaneUploadThrottle
@@ -375,6 +376,10 @@ class PhotoFastLaneViewSet(
         scene_id = self.request.query_params.get('scene')
         if scene_id:
             queryset = queryset.filter(scene_id=scene_id)
+
+        q = self.request.query_params.get('q')
+        if q is not None:
+            queryset = apply_filename_search(queryset, q)
 
         return queryset.order_by('-uploaded_at', '-id')
 
