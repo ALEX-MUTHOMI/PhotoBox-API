@@ -201,6 +201,45 @@ jobs:
       - name: Unit tests
         run: bash scripts/ci/unit.sh
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    needs: django-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register secret masks
+        env:
+          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
+          DB_PASS_MASK: ${{ secrets.DB_PASS }}
+          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
+        run: |
+          for secret_value in \
+            "$SECRET_KEY_MASK" \
+            "$DB_PASS_MASK" \
+            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
+            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
+            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
+            "$LEMON_SQUEEZY_API_KEY_MASK" \
+            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
+            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
+            "$TURNSTILE_SECRET_KEY_MASK" \
+            "$IP_HASH_SALT_MASK"; do
+            if [ -n "$secret_value" ]; then
+              echo "::add-mask::$secret_value"
+            fi
+          done
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Coverage gate
+        run: bash scripts/ci/coverage.sh
+
   celery:
     name: celery
     runs-on: ubuntu-latest
@@ -243,7 +282,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    needs: [unit, celery]
+    needs: [unit, celery, coverage]
     steps:
       - uses: actions/checkout@v4
       - name: Register secret masks

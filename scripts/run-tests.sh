@@ -89,6 +89,7 @@ case "$SUITE" in
       checkout/tests/ \
       ingestion/tests/ \
       tests/ \
+      /repo-tests/deploy \
       --timeout=60 -v --tb=short \
       --ignore=tests/test_cloudinary_integration.py \
       --ignore=tests/test_e2e_photographer_flow.py \
@@ -160,6 +161,7 @@ case "$SUITE" in
       checkout/tests/ \
       ingestion/tests/ \
       tests/ \
+      /repo-tests/deploy \
       --cov=. \
       --cov-report=term-missing \
       --cov-report=html:htmlcov \
