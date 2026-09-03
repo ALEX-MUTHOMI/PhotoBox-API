@@ -25,7 +25,7 @@ class EventSerializer(serializers.ModelSerializer):
             'slug', 'is_published', 'expires_at', 'allow_downloads', 'gallery_pin', 'created_at',
             'client_email', 'client_name',
         ]
-        read_only_fields = ['id', 'created_at', 'slug']
+        read_only_fields = ['id', 'created_at', 'slug', 'expires_at']
 
     def create(self, validated_data):
         """Intercept creation to safely hash the PIN and auto-generate the cryptographic slug."""

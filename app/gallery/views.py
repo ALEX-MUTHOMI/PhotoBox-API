@@ -126,9 +126,13 @@ class EventViewSet(viewsets.ModelViewSet):
             (photographer may want to resend to a client).
         """
         from gallery.notifications import send_gallery_ready_email
+        from gallery.ttl import stamp_event_expiry_on_publish
 
         was_published = serializer.instance.is_published
         event = serializer.save()
+
+        if not was_published and event.is_published:
+            stamp_event_expiry_on_publish(event)
 
         # Only fire the notification on the specific False → True transition
         if not was_published and event.is_published and event.client_email:

@@ -63,21 +63,18 @@ def send_gallery_ready_email(self, event_id: str):
     frontend_url = getattr(settings, 'FRONTEND_URL', 'https://app.photobox.app')
     gallery_url = f"{frontend_url}/gallery/{event.slug}"
 
-    # Compute expiry date from subscription tier TTL
-    ttl_map = getattr(settings, 'GALLERY_TTL_DAYS', {'FREE': 30, 'PRO': 365, 'ENTERPRISE': 0})
+    from gallery.ttl import gallery_ttl_days_for
 
-    # Retrieve subscription tier from workspace owner
-    tier = 'FREE'
-    if hasattr(workspace.user, 'subscription'):
-        tier = 'PRO' if getattr(workspace.user.subscription, 'is_pro', False) else 'FREE'
-
-    ttl_days = ttl_map.get(tier, 30)
-
-    if ttl_days > 0:
-        expiry_date = (timezone.now() + timedelta(days=ttl_days)).strftime('%B %d, %Y')
+    if event.expires_at:
+        expiry_date = event.expires_at.strftime('%B %d, %Y')
         expiry_text = f"Your gallery will be available until {expiry_date}."
     else:
-        expiry_text = "Your gallery is available indefinitely."
+        ttl_days = gallery_ttl_days_for(workspace)
+        if ttl_days > 0:
+            expiry_date = (timezone.now() + timedelta(days=ttl_days)).strftime('%B %d, %Y')
+            expiry_text = f"Your gallery will be available until {expiry_date}."
+        else:
+            expiry_text = "Your gallery is available indefinitely."
 
     context = {
         'client_name':        event.client_name or 'Valued Client',
