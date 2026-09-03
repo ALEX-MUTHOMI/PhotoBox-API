@@ -1,10 +1,16 @@
 """
 Serializers for the Gallery API View (The Pixieset Standard).
 """
+import re
 import secrets
+
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.text import slugify
 from rest_framework import serializers
-from gallery.models import Event, Scene, Photo
+
+from core.models import Workspace, validate_png_watermark
+from gallery.client_auth import normalize_gallery_email
+from gallery.models import ClientAllowlist, Event, Photo, Scene
 
 
 # ==========================================
@@ -148,6 +154,14 @@ class PhotoFastLaneSerializer(serializers.ModelSerializer):
 
         return super().update(instance, validated_data)
 
+
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+_BRAND_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
 class ClientAllowlistSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClientAllowlist
@@ -159,3 +173,45 @@ class ClientAllowlistSerializer(serializers.ModelSerializer):
         if not email:
             raise serializers.ValidationError("Email is required.")
         return email
+
+
+class WorkspaceBrandingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Workspace
+        fields = [
+            "business_name",
+            "brand_color",
+            "logo",
+            "watermark_logo",
+            "watermark_opacity",
+            "custom_domain",
+        ]
+        extra_kwargs = {
+            "custom_domain": {"validators": []},
+        }
+
+    def validate_brand_color(self, value):
+        if not _BRAND_COLOR_RE.match(value or ""):
+            raise serializers.ValidationError("Brand color must be a #RRGGBB hex value.")
+        return value
+
+    def validate_custom_domain(self, value):
+        if value in (None, ""):
+            return None
+        raw = str(value).strip().lower()
+        if "://" in raw or "/" in raw or ":" in raw or " " in raw:
+            raise serializers.ValidationError(
+                "Custom domain must be a hostname, not a URL."
+            )
+        if not _HOSTNAME_RE.match(raw):
+            raise serializers.ValidationError("Enter a valid hostname.")
+        return raw
+
+    def validate_watermark_logo(self, value):
+        if not value:
+            return value
+        try:
+            validate_png_watermark(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages)
+        return value

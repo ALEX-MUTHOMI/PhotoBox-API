@@ -64,5 +64,10 @@ urlpatterns = [
         views.ClientAllowlistListView.as_view(),
         name='event-allowlist',
     ),
+    path(
+        'workspace/',
+        views.WorkspaceBrandingView.as_view(),
+        name='workspace-branding',
+    ),
     path('', include(router.urls)),
 ]

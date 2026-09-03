@@ -17,6 +17,7 @@ from rest_framework.views import APIView
 
 from core.quota import QuotaExceededError, release_workspace_bytes, reserve_workspace_bytes
 from core.models import Workspace
+from core.api_errors import dual_key_error
 from gallery.client_auth import (
     GalleryCookieJWTAuthentication,
     resolve_gallery_access_session,
@@ -188,6 +189,41 @@ class ClientAllowlistDetailView(APIView):
         if not deleted:
             raise NotFound()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceBrandingView(APIView):
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsPhotographerUser]
+    http_method_names = ["get", "patch", "head", "options"]
+
+    def _workspace(self, request):
+        try:
+            return Workspace.objects.get(user=request.user)
+        except Workspace.DoesNotExist:
+            raise ValidationError("A workspace must be initialized before updating branding.")
+
+    def get(self, request):
+        workspace = self._workspace(request)
+        return Response(serializers.WorkspaceBrandingSerializer(workspace).data)
+
+    def patch(self, request):
+        workspace = self._workspace(request)
+        serializer = serializers.WorkspaceBrandingSerializer(
+            workspace,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                serializer.save()
+        except IntegrityError:
+            return dual_key_error(
+                "Custom domain is already in use.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return Response(serializer.data)
+
 
 class PhotographerFavoritesSummaryView(APIView):
     authentication_classes = [JWTAuthentication]
