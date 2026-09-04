@@ -8,6 +8,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import mixins, parsers, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.permissions import IsAuthenticated
@@ -127,6 +128,7 @@ class EventViewSet(viewsets.ModelViewSet):
             a user cannot PATCH an event they cannot retrieve.
           - Task is idempotent: repeated publishes re-send the notification
             (photographer may want to resend to a client).
+          - Publish requires a gallery PIN (enforced in EventSerializer.update).
         """
         from gallery.notifications import send_gallery_ready_email
         from gallery.ttl import stamp_event_expiry_on_publish
@@ -135,6 +137,12 @@ class EventViewSet(viewsets.ModelViewSet):
         event = serializer.save()
 
         if not was_published and event.is_published:
+            if not event.has_pin:
+                event.is_published = False
+                event.save(update_fields=["is_published"])
+                raise ValidationError(
+                    {"gallery_pin": "A gallery PIN is required before publish."}
+                )
             stamp_event_expiry_on_publish(event)
 
         # Only fire the notification on the specific False → True transition
@@ -144,6 +152,73 @@ class EventViewSet(viewsets.ModelViewSet):
                 f"[PUBLISH] Gallery-ready email queued for Event {event.id} "
                 f"to {event.client_email}"
             )
+
+    @action(detail=True, methods=["get"], url_path="share-card")
+    def share_card(self, request, pk=None):
+        """WhatsApp-ready share payload — link by default; PIN never in public JSON."""
+        event = self.get_object()
+        frontend = getattr(settings, "FRONTEND_URL", "https://app.photobox.app").rstrip("/")
+        public_url = f"{frontend}/g/{event.share_code}" if event.share_code else None
+        return Response(
+            {
+                "share_code": event.share_code,
+                "public_url": public_url,
+                "pin_set": bool(event._hashed_pin),
+                "whatsapp_text": f"View your photos: {public_url}" if public_url else "",
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="rotate-share-code")
+    def rotate_share_code(self, request, pk=None):
+        event = self.get_object()
+        code = event.rotate_share_code()
+        frontend = getattr(settings, "FRONTEND_URL", "https://app.photobox.app").rstrip("/")
+        public_url = f"{frontend}/g/{code}"
+        return Response(
+            {
+                "share_code": code,
+                "public_url": public_url,
+                "whatsapp_text": f"View your photos: {public_url}",
+            }
+        )
+
+
+class UploadPlanView(APIView):
+    """Hint Fast vs Heavy lane from declared size/extension (photographer JWT)."""
+
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsPhotographerUser]
+
+    FAST_MAX_BYTES = 5 * 1024 * 1024
+    HEAVY_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".raw", ".cr2", ".nef", ".arw", ".dng"}
+
+    def post(self, request, *args, **kwargs):
+        filename = (request.data.get("filename") or "").strip().lower()
+        try:
+            size = int(request.data.get("size_bytes") or request.data.get("file_size_bytes") or 0)
+        except (TypeError, ValueError):
+            raise ValidationError({"size_bytes": "Must be an integer."})
+
+        ext = ""
+        if "." in filename:
+            ext = "." + filename.rsplit(".", 1)[-1]
+
+        if ext in self.HEAVY_EXTENSIONS or size > self.FAST_MAX_BYTES:
+            lane = "heavy"
+        else:
+            lane = "fast"
+
+        return Response(
+            {
+                "lane": lane,
+                "fast_max_bytes": self.FAST_MAX_BYTES,
+                "reason": (
+                    "video_or_raw_extension"
+                    if ext in self.HEAVY_EXTENSIONS
+                    else ("size_over_fast_cap" if size > self.FAST_MAX_BYTES else "fits_fast_lane")
+                ),
+            }
+        )
 
 
 def _owned_event_or_404(request, event_id) -> Event:

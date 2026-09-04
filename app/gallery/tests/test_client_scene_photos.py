@@ -78,7 +78,7 @@ class ClientScenePhotoKeysetTests(TestCase):
     def test_scene_photos_keyset_pages_without_offset(self):
         url = reverse(
             "gallery_public:scene-photos",
-            args=[self.gallery.id, self.scene.id],
+            args=[self.gallery.share_code, self.scene.id],
         )
         first = self.client.get(url, {"page_size": 10})
         self.assertEqual(first.status_code, status.HTTP_200_OK)
@@ -120,7 +120,7 @@ class ClientScenePhotoKeysetTests(TestCase):
         cursor = encode_photo_keyset_cursor(secret.uploaded_at, secret.id)
         url = reverse(
             "gallery_public:scene-photos",
-            args=[self.gallery.id, self.scene.id],
+            args=[self.gallery.share_code, self.scene.id],
         )
         response = self.client.get(url, {"cursor": cursor, "page_size": 10})
         self.assertEqual(response.status_code, status.HTTP_200_OK)

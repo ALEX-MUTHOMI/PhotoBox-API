@@ -7,10 +7,15 @@ import secrets
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.text import slugify
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 
 from core.models import Workspace, validate_png_watermark
 from gallery.client_auth import normalize_gallery_email
 from gallery.models import ClientAllowlist, Event, Photo, Scene
+from gallery.phone import normalize_e164_phone
+
+
+GALLERY_PIN_MIN_LENGTH = 6
 
 
 # ==========================================
@@ -22,16 +27,56 @@ class EventSerializer(serializers.ModelSerializer):
 
     # We expose 'gallery_pin' for the client to set a password, but we NEVER return it.
     gallery_pin = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    share_code = serializers.CharField(read_only=True)
+    pin_set = serializers.SerializerMethodField()
+    public_url = serializers.SerializerMethodField()
+    whatsapp_text = serializers.SerializerMethodField()
 
     class Meta:
         model = Event
         fields = [
             'id', 'title', 'event_type', 'event_date', 'cover_image_url',
             'cover_photo', 'typography_theme', 'color_theme',
-            'slug', 'is_published', 'expires_at', 'allow_downloads', 'gallery_pin', 'created_at',
-            'client_email', 'client_name',
+            'slug', 'share_code', 'is_published', 'expires_at', 'allow_downloads',
+            'gallery_pin', 'pin_set', 'public_url', 'whatsapp_text', 'created_at',
+            'client_email', 'client_name', 'client_phone',
         ]
-        read_only_fields = ['id', 'created_at', 'slug', 'expires_at']
+        read_only_fields = [
+            'id', 'created_at', 'slug', 'expires_at', 'share_code',
+            'pin_set', 'public_url', 'whatsapp_text',
+        ]
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_pin_set(self, obj):
+        return bool(obj._hashed_pin)
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_public_url(self, obj):
+        from django.conf import settings
+
+        frontend = getattr(settings, 'FRONTEND_URL', 'https://app.photobox.app').rstrip('/')
+        if not obj.share_code:
+            return None
+        return f"{frontend}/g/{obj.share_code}"
+
+    @extend_schema_field(serializers.CharField())
+    def get_whatsapp_text(self, obj):
+        url = self.get_public_url(obj)
+        if not url:
+            return ''
+        return f"View your photos: {url}"
+
+    def validate_gallery_pin(self, value):
+        if value in (None, ''):
+            return value
+        if len(str(value)) < GALLERY_PIN_MIN_LENGTH:
+            raise serializers.ValidationError(
+                f"PIN must be at least {GALLERY_PIN_MIN_LENGTH} characters."
+            )
+        return value
+
+    def validate_client_phone(self, value):
+        return normalize_e164_phone(value)
 
     def create(self, validated_data):
         """Intercept creation to safely hash the PIN and auto-generate the cryptographic slug."""
@@ -49,6 +94,7 @@ class EventSerializer(serializers.ModelSerializer):
         # Pass the raw PIN to the cryptographic hasher function in the Model
         if raw_pin:
             event.set_pin(raw_pin)
+            self._pin_plaintext_once = str(raw_pin)
 
         return event
 
@@ -59,13 +105,27 @@ class EventSerializer(serializers.ModelSerializer):
         # SECURITY (Lateral Movement Shield): Violently rip out `workspace` if they try to PATCH it
         validated_data.pop('workspace', None)
 
-        event = super().update(instance, validated_data)
+        publishing = validated_data.get('is_published') is True and not instance.is_published
 
+        # Apply PIN before publish check so one PATCH can set PIN + publish.
         if raw_pin is not None:
-            # If they pass '', it clears the PIN. If they pass a string, it hashes it.
-            event.set_pin(raw_pin if raw_pin else None)
+            instance.set_pin(raw_pin if raw_pin else None)
+            if raw_pin:
+                self._pin_plaintext_once = str(raw_pin)
 
-        return event
+        if publishing and not instance.has_pin:
+            raise serializers.ValidationError(
+                {'gallery_pin': 'A gallery PIN (min 6 characters) is required before publish.'}
+            )
+
+        return super().update(instance, validated_data)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        pin_once = getattr(self, '_pin_plaintext_once', None)
+        if pin_once:
+            data['gallery_pin_once'] = pin_once
+        return data
 
 
 # ==========================================
@@ -110,13 +170,33 @@ class PhotoFastLaneSerializer(serializers.ModelSerializer):
     image_file = serializers.FileField(required=True)
 
     # PHASE 3: Delivery layer — all read-only, derived from model properties
-    delivery_url = serializers.ReadOnlyField()
-    download_url = serializers.ReadOnlyField()
-    aspect_ratio = serializers.ReadOnlyField()
+    delivery_url = serializers.SerializerMethodField()
+    download_url = serializers.SerializerMethodField()
+    aspect_ratio = serializers.SerializerMethodField()
 
     # Backward compat aliases (deprecated — will be removed in v2)
-    r2_download_url = serializers.ReadOnlyField()
-    cloudinary_thumbnail_url = serializers.ReadOnlyField()
+    r2_download_url = serializers.SerializerMethodField()
+    cloudinary_thumbnail_url = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_delivery_url(self, obj):
+        return obj.delivery_url
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_download_url(self, obj):
+        return obj.download_url
+
+    @extend_schema_field(serializers.FloatField(allow_null=True))
+    def get_aspect_ratio(self, obj):
+        return obj.aspect_ratio
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_r2_download_url(self, obj):
+        return obj.r2_download_url
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_cloudinary_thumbnail_url(self, obj):
+        return obj.cloudinary_thumbnail_url
 
     class Meta:
         model = Photo
@@ -165,7 +245,7 @@ _BRAND_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 class ClientAllowlistSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClientAllowlist
-        fields = ["id", "email", "created_at"]
+        fields = ["id", "email", "phone", "created_at"]
         read_only_fields = ["id", "created_at"]
 
     def validate_email(self, value):
@@ -173,6 +253,9 @@ class ClientAllowlistSerializer(serializers.ModelSerializer):
         if not email:
             raise serializers.ValidationError("Email is required.")
         return email
+
+    def validate_phone(self, value):
+        return normalize_e164_phone(value)
 
 
 class WorkspaceBrandingSerializer(serializers.ModelSerializer):

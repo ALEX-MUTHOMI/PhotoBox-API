@@ -79,7 +79,7 @@ class PublicGalleryPhotoBoundTests(TestCase):
 
     def test_public_detail_caps_photos_per_scene_and_flags_has_more(self):
         response = self.client.get(
-            reverse("gallery_public:detail", args=[self.gallery.id])
+            reverse("gallery_public:detail", args=[self.gallery.share_code])
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         scenes = response.data["gallery"]["scenes"]

@@ -155,6 +155,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL    = 'core.User'
 SITE_ID            = 1
 
+# Always set Referrer-Policy so gallery share_codes never leak to CDNs (hole 4).
+SECURE_REFERRER_POLICY = 'no-referrer'
+
 
 # ============================================================
 # 3. PRODUCTION HTTPS SECURITY HEADERS
@@ -167,6 +170,7 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD            = True
     SECURE_CONTENT_TYPE_NOSNIFF    = True
     SECURE_BROWSER_XSS_FILTER      = True
+    SECURE_REFERRER_POLICY         = 'no-referrer'
     SESSION_COOKIE_SECURE          = True
     CSRF_COOKIE_SECURE             = True
     X_FRAME_OPTIONS                = 'DENY'
@@ -376,6 +380,7 @@ REST_FRAMEWORK = {
         'guest_access': '10/minute',
         'favorite_selection': '30/minute',
         'gallery_session_read': '120/minute',
+        'share_code_probe': '30/minute',
         'password_reset_request': '3/minute',  # nosec B105 - throttle scope label, not a secret.
     },
 }
@@ -403,6 +408,13 @@ GALLERY_ACCESS_COOKIE_NAME = os.environ.get('GALLERY_ACCESS_COOKIE_NAME', 'galle
 GALLERY_ACCESS_COOKIE_SAMESITE = os.environ.get('GALLERY_ACCESS_COOKIE_SAMESITE', 'Lax')
 GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS = int(
     os.environ.get('GALLERY_ACCESS_TOKEN_LIFETIME_SECONDS', 1800)
+)
+# Guest cookies last ~7 days or until pin_version bumps; magic-link CLIENT stays shorter.
+GALLERY_GUEST_ACCESS_TOKEN_LIFETIME_SECONDS = int(
+    os.environ.get('GALLERY_GUEST_ACCESS_TOKEN_LIFETIME_SECONDS', 7 * 24 * 3600)
+)
+GALLERY_CLIENT_ACCESS_TOKEN_LIFETIME_SECONDS = int(
+    os.environ.get('GALLERY_CLIENT_ACCESS_TOKEN_LIFETIME_SECONDS', 1800)
 )
 
 
@@ -435,6 +447,8 @@ REST_AUTH_REGISTER_SERIALIZERS = {
 # 15. CORS
 # ============================================================
 CORS_ALLOW_ALL_ORIGINS = False   # NEVER True in production
+# Exact origins only — never *.vercel.app / wildcard previews in production.
+CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
@@ -444,6 +458,11 @@ CORS_ALLOWED_ORIGINS = [
     ).split(',')
     if origin.strip()
 ]
+
+# Reject wildcard / substring preview origins in production.
+from core.cors_allowlist import assert_cors_origins_safe
+
+assert_cors_origins_safe(CORS_ALLOWED_ORIGINS, debug=DEBUG)
 
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
@@ -614,6 +633,8 @@ ARCHIVE_ZIP_LEASE_HEARTBEAT_SECONDS = int(
 ARCHIVE_ZIP_QUEUE = os.environ.get('ARCHIVE_ZIP_QUEUE', 'archive-zip')
 GALLERY_PIN_MAX_FAILED_ATTEMPTS = int(os.environ.get('GALLERY_PIN_MAX_FAILED_ATTEMPTS', 10))
 GALLERY_PIN_LOCKOUT_SECONDS = int(os.environ.get('GALLERY_PIN_LOCKOUT_SECONDS', 900))
+GALLERY_PIN_IP_ATTEMPTS_PER_MINUTE = int(os.environ.get('GALLERY_PIN_IP_ATTEMPTS_PER_MINUTE', 5))
+GALLERY_PIN_IP_WINDOW_SECONDS = int(os.environ.get('GALLERY_PIN_IP_WINDOW_SECONDS', 60))
 GALLERY_MAGIC_LINK_MAX_LIVE = int(os.environ.get('GALLERY_MAGIC_LINK_MAX_LIVE', 5))
 GALLERY_SESSION_RETENTION_DAYS = int(os.environ.get('GALLERY_SESSION_RETENTION_DAYS', 30))
 GALLERY_PUBLIC_PHOTOS_PER_SCENE = int(

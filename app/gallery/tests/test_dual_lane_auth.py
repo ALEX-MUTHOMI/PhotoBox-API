@@ -90,6 +90,9 @@ class DualLaneGalleryAuthTests(TestCase):
 
     def _set_gallery_cookie(self, role, email="viewer@example.com", gallery_id=None):
         gallery = gallery_id or self.gallery.id
+        pin_version = self.gallery.pin_version
+        if str(gallery) != str(self.gallery.id):
+            pin_version = Event.objects.filter(id=gallery).values_list("pin_version", flat=True).first() or 0
         session = GalleryAccessSession.objects.create(
             gallery_id=gallery,
             email=email,
@@ -99,6 +102,7 @@ class DualLaneGalleryAuthTests(TestCase):
             gallery_id=gallery,
             email=email,
             role=role,
+            pin_version=pin_version,
         )
         self.client.cookies["gallery_access"] = token
         self.client.cookies["gallery_session"] = encode_gallery_access_session_cookie(session.id)
@@ -106,7 +110,7 @@ class DualLaneGalleryAuthTests(TestCase):
 
     def test_magic_link_request_creates_hashed_single_use_token_for_allowlisted_email(self):
         response = self.client.post(
-            reverse("gallery_public:magic-link-request", args=[self.gallery.id]),
+            reverse("gallery_public:magic-link-request", args=[self.gallery.share_code]),
             {"email": "Bride@Example.com"},
             format="json",
         )
@@ -151,7 +155,10 @@ class DualLaneGalleryAuthTests(TestCase):
         self.assertEqual(GalleryMagicLink.objects.count(), 0)
         self.assertIn("gallery_access", response.cookies)
         self.assertTrue(response.cookies["gallery_access"]["httponly"])
-        self.assertTrue(response.cookies["gallery_access"]["secure"])
+        from django.conf import settings as dj_settings
+
+        expected_secure = bool(dj_settings.SESSION_COOKIE_SECURE)
+        self.assertEqual(bool(response.cookies["gallery_access"]["secure"]), expected_secure)
 
         second = self.client.post(
             reverse("gallery_public:magic-link-consume"),
@@ -182,9 +189,9 @@ class DualLaneGalleryAuthTests(TestCase):
         self.assertEqual(GalleryMagicLink.objects.count(), 0)
 
     def test_guest_access_without_pin_is_rejected_when_gallery_has_pin(self):
-        self.gallery.set_pin("4920")
+        self.gallery.set_pin("492012")
         response = self.client.post(
-            reverse("gallery_public:guest-access", args=[self.gallery.id]),
+            reverse("gallery_public:guest-access", args=[self.gallery.share_code]),
             {"email": "guest@example.com"},
             format="json",
         )
@@ -192,10 +199,10 @@ class DualLaneGalleryAuthTests(TestCase):
         self.assertEqual(GalleryAccessSession.objects.count(), 0)
 
     def test_guest_access_with_wrong_pin_is_rejected(self):
-        self.gallery.set_pin("4920")
+        self.gallery.set_pin("492012")
         response = self.client.post(
-            reverse("gallery_public:guest-access", args=[self.gallery.id]),
-            {"email": "guest@example.com", "pin": "0000"},
+            reverse("gallery_public:guest-access", args=[self.gallery.share_code]),
+            {"email": "guest@example.com", "pin": "000000"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -205,10 +212,10 @@ class DualLaneGalleryAuthTests(TestCase):
         self.assertNotIn("gallery_access", response.cookies)
 
     def test_guest_access_with_correct_pin_creates_session(self):
-        self.gallery.set_pin("4920")
+        self.gallery.set_pin("492012")
         response = self.client.post(
-            reverse("gallery_public:guest-access", args=[self.gallery.id]),
-            {"email": "guest@example.com", "pin": "4920"},
+            reverse("gallery_public:guest-access", args=[self.gallery.share_code]),
+            {"email": "guest@example.com", "pin": "492012"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -221,34 +228,26 @@ class DualLaneGalleryAuthTests(TestCase):
             1,
         )
 
-    def test_guest_access_creates_guest_session_and_cookie(self):
+    def test_guest_access_requires_pin_even_when_unset(self):
         response = self.client.post(
-            reverse("gallery_public:guest-access", args=[self.gallery.id]),
-            {"email": "guest@example.com"},
+            reverse("gallery_public:guest-access", args=[self.gallery.share_code]),
+            {"email": "guest@example.com", "pin": "secret9"},
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            GalleryAccessSession.objects.filter(
-                gallery=self.gallery,
-                email="guest@example.com",
-                role=GalleryAccessRole.GUEST,
-            ).count(),
-            1,
-        )
-        self.assertIn("gallery_access", response.cookies)
-        self.assertEqual(response.data["role"], GalleryAccessRole.GUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(GalleryAccessSession.objects.count(), 0)
+        self.assertNotIn("gallery_access", response.cookies)
 
     @patch.object(MagicLinkSendThrottle, "THROTTLE_RATES", {"magic_link_send": "1/minute"})
     def test_magic_link_request_is_rate_limited(self):
         first = self.client.post(
-            reverse("gallery_public:magic-link-request", args=[self.gallery.id]),
+            reverse("gallery_public:magic-link-request", args=[self.gallery.share_code]),
             {"email": "bride@example.com"},
             format="json",
         )
         second = self.client.post(
-            reverse("gallery_public:magic-link-request", args=[self.gallery.id]),
+            reverse("gallery_public:magic-link-request", args=[self.gallery.share_code]),
             {"email": "bride@example.com"},
             format="json",
         )
@@ -258,14 +257,15 @@ class DualLaneGalleryAuthTests(TestCase):
 
     @patch.object(GuestAccessThrottle, "THROTTLE_RATES", {"guest_access": "1/minute"})
     def test_guest_access_is_rate_limited(self):
+        self.gallery.set_pin("492012")
         first = self.client.post(
-            reverse("gallery_public:guest-access", args=[self.gallery.id]),
-            {"email": "guest@example.com"},
+            reverse("gallery_public:guest-access", args=[self.gallery.share_code]),
+            {"email": "guest@example.com", "pin": "492012"},
             format="json",
         )
         second = self.client.post(
-            reverse("gallery_public:guest-access", args=[self.gallery.id]),
-            {"email": "another@example.com"},
+            reverse("gallery_public:guest-access", args=[self.gallery.share_code]),
+            {"email": "another@example.com", "pin": "492012"},
             format="json",
         )
 
@@ -275,7 +275,7 @@ class DualLaneGalleryAuthTests(TestCase):
     def test_guest_gallery_view_filters_out_client_only_content(self):
         self._set_gallery_cookie(GalleryAccessRole.GUEST, email="guest@example.com")
 
-        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.id]))
+        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.share_code]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["access"]["role"], GalleryAccessRole.GUEST)
@@ -286,7 +286,7 @@ class DualLaneGalleryAuthTests(TestCase):
     def test_client_gallery_view_includes_client_only_content(self):
         self._set_gallery_cookie(GalleryAccessRole.CLIENT, email="bride@example.com")
 
-        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.id]))
+        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.share_code]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["access"]["role"], GalleryAccessRole.CLIENT)
@@ -305,6 +305,6 @@ class DualLaneGalleryAuthTests(TestCase):
             gallery_id=other_gallery.id,
         )
 
-        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.id]))
+        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.share_code]))
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

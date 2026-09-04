@@ -1,10 +1,10 @@
 """Public gallery HTTP endpoints for clients and guests."""
 
 import secrets
+import uuid
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.cache import cache
 from django.db import transaction
 from django.db.models import F, Prefetch, Window
 from django.db.models.functions import RowNumber
@@ -17,12 +17,17 @@ from rest_framework.views import APIView
 
 from gallery.client_auth import (
     GalleryCookieJWTAuthentication,
+    clear_gallery_access_cookie,
+    clear_gallery_access_session_cookie,
+    get_gallery_access_session_id,
     hash_magic_link_token,
     issue_gallery_access_token,
+    normalize_gallery_email,
     resolve_gallery_access_session,
     set_gallery_access_cookie,
     set_gallery_access_session_cookie,
 )
+from gallery.client_ip import get_request_client_ip
 from gallery.client_permissions import (
     HasClientGalleryAccess,
     HasClientOrGuestGalleryAccess,
@@ -50,6 +55,9 @@ from gallery.models import (
     VisibilityChoices,
 )
 from gallery.pagination import ClientScenePhotoKeysetPagination
+from gallery.pin_gate import clear_pin_failures, pin_gate_precheck, record_pin_failure
+from gallery.response_headers import GallerySecurityHeadersMixin, apply_gallery_security_headers
+from gallery.share_code import is_valid_share_code_format
 from gallery.storage import generate_r2_presigned_get_url
 from gallery.tasks import _enqueue_archive_job, send_gallery_magic_link_email
 from gallery.throttles import (
@@ -58,26 +66,20 @@ from gallery.throttles import (
     GuestAccessThrottle,
     MagicLinkConsumeThrottle,
     MagicLinkSendThrottle,
+    ShareCodeProbeThrottle,
 )
 
 
-def _pin_lock_cache_key(gallery_id) -> str:
-    return f"gallery_pin_failures:{gallery_id}"
-
-
-def _register_failed_pin_attempt(gallery_id) -> int:
-    key = _pin_lock_cache_key(gallery_id)
-    try:
-        return cache.incr(key)
-    except ValueError:
-        cache.set(key, 1, timeout=settings.GALLERY_PIN_LOCKOUT_SECONDS)
-        return 1
-
-
 class PublishedGalleryMixin:
+    """Resolve published galleries by share_code only on the public surface."""
+
     def get_gallery(self):
+        code = self.kwargs.get("share_code")
+        if not code or not is_valid_share_code_format(code):
+            raise NotFound("Gallery not found.")
+
         gallery = Event.objects.filter(
-            id=self.kwargs["gallery_id"],
+            share_code=code,
             is_published=True,
         ).first()
         if not gallery:
@@ -90,15 +92,30 @@ class PublishedGalleryMixin:
 
     def enforce_gallery_scope(self, request):
         token_gallery_id = str((request.auth or {}).get("gallery_id", ""))
-        requested_gallery_id = str(self.kwargs["gallery_id"])
-        if token_gallery_id != requested_gallery_id:
+        gallery = self.get_gallery()
+        if token_gallery_id != str(gallery.id):
             raise PermissionDenied("Gallery scope mismatch.")
+        return gallery
 
     def get_access_session(self, request, gallery):
         return resolve_gallery_access_session(request, gallery)
 
 
-class GalleryMagicLinkRequestView(PublishedGalleryMixin, APIView):
+class AnonymousUuidGalleryTrapView(APIView):
+    """UUID is not a public gallery door — always 404 (hole 8)."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        response = Response({"detail": "Gallery not found."}, status=status.HTTP_404_NOT_FOUND)
+        return apply_gallery_security_headers(response)
+
+    def post(self, request, *args, **kwargs):
+        return self.get(request, *args, **kwargs)
+
+
+class GalleryMagicLinkRequestView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
     throttle_classes = [MagicLinkSendThrottle]
@@ -145,7 +162,7 @@ class GalleryMagicLinkRequestView(PublishedGalleryMixin, APIView):
         )
 
 
-class GalleryMagicLinkConsumeView(APIView):
+class GalleryMagicLinkConsumeView(GallerySecurityHeadersMixin, APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
     throttle_classes = [MagicLinkConsumeThrottle]
@@ -198,6 +215,7 @@ class GalleryMagicLinkConsumeView(APIView):
                 gallery_id=gallery.id,
                 email=magic_link.email,
                 role=GalleryAccessRole.CLIENT,
+                pin_version=gallery.pin_version,
             )
             gallery_id = str(gallery.id)
             email = magic_link.email
@@ -207,17 +225,20 @@ class GalleryMagicLinkConsumeView(APIView):
             {
                 "authenticated": True,
                 "gallery_id": gallery_id,
+                "share_code": gallery.share_code,
                 "email": email,
                 "role": GalleryAccessRole.CLIENT,
                 "session_id": session.id,
             },
             status=status.HTTP_200_OK,
         )
-        set_gallery_access_cookie(response, token)
-        return set_gallery_access_session_cookie(response, session.id)
+        set_gallery_access_cookie(response, token, role=GalleryAccessRole.CLIENT)
+        return set_gallery_access_session_cookie(
+            response, session.id, role=GalleryAccessRole.CLIENT
+        )
 
 
-class GalleryGuestAccessView(PublishedGalleryMixin, APIView):
+class GalleryGuestAccessView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
     throttle_classes = [GuestAccessThrottle]
@@ -226,22 +247,78 @@ class GalleryGuestAccessView(PublishedGalleryMixin, APIView):
         gallery = self.get_gallery()
         serializer = GuestAccessSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"]
         raw_pin = serializer.validated_data.get("pin") or ""
+        email = serializer.validated_data.get("email")
 
-        if gallery._hashed_pin:
-            failures = cache.get(_pin_lock_cache_key(gallery.id), 0)
-            if failures >= settings.GALLERY_PIN_MAX_FAILED_ATTEMPTS:
-                raise Throttled(
-                    wait=settings.GALLERY_PIN_LOCKOUT_SECONDS,
-                    detail="Too many failed PIN attempts for this gallery.",
-                )
+        # Idempotent reuse only when existing GUEST cookie still matches pin_version.
+        try:
+            from gallery.client_auth import (
+                decode_gallery_access_token,
+                _cookie_name,
+            )
 
-            if not raw_pin or not gallery.check_pin(raw_pin):
-                _register_failed_pin_attempt(gallery.id)
-                raise PermissionDenied("Invalid gallery PIN.")
+            raw_token = request.COOKIES.get(_cookie_name())
+            if raw_token:
+                payload = decode_gallery_access_token(raw_token)
+                if (
+                    payload.get("role") == GalleryAccessRole.GUEST
+                    and str(payload.get("gallery_id")) == str(gallery.id)
+                    and int(payload.get("pv", 0) or 0) == int(gallery.pin_version or 0)
+                ):
+                    request.user = type(
+                        "P",
+                        (),
+                        {
+                            "is_authenticated": True,
+                            "gallery_id": str(gallery.id),
+                            "email": payload["email"],
+                            "role": GalleryAccessRole.GUEST,
+                        },
+                    )()
+                    request.auth = payload
+                    try:
+                        session = resolve_gallery_access_session(request, gallery)
+                    except PermissionDenied:
+                        session = None
+                    if session is not None:
+                        response = Response(
+                            {
+                                "authenticated": True,
+                                "gallery_id": str(gallery.id),
+                                "share_code": gallery.share_code,
+                                "email": session.email,
+                                "role": GalleryAccessRole.GUEST,
+                                "session_id": session.id,
+                            },
+                            status=status.HTTP_200_OK,
+                        )
+                        return apply_gallery_security_headers(response)
+        except Exception:
+            pass
 
-            cache.delete(_pin_lock_cache_key(gallery.id))
+        if not gallery.has_pin:
+            raise PermissionDenied("Gallery PIN is required.")
+
+        # Missing PIN: 403, no cookies, no hasher, no lockout increment.
+        if not raw_pin:
+            raise PermissionDenied("Gallery PIN is required.")
+
+        client_ip = get_request_client_ip(request)
+        gate = pin_gate_precheck(gallery.id, client_ip)
+        if not gate.allowed:
+            raise Throttled(
+                wait=gate.retry_after or settings.GALLERY_PIN_LOCKOUT_SECONDS,
+                detail="Too many failed PIN attempts for this gallery.",
+            )
+
+        if not gallery.check_pin(raw_pin):
+            record_pin_failure(gallery.id, client_ip)
+            raise PermissionDenied("Invalid gallery PIN.")
+
+        clear_pin_failures(gallery.id, client_ip)
+
+        if not email:
+            email = normalize_gallery_email(f"guest:{uuid.uuid4()}@photobox.invalid")
 
         session = GalleryAccessSession.objects.create(
             gallery=gallery,
@@ -252,29 +329,66 @@ class GalleryGuestAccessView(PublishedGalleryMixin, APIView):
             gallery_id=gallery.id,
             email=email,
             role=GalleryAccessRole.GUEST,
+            pin_version=gallery.pin_version,
         )
         response = Response(
             {
                 "authenticated": True,
                 "gallery_id": str(gallery.id),
+                "share_code": gallery.share_code,
                 "email": email,
                 "role": GalleryAccessRole.GUEST,
                 "session_id": session.id,
             },
             status=status.HTTP_200_OK,
         )
-        set_gallery_access_cookie(response, token)
-        return set_gallery_access_session_cookie(response, session.id)
+        set_gallery_access_cookie(response, token, role=GalleryAccessRole.GUEST)
+        return set_gallery_access_session_cookie(
+            response, session.id, role=GalleryAccessRole.GUEST
+        )
 
 
-class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
+class GalleryGuestLogoutView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
-    permission_classes = [HasClientOrGuestGalleryAccess]
-    throttle_classes = [GallerySessionReadThrottle]
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        # Always clear cookies; optionally resolve gallery for consistent 200.
+        try:
+            self.get_gallery()
+        except NotFound:
+            pass
+        response = Response({"detail": "Logged out."}, status=status.HTTP_200_OK)
+        clear_gallery_access_cookie(response)
+        clear_gallery_access_session_cookie(response)
+        return response
+
+
+class PublicGalleryDetailView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
+    authentication_classes = [GalleryCookieJWTAuthentication]
+    permission_classes = [AllowAny]
+    throttle_classes = [GallerySessionReadThrottle, ShareCodeProbeThrottle]
 
     def get(self, request, *args, **kwargs):
-        self.enforce_gallery_scope(request)
         gallery = self.get_gallery()
+
+        if not (
+            getattr(request.user, "is_authenticated", False)
+            and getattr(request.user, "role", None) in (
+                GalleryAccessRole.CLIENT,
+                GalleryAccessRole.GUEST,
+            )
+        ):
+            # No title/cover/photos for crawlers or link unfurls (holes 3).
+            return Response(
+                {
+                    "authenticated": False,
+                    "detail": "Authentication required.",
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        self.enforce_gallery_scope(request)
         access_session = self.get_access_session(request, gallery)
 
         allowed_visibility = [VisibilityChoices.PUBLIC]
@@ -284,8 +398,6 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
         photos_per_scene = int(
             getattr(settings, "GALLERY_PUBLIC_PHOTOS_PER_SCENE", 100)
         )
-        # Limit per scene via window function — Prefetch cannot apply a Python
-        # slice (Django must still filter by parent scene_id).
         photo_queryset = (
             Photo.objects
             .filter(
@@ -321,13 +433,18 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
 
         serializer = GalleryPublicSerializer(
             gallery,
-            context={"photos_per_scene_limit": photos_per_scene},
+            context={
+                "photos_per_scene_limit": photos_per_scene,
+                "access_role": access_session.role,
+                "allow_downloads": gallery.allow_downloads,
+            },
         )
         return Response(
             {
                 "gallery": serializer.data,
                 "access": {
                     "gallery_id": str(request.user.gallery_id),
+                    "share_code": gallery.share_code,
                     "email": request.user.email,
                     "role": request.user.role,
                 },
@@ -336,7 +453,7 @@ class PublicGalleryDetailView(PublishedGalleryMixin, APIView):
         )
 
 
-class PublicScenePhotoListView(PublishedGalleryMixin, APIView):
+class PublicScenePhotoListView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     """Nested keyset list when the detail Prefetch bound (100/scene) is exceeded."""
 
     authentication_classes = [GalleryCookieJWTAuthentication]
@@ -376,11 +493,18 @@ class PublicScenePhotoListView(PublishedGalleryMixin, APIView):
         )
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
-        serializer = GalleryPublicPhotoSerializer(page, many=True)
+        serializer = GalleryPublicPhotoSerializer(
+            page,
+            many=True,
+            context={
+                "access_role": access_session.role,
+                "allow_downloads": gallery.allow_downloads,
+            },
+        )
         return paginator.get_paginated_response(serializer.data)
 
 
-class GalleryFavoriteSelectionView(PublishedGalleryMixin, APIView):
+class GalleryFavoriteSelectionView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientOrGuestGalleryAccess]
     throttle_classes = [FavoriteSelectionThrottle]
@@ -411,7 +535,7 @@ class GalleryFavoriteSelectionView(PublishedGalleryMixin, APIView):
         )
 
 
-class GalleryFavoriteSelectionDetailView(PublishedGalleryMixin, APIView):
+class GalleryFavoriteSelectionDetailView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientOrGuestGalleryAccess]
     throttle_classes = [FavoriteSelectionThrottle]
@@ -436,7 +560,7 @@ class GalleryFavoriteSelectionDetailView(PublishedGalleryMixin, APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class GalleryArchiveRequestView(PublishedGalleryMixin, APIView):
+class GalleryArchiveRequestView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientGalleryAccess]
 
@@ -485,7 +609,7 @@ class GalleryArchiveRequestView(PublishedGalleryMixin, APIView):
         )
 
 
-class GalleryArchiveStatusView(PublishedGalleryMixin, APIView):
+class GalleryArchiveStatusView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientGalleryAccess]
 
@@ -527,7 +651,7 @@ class GalleryArchiveStatusView(PublishedGalleryMixin, APIView):
         )
 
 
-class GalleryFavoritesArchiveRequestView(PublishedGalleryMixin, APIView):
+class GalleryFavoritesArchiveRequestView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientOrGuestGalleryAccess]
 
@@ -584,7 +708,7 @@ class GalleryFavoritesArchiveRequestView(PublishedGalleryMixin, APIView):
         )
 
 
-class GalleryFavoritesArchiveStatusView(PublishedGalleryMixin, APIView):
+class GalleryFavoritesArchiveStatusView(GallerySecurityHeadersMixin, PublishedGalleryMixin, APIView):
     authentication_classes = [GalleryCookieJWTAuthentication]
     permission_classes = [HasClientOrGuestGalleryAccess]
 

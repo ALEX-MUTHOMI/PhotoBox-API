@@ -44,7 +44,7 @@ class GalleryExpiryStampTests(TestCase):
         )
 
     def _publish(self, extra=None):
-        payload = {"is_published": True}
+        payload = {"is_published": True, "gallery_pin": "secret9"}
         if extra:
             payload.update(extra)
         with patch("gallery.notifications.send_gallery_ready_email.delay"):

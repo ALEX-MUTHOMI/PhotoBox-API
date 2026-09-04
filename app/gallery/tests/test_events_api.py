@@ -31,7 +31,7 @@ class EventApiTests(TestCase):
         payload = {
             'title': 'The Smith Wedding',
             'event_type': 'WEDDING',
-            'gallery_pin': '1234'
+            'gallery_pin': '123456'
         }
         res = self.client.post(EVENTS_URL, payload)
 
@@ -47,7 +47,7 @@ class EventApiTests(TestCase):
         
         # Verify actual database hashing
         event = Event.objects.get(id=res.data['id'])
-        self.assertTrue(event.check_pin('1234'))
+        self.assertTrue(event.check_pin('123456'))
 
     def test_patch_empty_gallery_pin_clears_pin(self):
         """Photographers can remove a gallery PIN by sending an empty string."""
@@ -56,7 +56,7 @@ class EventApiTests(TestCase):
             title='PIN Event',
             slug='pin-event',
         )
-        event.set_pin('1234')
+        event.set_pin('123456')
         detail_url = reverse('gallery:event-detail', kwargs={'pk': event.id})
 
         res = self.client.patch(detail_url, {'gallery_pin': ''}, format='json')
@@ -65,7 +65,7 @@ class EventApiTests(TestCase):
         self.assertNotIn('gallery_pin', res.data)
         event.refresh_from_db()
         self.assertEqual(event._hashed_pin, '')
-        self.assertFalse(event.check_pin('1234'))
+        self.assertFalse(event.check_pin('123456'))
 
     def test_patch_without_gallery_pin_leaves_pin_unchanged(self):
         event = Event.objects.create(
@@ -73,14 +73,14 @@ class EventApiTests(TestCase):
             title='Keep PIN',
             slug='keep-pin',
         )
-        event.set_pin('5678')
+        event.set_pin('567890')
         detail_url = reverse('gallery:event-detail', kwargs={'pk': event.id})
 
         res = self.client.patch(detail_url, {'title': 'Renamed'}, format='json')
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         event.refresh_from_db()
-        self.assertTrue(event.check_pin('5678'))
+        self.assertTrue(event.check_pin('567890'))
 
     def test_create_event_slug_is_safe_for_scriptable_title(self):
         """SECURITY: Generated slugs must not carry scriptable title content."""

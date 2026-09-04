@@ -55,6 +55,11 @@ urlpatterns = [
     # Includes all viewsets registered above.
     # -------------------------------------------------------------------------
     path(
+        'upload-plan/',
+        views.UploadPlanView.as_view(),
+        name='upload-plan',
+    ),
+    path(
         'events/<uuid:event_id>/allowlist/<int:pk>/',
         views.ClientAllowlistDetailView.as_view(),
         name='event-allowlist-detail',

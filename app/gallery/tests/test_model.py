@@ -30,16 +30,16 @@ class EventSecurityTests(TestCase):
         )
 
     def test_argon2_pin_encryption(self):
-        """SECURITY: Proves a 4-digit PIN is never stored in plain text and resists database leaks."""
-        raw_pin = "4920"
+        """SECURITY: Proves a PIN is never stored in plain text and resists database leaks."""
+        raw_pin = "492012"
         self.event.set_pin(raw_pin)
 
         self.assertNotEqual(self.event._hashed_pin, raw_pin, "FATAL: PIN stored in plain text!")
         self.assertTrue(self.event._hashed_pin.startswith('pbkdf2_') or 'argon2' in self.event._hashed_pin)
 
-        self.assertTrue(self.event.check_pin("4920"), "FATAL: Correct PIN rejected.")
-        self.assertFalse(self.event.check_pin("0000"), "FATAL: Incorrect PIN accepted.")
-        self.assertFalse(self.event.check_pin("49201"), "FATAL: PIN length overflow bypass allowed.")
+        self.assertTrue(self.event.check_pin("492012"), "FATAL: Correct PIN rejected.")
+        self.assertFalse(self.event.check_pin("000000"), "FATAL: Incorrect PIN accepted.")
+        self.assertFalse(self.event.check_pin("4920121"), "FATAL: PIN length overflow bypass allowed.")
 
     def test_event_slug_uniqueness(self):
         """INFRASTRUCTURE: Prevents two events from hijacking the same public URL."""
@@ -68,12 +68,13 @@ class PhotoCloudinaryTests(TestCase):
         self.event = Event.objects.create(workspace=self.workspace, title="Cloud Event", slug="cloud-event")
         self.scene = Scene.objects.create(event=self.event, title="Keynote", display_order=1)
 
-        # Photo with r2_object_key — the new architecture
+        # Photo with web derivative — masonry never fetches RAW originals.
         self.photo = Photo.objects.create(
             scene=self.scene,
             original_filename="raw_shot.jpg",
             file_size_bytes=25000000,
             r2_object_key="events/2026/04/raw_shot.jpg",
+            web_r2_object_key="events/2026/04/web/raw_shot.webp",
             is_processed=True
         )
 
@@ -89,6 +90,7 @@ class PhotoCloudinaryTests(TestCase):
         self.assertIn("/image/fetch/", url, "FATAL: Not using Fetch Proxy pattern!")
         self.assertIn("q_auto", url, "FATAL: Quality optimisation missing — bandwidth risk!")
         self.assertIn("f_webp", url, "FATAL: WebP conversion missing — serving raw files!")
+        self.assertIn("w_480", url, "FATAL: Tile width missing — bandwidth risk!")
         self.assertIn("test-cloud", url, "FATAL: Wrong cloud name in URL!")
 
     def test_delivery_url_contains_r2_origin(self):
@@ -99,8 +101,10 @@ class PhotoCloudinaryTests(TestCase):
         url = self.photo.cloudinary_thumbnail_url
         self.assertIn("test-r2-domain.example.com", url,
                       "FATAL: Delivery URL doesn't reference R2 origin!")
-        self.assertIn(self.photo.r2_object_key, url,
-                      "FATAL: R2 object key missing from delivery URL!")
+        self.assertIn(self.photo.web_r2_object_key, url,
+                      "FATAL: Web R2 object key missing from delivery URL!")
+        self.assertNotIn(self.photo.r2_object_key, url,
+                         "FATAL: RAW original must not appear in tile URL!")
 
     def test_delivery_url_is_not_cloudinary_sdk_upload(self):
         """

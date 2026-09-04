@@ -137,7 +137,7 @@ class FavoritesEngineTests(TestCase):
         )
 
         response = self.client.post(
-            reverse("gallery_public:favorites", args=[self.gallery.id]),
+            reverse("gallery_public:favorites", args=[self.gallery.share_code]),
             {"photo_id": str(self.client_only_photo.id), "notes": "Album pick"},
             format="json",
         )
@@ -147,7 +147,7 @@ class FavoritesEngineTests(TestCase):
         self.assertEqual(selection.notes, "Album pick")
 
         delete_response = self.client.delete(
-            reverse("gallery_public:favorite-detail", args=[self.gallery.id, self.client_only_photo.id]),
+            reverse("gallery_public:favorite-detail", args=[self.gallery.share_code, self.client_only_photo.id]),
         )
 
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
@@ -162,7 +162,7 @@ class FavoritesEngineTests(TestCase):
         )
 
         response = self.client.post(
-            reverse("gallery_public:favorites", args=[self.gallery.id]),
+            reverse("gallery_public:favorites", args=[self.gallery.share_code]),
             {"photo_id": str(self.client_only_photo.id)},
             format="json",
         )
@@ -177,7 +177,7 @@ class FavoritesEngineTests(TestCase):
         )
 
         response = self.client.post(
-            reverse("gallery_public:favorites", args=[self.gallery.id]),
+            reverse("gallery_public:favorites", args=[self.gallery.share_code]),
             {"photo_id": str(self.other_photo.id)},
             format="json",
         )
@@ -229,12 +229,12 @@ class FavoritesEngineTests(TestCase):
         )
 
         first = self.client.post(
-            reverse("gallery_public:favorites", args=[self.gallery.id]),
+            reverse("gallery_public:favorites", args=[self.gallery.share_code]),
             {"photo_id": str(self.public_photo.id)},
             format="json",
         )
         second = self.client.post(
-            reverse("gallery_public:favorites", args=[self.gallery.id]),
+            reverse("gallery_public:favorites", args=[self.gallery.share_code]),
             {"photo_id": str(self.client_only_photo.id)},
             format="json",
         )

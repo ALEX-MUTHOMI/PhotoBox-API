@@ -70,6 +70,9 @@ class Event(models.Model):
     # ENGINEER FIX: Removed global unique=True. Replaced with UniqueConstraint below.
     slug = models.SlugField(max_length=255, db_index=True)
 
+    # Public guest URL token — never sequential; minted on create (Base62 nanoid).
+    share_code = models.CharField(max_length=12, unique=True, null=True, blank=True)
+
     # Lifecycle & Security Flags
     is_published = models.BooleanField(default=False)
     expires_at = models.DateTimeField(blank=True, null=True, db_index=True)
@@ -80,6 +83,8 @@ class Event(models.Model):
 
     # The PIN is never accessible in plain text.
     _hashed_pin = models.CharField(max_length=128, blank=True, null=True, db_column='hashed_pin')
+    # Bumped on PIN set/rotate/clear so outstanding GUEST JWTs die immediately.
+    pin_version = models.PositiveIntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -93,6 +98,12 @@ class Event(models.Model):
         max_length=255, blank=True, null=True,
         help_text="Client's display name used in the notification email."
     )
+    client_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text="Booking contact in E.164 (e.g. +2547…). Never exposed on public gallery JSON.",
+    )
 
     class Meta:
         constraints = [
@@ -100,19 +111,70 @@ class Event(models.Model):
             models.UniqueConstraint(fields=['workspace', 'slug'], name='unique_event_slug_per_workspace')
         ]
 
+    def save(self, *args, **kwargs):
+        from django.db import IntegrityError, transaction
+
+        from gallery.share_code import SHARE_CODE_MINT_MAX_ATTEMPTS, generate_share_code
+
+        if self._state.adding and not self.share_code:
+            last_error: Exception | None = None
+            for _ in range(SHARE_CODE_MINT_MAX_ATTEMPTS):
+                self.share_code = generate_share_code()
+                try:
+                    with transaction.atomic():
+                        return super().save(*args, **kwargs)
+                except IntegrityError as exc:
+                    last_error = exc
+                    message = str(exc).lower()
+                    if "share_code" in message or "gallery_event_share_code" in message:
+                        self.share_code = None
+                        continue
+                    raise
+            raise RuntimeError(
+                "Failed to mint a unique gallery share_code after "
+                f"{SHARE_CODE_MINT_MAX_ATTEMPTS} attempts."
+            ) from last_error
+        return super().save(*args, **kwargs)
+
     def set_pin(self, raw_pin):
         """Hashes the PIN using Django's secure cryptographic hasher."""
         if raw_pin:
             self._hashed_pin = make_password(str(raw_pin))
         else:
             self._hashed_pin = ''
-        self.save(update_fields=['_hashed_pin'])
+        self.pin_version = int(self.pin_version or 0) + 1
+        self.save(update_fields=['_hashed_pin', 'pin_version'])
 
     def check_pin(self, raw_pin):
         """Verifies the PIN in constant time to prevent timing attacks."""
         if not self._hashed_pin:
             return False
         return check_password(str(raw_pin), self._hashed_pin)
+
+    @property
+    def has_pin(self) -> bool:
+        return bool(self._hashed_pin)
+
+    def rotate_share_code(self) -> str:
+        """Issue a new public share_code; old code 404s. Max 3 collision retries."""
+        from django.db import IntegrityError, transaction
+
+        from gallery.share_code import SHARE_CODE_MINT_MAX_ATTEMPTS, generate_share_code
+
+        last_error: Exception | None = None
+        for _ in range(SHARE_CODE_MINT_MAX_ATTEMPTS):
+            code = generate_share_code()
+            try:
+                with transaction.atomic():
+                    type(self).objects.filter(pk=self.pk).update(share_code=code)
+                self.share_code = code
+                return code
+            except IntegrityError as exc:
+                last_error = exc
+        raise RuntimeError(
+            "Failed to rotate gallery share_code after "
+            f"{SHARE_CODE_MINT_MAX_ATTEMPTS} attempts."
+        ) from last_error
 
     def __str__(self):
         return f"[{self.event_type}] {self.title} ({self.workspace.business_name})"
@@ -240,29 +302,35 @@ class Photo(models.Model):
         """True when the owning workspace brands its deliverables."""
         return bool(self.scene.event.workspace.watermark_logo)
 
+    def _web_delivery_key(self) -> str | None:
+        """Masonry/lightbox must use web derivative only — never RAW r2_object_key."""
+        if self.web_r2_object_key:
+            return self.web_r2_object_key
+        return None
+
     @property
     def delivery_url(self):
-        """
-        PHASE 3: Cloudinary Fetch Proxy URL.
-        """
-        cloud_name = getattr(settings, 'CLOUDINARY_CLOUD_NAME', '')
-        r2_domain = getattr(settings, 'CLOUDFLARE_R2_DOMAIN', '').rstrip('/')
+        """Default tile URL (w_480). Alias of delivery_url_tile for serializers."""
+        return self.delivery_url_tile
 
-        if not self.web_r2_object_key and self._watermark_is_required():
-            return None
+    @property
+    def delivery_url_tile(self):
+        from gallery.cloudinary_delivery import build_tile_url
 
-        delivery_key = self.web_r2_object_key or self.r2_object_key
-        if delivery_key and cloud_name and r2_domain:
-            r2_public_url = f"https://{r2_domain}/{delivery_key}"
-            return (
-                f"https://res.cloudinary.com/{cloud_name}"
-                f"/image/fetch/q_auto,f_webp/{r2_public_url}"
-            )
-
-        # Backward compat: old photos with Cloudinary SDK optimized_url still work
+        key = self._web_delivery_key()
+        if key:
+            return build_tile_url(key)
         if self.optimized_url and _is_safe_client_url(self.optimized_url):
             return self.optimized_url
+        return None
 
+    @property
+    def delivery_url_lightbox(self):
+        from gallery.cloudinary_delivery import build_lightbox_url
+
+        key = self._web_delivery_key()
+        if key:
+            return build_lightbox_url(key)
         return None
 
     @property
@@ -372,9 +440,16 @@ class ClientAllowlist(models.Model):
     Approved main-client email addresses for a gallery.
 
     These entries define who is allowed to receive single-use magic links.
+    Optional phone is CRM-only; it does not change magic-link enumeration behavior.
     """
     gallery = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='client_allowlist')
     email = models.EmailField()
+    phone = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text="Optional E.164 phone for the main client (WhatsApp CRM).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -441,6 +516,10 @@ class GalleryAccessSession(models.Model):
             models.Index(
                 fields=['gallery', 'role'],
                 name='gal_access_gallery_role_idx',
+            ),
+            models.Index(
+                fields=['gallery', 'created_at'],
+                name='gal_access_gallery_created_idx',
             ),
         ]
 

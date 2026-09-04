@@ -161,14 +161,14 @@ class DownloadWorkflowTests(TestCase):
     @patch("gallery.client_views._enqueue_archive_job")
     def test_bulk_download_requires_verified_access_and_returns_archive_job(self, mock_enqueue):
         denied = self.anonymous_client.post(
-            reverse("gallery_public:archive-request", args=[self.event.id])
+            reverse("gallery_public:archive-request", args=[self.event.share_code])
         )
         self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
         mock_enqueue.assert_not_called()
 
         self._grant_client_gallery_session()
         allowed = self.client_gallery_client.post(
-            reverse("gallery_public:archive-request", args=[self.event.id])
+            reverse("gallery_public:archive-request", args=[self.event.share_code])
         )
 
         self.assertEqual(allowed.status_code, status.HTTP_202_ACCEPTED)

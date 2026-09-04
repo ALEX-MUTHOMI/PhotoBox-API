@@ -15,6 +15,8 @@ from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 COOKIE_NAME = 'gallery_access'
 SESSION_COOKIE_NAME = 'gallery_session'
 DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
+DEFAULT_GUEST_TOKEN_LIFETIME_SECONDS = 7 * 24 * 3600
+DEFAULT_CLIENT_TOKEN_LIFETIME_SECONDS = 1800
 COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SALT = 'gallery-access-session'
 
@@ -23,7 +25,23 @@ def _cookie_name() -> str:
     return getattr(settings, 'GALLERY_ACCESS_COOKIE_NAME', COOKIE_NAME)
 
 
-def _token_lifetime_seconds() -> int:
+def _token_lifetime_seconds(role: str | None = None) -> int:
+    if role == 'GUEST':
+        return int(
+            getattr(
+                settings,
+                'GALLERY_GUEST_ACCESS_TOKEN_LIFETIME_SECONDS',
+                DEFAULT_GUEST_TOKEN_LIFETIME_SECONDS,
+            )
+        )
+    if role == 'CLIENT':
+        return int(
+            getattr(
+                settings,
+                'GALLERY_CLIENT_ACCESS_TOKEN_LIFETIME_SECONDS',
+                DEFAULT_CLIENT_TOKEN_LIFETIME_SECONDS,
+            )
+        )
     return int(
         getattr(
             settings,
@@ -45,14 +63,22 @@ def hash_magic_link_token(raw_token: str) -> str:
     return hashlib.sha256((raw_token or '').encode('utf-8')).hexdigest()
 
 
-def issue_gallery_access_token(gallery_id, email: str, role: str) -> str:
+def issue_gallery_access_token(
+    gallery_id,
+    email: str,
+    role: str,
+    *,
+    pin_version: int = 0,
+) -> str:
     now = timezone.now()
+    lifetime = _token_lifetime_seconds(role)
     payload = {
         'gallery_id': str(gallery_id),
         'email': normalize_gallery_email(email),
         'role': role,
+        'pv': int(pin_version or 0),
         'iat': int(now.timestamp()),
-        'exp': int((now + timedelta(seconds=_token_lifetime_seconds())).timestamp()),
+        'exp': int((now + timedelta(seconds=lifetime)).timestamp()),
     }
     return jwt.encode(
         payload,
@@ -86,6 +112,7 @@ class GalleryAccessPrincipal:
     gallery_id: str
     email: str
     role: str
+    pin_version: int = 0
 
     @property
     def is_authenticated(self) -> bool:
@@ -118,22 +145,36 @@ class GalleryCookieJWTAuthentication(authentication.BaseAuthentication):
             return None
 
         payload = decode_gallery_access_token(token)
+        role = payload['role']
+        pin_version = int(payload.get('pv', 0) or 0)
+
+        if role == 'GUEST':
+            from gallery.models import Event
+
+            event = (
+                Event.objects.filter(id=payload['gallery_id'])
+                .only('pin_version')
+                .first()
+            )
+            if event is None or int(event.pin_version or 0) != pin_version:
+                raise AuthenticationFailed('Gallery PIN was rotated. Please re-enter the PIN.')
+
         principal = GalleryAccessPrincipal(
             gallery_id=str(payload['gallery_id']),
             email=normalize_gallery_email(payload['email']),
-            role=payload['role'],
+            role=role,
+            pin_version=pin_version,
         )
         return principal, payload
 
 
-def set_gallery_access_cookie(response, token: str):
-    max_age = _token_lifetime_seconds()
-    expires_at = timezone.now() + timedelta(seconds=max_age)
+def set_gallery_access_cookie(response, token: str, *, role: str | None = None):
+    max_age = _token_lifetime_seconds(role)
     response.set_cookie(
         key=_cookie_name(),
         value=token,
-        expires=expires_at,
-        secure=True,
+        max_age=max_age,
+        secure=bool(getattr(settings, 'SESSION_COOKIE_SECURE', True)),
         httponly=True,
         samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
     )
@@ -148,16 +189,23 @@ def clear_gallery_access_cookie(response):
     return response
 
 
-def set_gallery_access_session_cookie(response, session_id: int):
-    max_age = _token_lifetime_seconds()
+def set_gallery_access_session_cookie(response, session_id: int, *, role: str | None = None):
+    max_age = _token_lifetime_seconds(role)
     signed_value = encode_gallery_access_session_cookie(session_id)
-    expires_at = timezone.now() + timedelta(seconds=max_age)
     response.set_cookie(
         key=_session_cookie_name(),
         value=signed_value,
-        expires=expires_at,
-        secure=True,
+        max_age=max_age,
+        secure=bool(getattr(settings, 'SESSION_COOKIE_SECURE', True)),
         httponly=True,
+        samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
+    )
+    return response
+
+
+def clear_gallery_access_session_cookie(response):
+    response.delete_cookie(
+        _session_cookie_name(),
         samesite=getattr(settings, 'GALLERY_ACCESS_COOKIE_SAMESITE', COOKIE_SAMESITE),
     )
     return response
@@ -176,11 +224,18 @@ def get_gallery_access_session_id(request) -> int | None:
     if not raw_value:
         return None
 
+    # Use the longer of guest/client lifetimes so session cookie validation
+    # does not reject a still-valid guest JWT early.
+    max_age = max(
+        _token_lifetime_seconds('GUEST'),
+        _token_lifetime_seconds('CLIENT'),
+        _token_lifetime_seconds(None),
+    )
     try:
         payload = signing.loads(
             raw_value,
             salt=SESSION_COOKIE_SALT,
-            max_age=_token_lifetime_seconds(),
+            max_age=max_age,
         )
     except signing.SignatureExpired as exc:
         raise AuthenticationFailed('Gallery session expired.') from exc

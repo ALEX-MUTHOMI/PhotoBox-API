@@ -195,7 +195,7 @@ class WatermarkEngineTests(TestCase):
         )
         self.client.cookies["gallery_session"] = encode_gallery_access_session_cookie(session.id)
 
-        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.id]))
+        response = self.client.get(reverse("gallery_public:detail", args=[self.gallery.share_code]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["gallery"]["cover_photo"], "https://cdn.example.com/covers/hero.jpg")

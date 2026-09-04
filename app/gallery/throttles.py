@@ -3,10 +3,11 @@ gallery/throttles.py
 """
 import hashlib
 
-from rest_framework.throttling import BaseThrottle, SimpleRateThrottle, UserRateThrottle
+from rest_framework.throttling import BaseThrottle, UserRateThrottle
 
 from core.rate_limiter import consume_sliding_window
 from gallery.client_auth import get_gallery_access_session_id
+from gallery.fail_closed_throttle import FailClosedSimpleRateThrottle
 
 
 class FastLaneUploadThrottle(UserRateThrottle):
@@ -17,38 +18,53 @@ class HeavyLaneTicketThrottle(UserRateThrottle):
     scope = 'heavy_lane_ticket'
 
 
-class MagicLinkSendThrottle(SimpleRateThrottle):
+class MagicLinkSendThrottle(FailClosedSimpleRateThrottle):
     scope = 'magic_link_send'
 
     def get_cache_key(self, request, view):
         email = (request.data.get('email') or '').strip().lower()
-        gallery_id = view.kwargs.get('gallery_id', '')
+        gallery_key = view.kwargs.get('share_code') or view.kwargs.get('gallery_id', '')
         ident = self.get_ident(request)
         return self.cache_format % {
             'scope': self.scope,
-            'ident': f"{ident}:{gallery_id}:{email}",
+            'ident': f"{ident}:{gallery_key}:{email}",
         }
 
 
-class GuestAccessThrottle(SimpleRateThrottle):
+class GuestAccessThrottle(FailClosedSimpleRateThrottle):
     scope = 'guest_access'
 
     def get_cache_key(self, request, view):
-        gallery_id = view.kwargs.get('gallery_id', '')
+        gallery_key = view.kwargs.get('share_code') or view.kwargs.get('gallery_id', '')
         ident = self.get_ident(request)
         return self.cache_format % {
             'scope': self.scope,
-            'ident': f"{ident}:{gallery_id}",
+            'ident': f"{ident}:{gallery_key}",
         }
 
 
-class FavoriteSelectionThrottle(SimpleRateThrottle):
+class ShareCodeProbeThrottle(FailClosedSimpleRateThrottle):
+    """Throttle anonymous share_code existence probes per IP."""
+
+    scope = 'share_code_probe'
+
+    def get_cache_key(self, request, view):
+        if getattr(request.user, 'is_authenticated', False):
+            return None
+        ident = self.get_ident(request)
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': ident,
+        }
+
+
+class FavoriteSelectionThrottle(FailClosedSimpleRateThrottle):
     """Authenticated favorites: key by gallery + session (venue NAT safe)."""
 
     scope = 'favorite_selection'
 
     def get_cache_key(self, request, view):
-        gallery_id = view.kwargs.get('gallery_id', '')
+        gallery_key = view.kwargs.get('share_code') or view.kwargs.get('gallery_id', '')
         try:
             session_id = get_gallery_access_session_id(request)
         except Exception:
@@ -57,17 +73,17 @@ class FavoriteSelectionThrottle(SimpleRateThrottle):
             return None
         return self.cache_format % {
             'scope': self.scope,
-            'ident': f"{gallery_id}:{session_id}",
+            'ident': f"{gallery_key}:{session_id}",
         }
 
 
-class GallerySessionReadThrottle(SimpleRateThrottle):
+class GallerySessionReadThrottle(FailClosedSimpleRateThrottle):
     """Authenticated gallery GET: gallery_id + session_id, not IP-only."""
 
     scope = 'gallery_session_read'
 
     def get_cache_key(self, request, view):
-        gallery_id = view.kwargs.get('gallery_id', '')
+        gallery_key = view.kwargs.get('share_code') or view.kwargs.get('gallery_id', '')
         try:
             session_id = get_gallery_access_session_id(request)
         except Exception:
@@ -76,7 +92,7 @@ class GallerySessionReadThrottle(SimpleRateThrottle):
             return None
         return self.cache_format % {
             'scope': self.scope,
-            'ident': f"{gallery_id}:{session_id}",
+            'ident': f"{gallery_key}:{session_id}",
         }
 
 

@@ -54,6 +54,7 @@ class ClientGallerySerializationSafetyTests(TestCase):
             original_filename='"><img src=x onerror=alert("file")>.jpg',
             file_size_bytes=1024,
             r2_object_key="raw/tenant_1/scene_1/safe.jpg",
+            web_r2_object_key="web/tenant_1/scene_1/safe.webp",
             status="READY",
             is_processed=True,
         )
@@ -76,7 +77,7 @@ class ClientGallerySerializationSafetyTests(TestCase):
 
     def test_client_gallery_payload_escapes_scriptable_titles_and_filename(self):
         response = self.client.get(
-            reverse("gallery_public:detail", args=[self.gallery.id])
+            reverse("gallery_public:detail", args=[self.gallery.share_code])
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -106,7 +107,7 @@ class ClientGallerySerializationSafetyTests(TestCase):
 
     def test_client_gallery_payload_excludes_internal_keys_and_download_urls(self):
         response = self.client.get(
-            reverse("gallery_public:detail", args=[self.gallery.id])
+            reverse("gallery_public:detail", args=[self.gallery.share_code])
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -114,16 +115,17 @@ class ClientGallerySerializationSafetyTests(TestCase):
 
         self.assertNotIn("r2_object_key", photo_payload)
         self.assertNotIn("web_r2_object_key", photo_payload)
-        self.assertNotIn("download_url", photo_payload)
+        self.assertIsNone(photo_payload.get("download_url"))
         self.assertIn("delivery_url", photo_payload)
 
     def test_client_gallery_payload_rejects_scriptable_legacy_delivery_url(self):
         self.photo.r2_object_key = ""
+        self.photo.web_r2_object_key = ""
         self.photo.optimized_url = "javascript:alert(1)"
-        self.photo.save(update_fields=["r2_object_key", "optimized_url"])
+        self.photo.save(update_fields=["r2_object_key", "web_r2_object_key", "optimized_url"])
 
         response = self.client.get(
-            reverse("gallery_public:detail", args=[self.gallery.id])
+            reverse("gallery_public:detail", args=[self.gallery.share_code])
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -136,7 +138,7 @@ class ClientGallerySerializationSafetyTests(TestCase):
         self.gallery.save(update_fields=["cover_image_url", "cover_photo"])
 
         response = self.client.get(
-            reverse("gallery_public:detail", args=[self.gallery.id])
+            reverse("gallery_public:detail", args=[self.gallery.share_code])
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)

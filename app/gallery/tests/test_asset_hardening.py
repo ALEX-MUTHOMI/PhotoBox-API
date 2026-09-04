@@ -255,6 +255,7 @@ class CloudinaryURLStructuralTests(TestCase):
             original_filename="ceremony_001.jpg",
             file_size_bytes=8_000_000,
             r2_object_key="fast-lane/tenant_1/photo_abc/ceremony_001.jpg",
+            web_r2_object_key="fast-lane/tenant_1/photo_abc/web/ceremony_001.webp",
             status="READY",
             is_processed=True,
         )
@@ -267,5 +268,7 @@ class CloudinaryURLStructuralTests(TestCase):
         self.assertNotIn("/image/upload/", url)
         self.assertIn("q_auto", url)
         self.assertIn("f_webp", url)
+        self.assertIn("w_480", url)
         self.assertIn("cdn.photobox-vault.com", url)
-        self.assertIn(photo.r2_object_key, url)
+        self.assertIn(photo.web_r2_object_key, url)
+        self.assertNotIn(photo.r2_object_key, url)

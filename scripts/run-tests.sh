@@ -172,6 +172,18 @@ case "$SUITE" in
       $EXTRA_ARGS
     ;;
 
+  # ── KENYA: Pixieset roadmap TDD contracts ────────────────────────────────
+  kenya)
+    echo "[RUNNING] Kenya Pixieset roadmap TDD contracts..."
+    exec python -m pytest \
+      gallery/tests/test_share_code.py \
+      gallery/tests/test_guest_pin_only.py \
+      gallery/tests/test_dual_lane_auth.py \
+      gallery/tests/test_client_gallery_serialization.py \
+      gallery/tests/test_events_api.py \
+      --timeout=60 -v --tb=short $EXTRA_ARGS
+    ;;
+
   # ── ALL: everything including integration ────────────────────────────────
   all)
     echo "[RUNNING] Full system suite..."
@@ -204,6 +216,7 @@ case "$SUITE" in
     echo "Suites:"
     echo "  unit       — All unit + integration tests (default, fast)"
     echo "  api        — API integration tests"
+    echo "  kenya      — Kenya Pixieset roadmap TDD contracts"
     echo "  security   — Security-focused tests (IDOR, webhook, OAuth)"
     echo "  celery     — Celery task pipeline tests"
     echo "  cloudinary — Cloudinary integration (requires real credentials)"
