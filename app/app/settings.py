@@ -157,6 +157,9 @@ SITE_ID            = 1
 
 # Always set Referrer-Policy so gallery share_codes never leak to CDNs (hole 4).
 SECURE_REFERRER_POLICY = 'no-referrer'
+# Always emit nosniff — even under DEBUG / DAST compose — so JSON is never sniffed as HTML.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
 
 
 # ============================================================
@@ -168,12 +171,10 @@ if not DEBUG:
     SECURE_HSTS_SECONDS            = 31536000   # 1 year
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD            = True
-    SECURE_CONTENT_TYPE_NOSNIFF    = True
     SECURE_BROWSER_XSS_FILTER      = True
     SECURE_REFERRER_POLICY         = 'no-referrer'
     SESSION_COOKIE_SECURE          = True
     CSRF_COOKIE_SECURE             = True
-    X_FRAME_OPTIONS                = 'DENY'
     SECURE_PROXY_SSL_HEADER        = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_REDIRECT_EXEMPT = [
         r'^api/health-check/?$',
@@ -225,6 +226,7 @@ INSTALLED_APPS = [
 # 5. MIDDLEWARE
 # ============================================================
 MIDDLEWARE = [
+    'core.security_headers.ApiSecurityHeadersMiddleware',  # outermost so it wins on response
     'django.middleware.security.SecurityMiddleware',
     'corsheaders.middleware.CorsMiddleware',          # Must precede CommonMiddleware
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -358,11 +360,15 @@ else:
 # ============================================================
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
-    
+
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ), # <--- Notice the tuple ends here
-    
+    ),
+
+    'DEFAULT_RENDERER_CLASSES': (
+        'rest_framework.renderers.JSONRenderer',
+    ),
+
     # Move EXCEPTION_HANDLER out here, at the dictionary level
     'EXCEPTION_HANDLER': 'user.exceptions.custom_exception_handler',
     

@@ -184,6 +184,7 @@ case "$SUITE" in
       gallery/tests/test_dual_lane_auth.py \
       gallery/tests/test_client_gallery_serialization.py \
       gallery/tests/test_events_api.py \
+      core/tests/test_api_security_surface.py \
       --timeout=60 -v --tb=short $EXTRA_ARGS
     ;;
 
