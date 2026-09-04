@@ -233,7 +233,7 @@ class GalleryArchiveEngineTests(TestCase):
         self._set_gallery_session_cookie()
 
         response = self.client.get(
-            reverse("gallery_public:archive-status", args=[self.gallery.id]),
+            reverse("gallery_public:archive-status", args=[self.gallery.share_code]),
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -254,7 +254,7 @@ class GalleryArchiveEngineTests(TestCase):
         GalleryArchiveJob.objects.create(gallery=self.gallery, status=GalleryArchiveJob.Status.PENDING)
 
         response = self.client.get(
-            reverse("gallery_public:archive-status", args=[self.gallery.id]),
+            reverse("gallery_public:archive-status", args=[self.gallery.share_code]),
             HTTP_AUTHORIZATION=f"Bearer {self._client_token(gallery_id=other_gallery.id)}",
         )
 
@@ -264,7 +264,7 @@ class GalleryArchiveEngineTests(TestCase):
     def test_archive_request_queues_job_for_client(self, mock_enqueue):
         self._set_gallery_session_cookie()
         response = self.client.post(
-            reverse("gallery_public:archive-request", args=[self.gallery.id]),
+            reverse("gallery_public:archive-request", args=[self.gallery.share_code]),
         )
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
@@ -330,7 +330,7 @@ class GalleryArchiveEngineTests(TestCase):
         FavoriteSelection.objects.create(session=session, photo=self.public_photo)
 
         response = self.client.post(
-            reverse("gallery_public:favorites-archive-request", args=[self.gallery.id]),
+            reverse("gallery_public:favorites-archive-request", args=[self.gallery.share_code]),
         )
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
@@ -371,7 +371,7 @@ class GalleryArchiveEngineTests(TestCase):
         mock_presign.return_value = "https://signed.example.com/favorites.zip"
 
         response = self.client.get(
-            reverse("gallery_public:favorites-archive-status", args=[self.gallery.id]),
+            reverse("gallery_public:favorites-archive-status", args=[self.gallery.share_code]),
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)

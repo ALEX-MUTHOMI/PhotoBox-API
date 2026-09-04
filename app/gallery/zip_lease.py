@@ -135,18 +135,21 @@ class ZipLeaseDecision:
 
 
 def acquire_zip_lease(job_id: str, gallery_id: str) -> ZipLeaseDecision:
-    """Acquire a leased ZIP slot. Fail-open when Redis is unavailable (dev/test)."""
+    """Acquire a leased ZIP slot. Fail-closed in production when Redis is down."""
     capacity = int(getattr(settings, "ARCHIVE_ZIP_GLOBAL_LEASES", 20))
     gallery_cap = int(getattr(settings, "ARCHIVE_ZIP_PER_GALLERY_LEASES", 1))
     lease_ttl = int(getattr(settings, "ARCHIVE_ZIP_LEASE_TTL_SECONDS", 60))
     holder = uuid.uuid4().hex
+    fail_open = bool(getattr(settings, "DEBUG", False))
     client = _client()
     if client is None:
-        return ZipLeaseDecision(
-            True,
-            "redis_unavailable_fail_open",
-            ZipLease(job_id=job_id, gallery_id=str(gallery_id), holder=holder),
-        )
+        if fail_open:
+            return ZipLeaseDecision(
+                True,
+                "redis_unavailable_fail_open",
+                ZipLease(job_id=job_id, gallery_id=str(gallery_id), holder=holder),
+            )
+        return ZipLeaseDecision(False, "redis_unavailable_fail_closed")
     try:
         result = client.eval(
             _ACQUIRE_LUA,
@@ -171,12 +174,14 @@ def acquire_zip_lease(job_id: str, gallery_id: str) -> ZipLeaseDecision:
             ZipLease(job_id=str(job_id), gallery_id=str(gallery_id), holder=holder),
         )
     except redis.RedisError as exc:
-        logger.warning("[ZIP LEASE] acquire failed open: %s", exc)
-        return ZipLeaseDecision(
-            True,
-            "redis_error_fail_open",
-            ZipLease(job_id=str(job_id), gallery_id=str(gallery_id), holder=holder),
-        )
+        logger.warning("[ZIP LEASE] acquire failed: %s", exc)
+        if fail_open:
+            return ZipLeaseDecision(
+                True,
+                "redis_error_fail_open",
+                ZipLease(job_id=str(job_id), gallery_id=str(gallery_id), holder=holder),
+            )
+        return ZipLeaseDecision(False, "redis_error_fail_closed")
 
 
 def heartbeat_zip_lease(lease: ZipLease) -> bool:
