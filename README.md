@@ -1,56 +1,53 @@
+# PhotoBox API
 
+PhotoBox is a **multi-tenant photography SaaS**. Photographers publish client galleries; guests open one share link, enter a PIN, and view photos — no account required.
 
-# 📸 PhotoBox API
+This repository is the **Django REST API** behind that product. The photographer app and guest gallery UI live in separate frontends and call this API.
 
-![Python](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python)
-![Django](https://img.shields.io/badge/Django-4.x-092E20?style=for-the-badge&logo=django)
-![Celery](https://img.shields.io/badge/Celery-Async-37814A?style=for-the-badge&logo=celery)
-![Cloudflare R2](https://img.shields.io/badge/Cloudflare_R2-Vault-F38020?style=for-the-badge&logo=cloudflare)
-![Security](https://img.shields.io/badge/Security-Hardened-red?style=for-the-badge)
+## What this API does
 
-**PhotoBox** is an enterprise-grade, multi-tenant photography SaaS platform built on an **Event-Driven Architecture (EDA)**. It provides professional photographers with a highly resilient, asynchronous backend to upload, curate, and deliver client galleries at massive scale.
+- **Galleries as events.** A photographer creates an event, sets a PIN (6+ characters), and gets an unguessable `share_code` such as `/g/k8X2mP9q`.
+- **Share like Pixieset, built for WhatsApp.** Guests prove the PIN; email is optional. Rotating the PIN invalidates existing guest sessions.
+- **Two upload lanes, one vault.** Small images go Fast Lane (`202` then Celery). RAW, video, and bulk go Heavy Lane as presigned POSTs straight to **Cloudflare R2**. R2 is the only copy of the bytes.
+- **Cheap, sharp viewing.** Gallery tiles are sized, signed Cloudinary fetches of the web derivative — never the original. Downloads are short-lived R2 URLs (60s).
+- **Tenant isolation.** Every photographer query is scoped through their workspace. Public routes resolve by `share_code`, not sequential IDs.
+- **Billing.** Lemon Squeezy for card checkout; Daraja/M-Pesa callback stub for Kenya KES.
 
-Architecture and API reference live in [`photobox-docs-site/`](photobox-docs-site); live OpenAPI is served at `/api/schema/` when the API is running.
+Architecture, security, and operations docs: [`photobox-docs-site/`](photobox-docs-site/). Live OpenAPI is at `/api/schema/` and **requires a photographer JWT**.
 
+## Stack
 
-## 🏗 Architecture & The Unified Vault Pattern
+| Layer | Choice |
+| --- | --- |
+| API | Python 3.12, Django 4, Django REST Framework |
+| Jobs | Celery + Redis |
+| Data | PostgreSQL |
+| Vault | Cloudflare R2 |
+| Tiles | Cloudinary fetch (no SDK uploads) |
+| Run | Docker Compose |
 
-PhotoBox implements a **Unified Vault Pattern**, utilizing Cloudflare R2 as the absolute single source of truth for all binary assets. Django orchestrates state, quotas, and security, but stays out of the data path for heavy uploads.
+## Local development
 
-* **Fast Lane (≤ 5MB):** Synchronous validation, atomic quota reservation, returns `202 Accepted`, hands off to Celery for R2 upload.
-* **Heavy Lane (> 5MB / Bulk):** Generates presigned POST tickets for direct-to-R2 uploads. Zero network bottleneck on the Django application servers.
-* **Delivery:** Cloudinary acts strictly as a Fetch Proxy (WebP conversion + Edge Cache) reading directly from the R2 origin. No SDK uploads. No data duplication.
-* **Secure Downloads:** Time-limited (60s) presigned R2 GET URLs generated on demand.
-
-## 🚀 Key Features
-
-* **Multi-Tenant Isolation:** Deep QuerySet filtering (`scene__event__workspace__user`) guarantees absolute cryptographic separation of photographer assets.
-* **Ruthless Security Posture:** Built-in defenses against Decompression Bombs (Zip bombs), MIME-type spoofing, Server-Side Request Forgery (SSRF), and Cross-Tenant IDORs.
-* **Atomic Economic Ledger:** Storage quotas are strictly enforced using database-level row locks (`SELECT FOR UPDATE`) to prevent concurrent TOCTOU (Time-of-Check to Time-of-Use) race conditions.
-* **Idempotent Webhooks:** Cloudflare R2 and Lemon Squeezy billing webhooks are secured via HMAC-SHA256, strictly validated against replay attacks, and processed idempotently via payload hashing.
-
-## 🛠 Tech Stack
-
-* **Core:** Python 3.12, Django 4.x, Django REST Framework (DRF)
-* **Database:** PostgreSQL (with `django-db-locks` for atomic operations)
-* **Async Workers:** Celery + Redis
-* **Storage:** Cloudflare R2 (S3-compatible Unified Vault)
-* **CDN / Image Optimization:** Cloudinary
-* **Billing:** Lemon Squeezy
-* **Infrastructure:** Docker, Docker Compose, Nginx
-
-## 💻 Getting Started (Local Development)
-
-### 1. Prerequisites
-* Docker & Docker Compose
-* Git
-
-### 2. Environment Setup
-Clone the repository and set up your `.env` file (see `.env.example` for required keys):
 ```bash
-git clone [https://github.com/your-org/photobox-api.git](https://github.com/your-org/photobox-api.git)
-cd photobox-api
-# Create and populate your .env file
+git clone https://github.com/ALEX-MUTHOMI/PhotoBox-API.git
+cd PhotoBox-API
+cp .env.example .env
+docker compose up -d db redis
+docker compose run --rm app python manage.py migrate
+docker compose up app celery
+```
 
+The API listens on `http://localhost:8001` by default (`APP_PORT`). Health: `GET /api/health-check/`.
 
-staging
+## Tests
+
+```bash
+docker compose run --rm test unit
+docker compose run --rm test kenya
+```
+
+`kenya` covers share codes, PIN-only guests, masonry delivery, photographer-day contracts, Daraja isolation, and the JSON-only API surface.
+
+## What this repo is not
+
+It is not the gallery website, the photographer dashboard, or a print catalog. Those clients consume this API.
