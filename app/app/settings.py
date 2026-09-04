@@ -400,6 +400,9 @@ SPECTACULAR_SETTINGS = {
     ],
 }
 
+# JSON CSRF failure page (Django default is HTML).
+CSRF_FAILURE_VIEW = 'core.views.csrf_failure_json'
+
 
 # ============================================================
 # 13. JWT AUTHENTICATION

@@ -8,15 +8,45 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db import connections
 from django.http import JsonResponse
+from django.views.decorators.csrf import requires_csrf_token
 from django.views.decorators.http import require_GET
 
 from core.domain_index import get_workspace_id_by_domain
+from core.security_headers import apply_api_security_headers
 
 logger = logging.getLogger(__name__)
 
 
+def _json_error(message: str, status: int) -> JsonResponse:
+    response = JsonResponse({"detail": message}, status=status)
+    return apply_api_security_headers(response)
+
+
+def bad_request_json(request, exception=None):
+    # DisallowedHost and other early 400s should still be JSON (no HTML recon).
+    return _json_error("Bad request.", 400)
+
+
+def permission_denied_json(request, exception=None):
+    return _json_error("Forbidden.", 403)
+
+
+def not_found_json(request, exception=None):
+    return _json_error("Not found.", 404)
+
+
+def server_error_json(request):
+    # Must stay dumb — no DB/cache/template — or Django falls back to HTML.
+    return _json_error("Server error.", 500)
+
+
+@requires_csrf_token
+def csrf_failure_json(request, reason=""):
+    return _json_error("CSRF verification failed.", 403)
+
+
 def health_check(request):
-    """Readiness probe: DB and cache must respond."""
+    """Readiness probe: DB and cache must respond. Does not leak DEBUG."""
     checks = {}
     healthy = True
 
@@ -26,7 +56,8 @@ def health_check(request):
             cursor.execute('SELECT 1')
         checks['database'] = 'ok'
     except Exception as exc:
-        checks['database'] = str(exc)
+        checks['database'] = 'error'
+        logger.warning("health_check database failed: %s", exc)
         healthy = False
 
     try:
@@ -35,16 +66,16 @@ def health_check(request):
             raise RuntimeError('cache read/write mismatch')
         checks['cache'] = 'ok'
     except Exception as exc:
-        checks['cache'] = str(exc)
+        checks['cache'] = 'error'
+        logger.warning("health_check cache failed: %s", exc)
         healthy = False
 
     payload = {
         'healthy': healthy,
         'checks': checks,
-        'debug': settings.DEBUG,
     }
     status = 200 if healthy else 503
-    return JsonResponse(payload, status=status)
+    return apply_api_security_headers(JsonResponse(payload, status=status))
 
 
 @require_GET
