@@ -74,6 +74,7 @@ services:
 
   app:
     build: *app-build
+    image: photobox-api-app:dev
     working_dir: /app
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     ports:
@@ -85,6 +86,45 @@ services:
              python manage.py runserver 0.0.0.0:8000"
     environment:
       <<: *app-environment
+      TESTING: "0"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health-check/', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 1024m
+
+  # DAST overlay: DEBUG=False without SSL redirect; raised anon throttles for scanners.
+  app-dast:
+    profiles: ["zap", "newman", "dast"]
+    image: photobox-api-app:dev
+    working_dir: /app
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    volumes: *repo-mounts
+    command: >
+      sh -c "python manage.py wait_for_db &&
+             python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    environment:
+      <<: *app-environment
+      TESTING: "0"
+      DEBUG: "0"
+      PHOTBOX_DAST: "1"
+      ALLOWED_HOSTS: "app,app-dast,localhost,127.0.0.1"
+      CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      CSRF_TRUSTED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      TURNSTILE_SECRET_KEY: "dast-turnstile-stub-not-for-production"
+      FRONTEND_URL: "http://localhost:3000"
+    networks:
+      default:
+        aliases:
+          - app
     depends_on:
       db:
         condition: service_healthy
@@ -100,6 +140,7 @@ services:
 
   celery:
     build: *app-build
+    image: photobox-api-app:dev
     working_dir: /app
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes: *repo-mounts
@@ -141,6 +182,37 @@ services:
       redis:
         condition: service_healthy
     mem_limit: 1024m
+
+  # OWASP ZAP — passive Automation Framework scan (profile: zap)
+  zap:
+    profiles: ["zap"]
+    image: ghcr.io/zaproxy/zaproxy:stable
+    user: zap
+    working_dir: /zap/wrk
+    volumes:
+      - ./artifacts/zap:/zap/wrk
+    command:
+      [
+        "zap.sh",
+        "-cmd",
+        "-autorun",
+        "/zap/wrk/automation.yaml",
+      ]
+    depends_on:
+      app-dast:
+        condition: service_healthy
+    mem_limit: 2048m
+
+  newman:
+    profiles: ["newman"]
+    image: postman/newman:alpine
+    volumes:
+      - ./postman:/etc/newman:ro
+    working_dir: /etc/newman
+    depends_on:
+      app-dast:
+        condition: service_healthy
+    mem_limit: 512m
 
 volumes:
   dev-db-data:

@@ -53,6 +53,10 @@ def _env_bool_strict(name: str, default: bool = False) -> bool:
 
 DEBUG = _env_bool_strict("DEBUG", default=False)
 
+# DAST / scanner compose: DEBUG=False without SSL redirect. Never set in production.
+_PHOTBOX_DAST = _env_flag("PHOTBOX_DAST") or _env_flag("SCANNER")
+_PHOTBOX_DAST_RAISE_THROTTLES = False
+
 
 def _detect_test_mode() -> bool:
     """
@@ -106,7 +110,7 @@ if not _IS_TEST:
     if not (os.environ.get('DJANGO_SECRET_KEY') or os.environ.get('SECRET_KEY')):
         _missing.append('DJANGO_SECRET_KEY or SECRET_KEY')
 
-    if not DEBUG:
+    if not DEBUG and not _PHOTBOX_DAST:
         if not os.environ.get('ALLOWED_HOSTS'):
             _missing.append('ALLOWED_HOSTS')
         if not os.environ.get('CORS_ALLOWED_ORIGINS'):
@@ -167,14 +171,14 @@ X_FRAME_OPTIONS = 'DENY'
 #    Only activated when DEBUG=False so local dev isn't broken.
 # ============================================================
 if not DEBUG:
-    SECURE_SSL_REDIRECT            = True
-    SECURE_HSTS_SECONDS            = 31536000   # 1 year
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD            = True
+    SECURE_SSL_REDIRECT            = not _PHOTBOX_DAST
+    SECURE_HSTS_SECONDS            = 0 if _PHOTBOX_DAST else 31536000   # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = not _PHOTBOX_DAST
+    SECURE_HSTS_PRELOAD            = not _PHOTBOX_DAST
     SECURE_BROWSER_XSS_FILTER      = True
     SECURE_REFERRER_POLICY         = 'no-referrer'
-    SESSION_COOKIE_SECURE          = True
-    CSRF_COOKIE_SECURE             = True
+    SESSION_COOKIE_SECURE          = not _PHOTBOX_DAST
+    CSRF_COOKIE_SECURE             = not _PHOTBOX_DAST
     SECURE_PROXY_SSL_HEADER        = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_REDIRECT_EXEMPT = [
         r'^api/health-check/?$',
@@ -183,6 +187,19 @@ if not DEBUG:
 
     if '*' in ALLOWED_HOSTS:
         raise ImproperlyConfigured("ALLOWED_HOSTS must not contain '*' when DEBUG=False.")
+
+    if _PHOTBOX_DAST:
+        ALLOWED_HOSTS = list(
+            dict.fromkeys(
+                ALLOWED_HOSTS + ['app', 'localhost', '127.0.0.1', 'testserver']
+            )
+        )
+        _PHOTBOX_DAST_RAISE_THROTTLES = True
+else:
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    SECURE_SSL_REDIRECT = False
+    SECURE_HSTS_SECONDS = 0
 
 
 # ============================================================
@@ -390,6 +407,12 @@ REST_FRAMEWORK = {
         'password_reset_request': '3/minute',  # nosec B105 - throttle scope label, not a secret.
     },
 }
+
+if _PHOTBOX_DAST_RAISE_THROTTLES:
+    # Scanner profile only — never production. Avoid false-green on anon 429s.
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['anon'] = '10000/minute'
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['share_code_probe'] = '10000/minute'
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['guest_access'] = '10000/minute'
 
 SPECTACULAR_SETTINGS = {
     'COMPONENT_SPLIT_REQUEST': True,
