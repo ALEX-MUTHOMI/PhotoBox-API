@@ -1,0 +1,200 @@
+{
+  "info": {
+    "name": "PhotoBox Kenya Public Contracts",
+    "description": "Hand-authored Kenya surface. NEVER includes Daraja STK callback.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/health-check/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('health 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('no debug leak', function () { pm.expect(pm.response.json()).to.not.have.property('debug'); });",
+              "pm.test('json content-type', function () { pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sequential share code is 404",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/galleries/g/1/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('404', function () { pm.response.to.have.status(404); });",
+              "pm.test('json not found', function () {",
+              "  var j = pm.response.json();",
+              "  pm.expect(j.detail || j).to.be.ok;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Anonymous UUID gallery trap is 404",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/galleries/00000000-0000-0000-0000-000000000001/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('uuid trap 404', function () { pm.response.to.have.status(404); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Anonymous share detail no cover",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/galleries/g/{{shareCode}}/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('401 unauthenticated', function () { pm.response.to.have.status(401); });",
+              "pm.test('no title cover scenes phone', function () {",
+              "  var j = pm.response.json();",
+              "  pm.expect(j).to.not.have.property('title');",
+              "  pm.expect(j).to.not.have.property('cover_photo');",
+              "  pm.expect(j).to.not.have.property('scenes');",
+              "  pm.expect(j).to.not.have.property('client_phone');",
+              "  if (j.gallery) {",
+              "    pm.expect(j.gallery).to.not.have.property('title');",
+              "    pm.expect(j.gallery).to.not.have.property('client_phone');",
+              "  }",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Guest access GET is not STK",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/galleries/g/{{shareCode}}/guest-access/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('not 200 success body', function () {",
+              "  pm.expect([401, 403, 405]).to.include(pm.response.code);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Guest access without PIN is 403",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{baseUrl}}/api/galleries/g/{{shareCode}}/guest-access/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('403', function () { pm.response.to.have.status(403); });",
+              "pm.test('no gallery_access cookie', function () {",
+              "  var setCookie = pm.response.headers.get('Set-Cookie') || '';",
+              "  pm.expect(setCookie).to.not.match(/gallery_access=/);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Four digit PIN rejected",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"pin\":\"1234\"}" },
+        "url": "{{baseUrl}}/api/galleries/g/{{shareCode}}/guest-access/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('400 short pin', function () { pm.response.to.have.status(400); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Billing webhook GET is not open",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/billing/webhook/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('not 200 data', function () {",
+              "  pm.expect([401, 403, 405]).to.include(pm.response.code);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Anonymous schema rejected",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/api/schema/"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('schema locked', function () {",
+              "  pm.expect([401, 403]).to.include(pm.response.code);",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
