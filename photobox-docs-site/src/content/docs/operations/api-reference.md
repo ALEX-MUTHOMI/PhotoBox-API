@@ -3,7 +3,7 @@ title: API Reference
 description: High-level endpoint map for gallery operations, ingestion, and core system routes.
 ---
 
-Interactive schema and ReDoc remain available from the Django application at `/api/schema/` and `/api/docs/`. This page is the high-level route map that engineers can scan quickly.
+Interactive schema and ReDoc are available at `/api/schema/` and `/api/docs/` and require a **photographer JWT** in production (`SERVE_PUBLIC=False`). Anonymous access is rejected. This page is the high-level route map that engineers can scan quickly.
 
 ## Gallery endpoints
 
@@ -31,7 +31,7 @@ Interactive schema and ReDoc remain available from the Django application at `/a
 | Method | Endpoint | Description | Auth |
 | --- | --- | --- | --- |
 | `GET` | `/api/health-check/` | Health probe for uptime systems | None |
-| `GET` | `/api/schema/` | OpenAPI schema | None |
-| `GET` | `/api/docs/` | ReDoc documentation | None |
+| `GET` | `/api/schema/` | OpenAPI schema | Photographer JWT |
+| `GET` | `/api/docs/` | ReDoc documentation | Photographer JWT |
 | `POST` | `/api/user/create/` | Register a new account | None |
 | `POST` | `/api/user/token/` | Obtain a JWT pair | None |

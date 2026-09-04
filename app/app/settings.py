@@ -393,6 +393,11 @@ REST_FRAMEWORK = {
 
 SPECTACULAR_SETTINGS = {
     'COMPONENT_SPLIT_REQUEST': True,
+    'SERVE_PUBLIC': False,
+    'SERVE_PERMISSIONS': ['gallery.permissions.IsPhotographerUser'],
+    'SERVE_AUTHENTICATION': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
 }
 
 

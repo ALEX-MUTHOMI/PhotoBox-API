@@ -8,17 +8,34 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf.urls.static import static
 from django.conf import settings
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from core import views as core_views
+from gallery.permissions import IsPhotographerUser
+
+# Django root handlers — JSON only (DRF renderers never see unmatched paths).
+handler400 = "core.views.bad_request_json"
+handler403 = "core.views.permission_denied_json"
+handler404 = "core.views.not_found_json"
+handler500 = "core.views.server_error_json"
+
+_schema_auth = {
+    "authentication_classes": [JWTAuthentication],
+    "permission_classes": [IsPhotographerUser],
+}
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('health/', core_views.health_check, name='health'),
     path('api/health-check/', core_views.health_check, name='health-check'),
-    path('api/schema/', SpectacularAPIView.as_view(), name='api-schema'),
+    path(
+        'api/schema/',
+        SpectacularAPIView.as_view(**_schema_auth),
+        name='api-schema',
+    ),
     path(
         'api/docs/',
-        SpectacularRedocView.as_view(url_name='api-schema'),
+        SpectacularRedocView.as_view(url_name='api-schema', **_schema_auth),
         name='api-docs',
     ),
     path('api/user/', include('user.urls')),
