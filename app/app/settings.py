@@ -229,7 +229,7 @@ INSTALLED_APPS = [
     'dj_rest_auth.registration',
 
     # First-party
-    'core',
+    'core.apps.CoreConfig',
     'user',
     'gallery',
     'billing',
@@ -860,8 +860,8 @@ if _IS_TEST:
     # view's throttle_classes directly (as they already do).
     # The cache is already set to LocMemCache above when _IS_TEST is True.
 
-    # -- DRF: strip the schema class in tests to avoid spurious OpenAPI warnings --
-    REST_FRAMEWORK['DEFAULT_SCHEMA_CLASS'] = 'rest_framework.schemas.openapi.AutoSchema'
+    # Keep Spectacular as DEFAULT_SCHEMA_CLASS in tests so CI catches OpenAPI
+    # generation breakages (do not swap to DRF AutoSchema).
 
 
 
