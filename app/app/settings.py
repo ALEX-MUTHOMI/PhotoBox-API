@@ -531,6 +531,16 @@ LEMON_SQUEEZY_STORE_ID  = os.environ.get('LEMON_SQUEEZY_STORE_ID', '')
 LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY   = os.environ.get('LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY', '')
 LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY = os.environ.get('LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY', '')
 
+# Daraja / M-Pesa STK callback (Phase D stub) — secret_token + optional IP allowlist.
+DARAJA_CALLBACK_IP_ALLOWLIST = [
+    ip.strip()
+    for ip in os.environ.get('DARAJA_CALLBACK_IP_ALLOWLIST', '').split(',')
+    if ip.strip()
+]
+DARAJA_CALLBACK_TOKEN_TTL_SECONDS = int(
+    os.environ.get('DARAJA_CALLBACK_TOKEN_TTL_SECONDS', 900)
+)
+
 
 # ============================================================
 # 19. EMAIL

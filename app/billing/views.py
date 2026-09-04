@@ -10,16 +10,27 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, generics
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from drf_spectacular.utils import extend_schema
 
 from gallery.permissions import IsPhotographerUser
 
 from .models import Subscription
 from .serializers import SubscriptionSerializer
 from .tasks import process_lemon_squeezy_webhook
+from .daraja import consume_daraja_callback_token, record_daraja_webhook_once
+from gallery.client_ip import get_request_client_ip
 
 
 def _webhook_rejected(http_status):
     return Response({"detail": "Webhook rejected."}, status=http_status)
+
+
+def _daraja_ip_allowed(request) -> bool:
+    allowlist = getattr(settings, "DARAJA_CALLBACK_IP_ALLOWLIST", None) or []
+    if not allowlist:
+        return True
+    return get_request_client_ip(request) in allowlist
+
 
 # ==========================================
 # MODULE 1: THE HIGH-CONCURRENCY PAYMENT GATEWAY
@@ -76,6 +87,45 @@ class WebhookReceiverView(APIView):
         # Async Handoff
         process_lemon_squeezy_webhook.delay(payload_data, event_id, payload_hash)
         return Response("Payload queued for processing.", status=status.HTTP_202_ACCEPTED)
+
+
+@extend_schema(exclude=True)
+class DarajaCallbackView(APIView):
+    """
+    Safaricom STK callback stub (Phase D).
+
+    Auth is secret_token (query) + optional IP allowlist — not an HMAC header.
+    Never fail-open when the token is missing.
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    @extend_schema(exclude=True)
+    def post(self, request):
+        if not _daraja_ip_allowed(request):
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+
+        raw_token = request.query_params.get("secret_token") or request.data.get("secret_token")
+        token_row = consume_daraja_callback_token(raw_token)
+        if token_row is None:
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+
+        body = request.data if isinstance(request.data, dict) else {}
+        checkout_id = (
+            body.get("CheckoutRequestID")
+            or body.get("checkout_request_id")
+            or token_row.checkout_request_id
+            or ""
+        )
+        result_code = body.get("ResultCode", body.get("result_code"))
+        provider_event_id = f"daraja:{checkout_id}:{result_code}:{token_row.token_hash[:16]}"
+
+        if not record_daraja_webhook_once(provider_event_id):
+            # Idempotent replay — acknowledge without mutating quota again.
+            return Response({"detail": "Already processed."}, status=status.HTTP_200_OK)
+
+        # STK success path is intentionally a stub: ledger mutation lands with KES product.
+        return Response({"detail": "Accepted."}, status=status.HTTP_202_ACCEPTED)
 
 
 class SubscriptionStatusView(generics.RetrieveAPIView):

@@ -116,6 +116,29 @@ class DeadLetterQueue(models.Model):
     def __str__(self):
         return f"DLQ: {self.event_id}"
 
+
+class DarajaCallbackToken(models.Model):
+    """
+    Unguessable single-use STK callback secret (R2.6).
+
+    Daraja callbacks are not HMAC-signed like Lemon Squeezy; we mint a hashed
+    secret_token at STK initiate and require it on the callback URL.
+    """
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="daraja_callback_tokens",
+    )
+    checkout_request_id = models.CharField(max_length=64, blank=True, default="")
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Daraja token {self.token_hash[:8]}…"
+
+
 # ==========================================
 # DATABASE AUTOMATION (SIGNALS)
 # ==========================================
