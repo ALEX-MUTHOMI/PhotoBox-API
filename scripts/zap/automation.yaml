@@ -1,0 +1,78 @@
+# OWASP ZAP Automation Framework — passive-only scan of PhotoBox API.
+# Active attacks disabled. Kenya anonymous GET probes only.
+#
+# NEVER request Daraja / Safaricom STK callback (no GET, no POST, no spider).
+# That endpoint is a payment webhook stub; ZAP must not exercise it.
+---
+env:
+  contexts:
+    - name: photobox-api
+      urls:
+        - http://app-dast:8000/api/health-check/
+        - http://app-dast:8000/health/
+        - http://app-dast:8000/api/galleries/
+      includePaths:
+        - "http://app-dast:8000/api/health-check/.*"
+        - "http://app-dast:8000/health/.*"
+        - "http://app-dast:8000/api/galleries/.*"
+      excludePaths:
+        - "http://app-dast:8000/admin/.*"
+        - "http://app-dast:8000/api/billing/.*"
+        - "http://app-dast:8000/api/billing/daraja.*"
+        - "http://app-dast:8000/.*/daraja/.*"
+        - "http://app-dast:8000/api/schema/.*"
+        - "http://app-dast:8000/api/docs/.*"
+  parameters:
+    failOnError: false
+    failOnWarning: false
+    progressToStdout: true
+
+jobs:
+  - type: passiveScan-config
+    parameters:
+      maxAlertsPerRule: 20
+      scanOnlyInScope: true
+
+  # No OpenAPI import — must not advertise or spider Daraja.
+
+  - type: requestor
+    requests:
+      - url: http://app-dast:8000/api/health-check/
+        method: GET
+      - url: http://app-dast:8000/health/
+        method: GET
+      - url: http://app-dast:8000/api/galleries/g/AbCdEfGhIj/
+        method: GET
+      - url: http://app-dast:8000/api/galleries/g/AbCdEfGhIj/guest-access/
+        method: GET
+      - url: http://app-dast:8000/api/galleries/g/AbCdEfGhIj/guest-logout/
+        method: GET
+      - url: http://app-dast:8000/api/galleries/g/1/
+        method: GET
+      - url: http://app-dast:8000/api/galleries/00000000-0000-0000-0000-000000000001/
+        method: GET
+
+  - type: spider
+    parameters:
+      context: photobox-api
+      url: http://app-dast:8000/api/health-check/
+      maxDuration: 2
+      maxDepth: 2
+
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 10
+
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/wrk
+      reportFile: zap-passive
+      reportTitle: PhotoBox OWASP ZAP Passive Scan
+
+  - type: report
+    parameters:
+      template: traditional-html
+      reportDir: /zap/wrk
+      reportFile: zap-passive
+      reportTitle: PhotoBox OWASP ZAP Passive Scan

@@ -26,3 +26,8 @@ if compose run --rm test python -m pip_audit --version >/dev/null 2>&1; then
 else
   echo "pip-audit is not installed in the current test image; Poetry security group must be installed before enabling this check." >&2
 fi
+
+# Optional: set RUN_ZAP_PASSIVE=1 to also run OWASP ZAP passive against the live app.
+if [ "${RUN_ZAP_PASSIVE:-0}" = "1" ]; then
+  bash scripts/ci/zap_passive.sh
+fi
