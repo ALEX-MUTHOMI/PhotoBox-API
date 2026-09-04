@@ -134,6 +134,21 @@ files = [
 ]
 
 [[package]]
+name = "blurhash"
+version = "1.1.5"
+description = "Pure-Python implementation of the blurhash algorithm."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "blurhash-1.1.5-py2.py3-none-any.whl", hash = "sha256:96a8686e8b9fced1676550b814e59256214e2d4033202b16c91271ed4d317fec"},
+    {file = "blurhash-1.1.5.tar.gz", hash = "sha256:181e1484b6a8ab5cff0ef37739150c566f4a72f2ab0dcb79660b6cee69c137a9"},
+]
+
+[package.extras]
+test = ["Pillow", "numpy", "pytest"]
+
+[[package]]
 name = "boolean-py"
 version = "5.0"
 description = "Define boolean algebras, create and parse boolean expressions and create custom boolean DSL."
@@ -2601,4 +2616,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "6b64d9faae8ee911595b0d1ceb8fc1e962328d2df7aa92ee5a923553018a4479"
+content-hash = "559b86c7801c0899ffc6c19c3b0b39136832c57fb46f5cc57a7e1ffddaa89201"

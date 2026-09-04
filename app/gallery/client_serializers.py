@@ -3,6 +3,7 @@
 from rest_framework import serializers
 from django.utils.html import escape, strip_tags
 from urllib.parse import urlparse
+from drf_spectacular.utils import extend_schema_field
 
 from gallery.client_auth import normalize_gallery_email
 from gallery.models import (
@@ -40,20 +41,68 @@ class MagicLinkConsumeSerializer(serializers.Serializer):
 
 
 class GuestAccessSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    pin = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    # PIN may be omitted so the view can return 403 (plan: no cookies, no hash).
+    # If a PIN is sent, it must be at least 6 characters (4-digit ATM PINs → 400).
+    pin = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        write_only=True,
+        max_length=128,
+    )
 
     def validate_email(self, value):
+        if not value:
+            return None
         return normalize_gallery_email(value)
+
+    def validate_pin(self, value):
+        pin = str(value or "")
+        if not pin:
+            return ""
+        if len(pin) < 6:
+            raise serializers.ValidationError("PIN must be at least 6 characters.")
+        return pin
 
 
 class GalleryPublicPhotoSerializer(serializers.ModelSerializer):
-    delivery_url = serializers.ReadOnlyField()
-    aspect_ratio = serializers.ReadOnlyField()
+    delivery_url = serializers.SerializerMethodField()
+    delivery_url_tile = serializers.SerializerMethodField()
+    delivery_url_lightbox = serializers.SerializerMethodField()
+    download_url = serializers.SerializerMethodField()
+    aspect_ratio = serializers.SerializerMethodField()
     original_filename = serializers.SerializerMethodField()
 
     def get_original_filename(self, obj):
         return safe_client_text(obj.original_filename)
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_delivery_url(self, obj):
+        return safe_client_url(obj.delivery_url)
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_delivery_url_tile(self, obj):
+        return safe_client_url(obj.delivery_url_tile)
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_delivery_url_lightbox(self, obj):
+        return safe_client_url(obj.delivery_url_lightbox)
+
+    @extend_schema_field(serializers.FloatField(allow_null=True))
+    def get_aspect_ratio(self, obj):
+        return obj.aspect_ratio
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_download_url(self, obj):
+        allow = self.context.get("allow_downloads", True)
+        role = self.context.get("access_role")
+        if allow is False:
+            return None
+        if role == GalleryAccessRole.GUEST and allow is False:
+            return None
+        # Guests never get original download URLs when downloads disabled;
+        # when enabled, still omit from default public photo payload (use download endpoint).
+        return None
 
     class Meta:
         model = Photo
@@ -61,6 +110,9 @@ class GalleryPublicPhotoSerializer(serializers.ModelSerializer):
             'id',
             'original_filename',
             'delivery_url',
+            'delivery_url_tile',
+            'delivery_url_lightbox',
+            'download_url',
             'aspect_ratio',
             'width',
             'height',
@@ -98,6 +150,7 @@ class GalleryPublicSerializer(serializers.ModelSerializer):
     title = serializers.SerializerMethodField()
     cover_image_url = serializers.SerializerMethodField()
     cover_photo = serializers.SerializerMethodField()
+    share_code = serializers.CharField(read_only=True)
 
     def get_title(self, obj):
         return safe_client_text(obj.title)
@@ -112,6 +165,7 @@ class GalleryPublicSerializer(serializers.ModelSerializer):
         model = Event
         fields = [
             'id',
+            'share_code',
             'title',
             'event_type',
             'event_date',

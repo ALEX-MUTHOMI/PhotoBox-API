@@ -178,6 +178,7 @@ case "$SUITE" in
     exec python -m pytest \
       gallery/tests/test_share_code.py \
       gallery/tests/test_guest_pin_only.py \
+      gallery/tests/test_masonry_delivery.py \
       gallery/tests/test_dual_lane_auth.py \
       gallery/tests/test_client_gallery_serialization.py \
       gallery/tests/test_events_api.py \

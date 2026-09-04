@@ -516,6 +516,8 @@ CLOUDFLARE_R2_DELETE_SECRET_ACCESS_KEY = os.environ.get('CLOUDFLARE_R2_DELETE_SE
 # Cloudinary acts as transform + cache layer only.
 # It fetches originals from R2 on first request and serves WebP to clients.
 CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
+CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '')
+CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', '')
 
 
 # ============================================================

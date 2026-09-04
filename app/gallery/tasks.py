@@ -281,14 +281,13 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
         return {"status": "skipped_non_image", "photo_id": photo_id}
 
     workspace = photo.scene.event.workspace
-    if not workspace.watermark_logo:
-        return {"status": "skipped_no_watermark", "photo_id": photo_id}
+    # Always generate a web derivative (Phase B) — watermark when logo exists.
 
     if not photo.r2_object_key:
         return {"status": "skipped_no_origin", "photo_id": photo_id}
 
     web_key = _build_web_derivative_r2_key(photo)
-    if photo.web_r2_object_key == web_key:
+    if photo.web_r2_object_key == web_key and photo.blurhash:
         return {"status": "already_generated", "photo_id": photo_id, "web_r2_object_key": web_key}
 
     temp_source_path = None
@@ -311,23 +310,33 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
                     break
                 temp_source_file.write(chunk)
 
+        from gallery.blurhash_util import encode_image_blurhash
+
         with PILImage.open(temp_source_path) as raw_image:
             raw_image.draft(
                 "RGB",
                 (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
             )
             prepared = ImageOps.exif_transpose(raw_image, in_place=True) or raw_image
+            if prepared.mode not in ("RGB", "RGBA"):
+                prepared = prepared.convert("RGB")
             width, height = prepared.size
             prepared.thumbnail(
                 (WEB_DERIVATIVE_MAX_DIMENSION, WEB_DERIVATIVE_MAX_DIMENSION),
                 PILImage.Resampling.LANCZOS,
             )
-            watermarked = _apply_workspace_watermark(prepared, workspace)
+            blurhash_value = encode_image_blurhash(prepared)
+            if workspace.watermark_logo:
+                watermarked = _apply_workspace_watermark(prepared, workspace)
+            else:
+                watermarked = prepared
+            # R2.1: strip EXIF/GPS — never write camera metadata into web derivatives.
             watermarked.save(
                 temp_output_path,
                 format="WEBP",
                 quality=WEB_DERIVATIVE_QUALITY,
                 method=6,
+                exif=b"",
             )
 
         uploaded = upload_local_file_to_r2(
@@ -338,11 +347,14 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
         if not uploaded:
             raise RuntimeError("Web derivative upload failed.")
 
-        Photo.objects.filter(id=photo.id).update(
-            web_r2_object_key=web_key,
-            width=width,
-            height=height,
-        )
+        update_fields = {
+            "web_r2_object_key": web_key,
+            "width": width,
+            "height": height,
+        }
+        if blurhash_value:
+            update_fields["blurhash"] = blurhash_value
+        Photo.objects.filter(id=photo.id).update(**update_fields)
         return {"status": "completed", "photo_id": photo_id, "web_r2_object_key": web_key}
     except Exception as exc:
         logger.exception("[WEB DERIVATIVE] Failed for photo %s: %s", photo_id, exc)
