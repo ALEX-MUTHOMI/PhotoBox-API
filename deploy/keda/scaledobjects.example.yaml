@@ -1,0 +1,63 @@
+# Example KEDA ScaledObjects for PhotoBox elastic workers.
+# These are design templates — wire to your orchestrator after leaving
+# single-VM Compose. Scale-out MUST pull an immutable GHCR digest.
+#
+# Hard rules:
+# - Separate ScaledObjects for image-processing vs archive-zip (bulkheads).
+# - maxReplicaCount must respect PgBouncer pool size and ZIP lease RAM caps.
+# - Do NOT scale Postgres pods with the same pattern.
+# - Do NOT scale on CPU alone during PIN floods — prefer p99 / queue depth.
+# - Migrate is a Job, never a replica startup command.
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: photobox-api
+  namespace: photobox
+spec:
+  scaleTargetRef:
+    name: photobox-api
+  minReplicaCount: 2
+  maxReplicaCount: 20  # must satisfy: max * workers <= pgbouncer.default_pool_size
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        metricName: photobox_http_request_duration_p99
+        query: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="photobox-api",route!~".*guest-access.*"}[2m])) by (le))
+        threshold: "0.25"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: photobox-celery-image
+  namespace: photobox
+spec:
+  scaleTargetRef:
+    name: photobox-celery-image
+  minReplicaCount: 1
+  maxReplicaCount: 30
+  triggers:
+    - type: redis
+      metadata:
+        address: redis:6379
+        listName: image-processing
+        listLength: "50"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: photobox-celery-archive-zip
+  namespace: photobox
+spec:
+  scaleTargetRef:
+    name: photobox-celery-archive-zip
+  minReplicaCount: 0
+  # Cap at ARCHIVE_ZIP_GLOBAL_LEASES (RAM-bound) — never exceed lease physics.
+  maxReplicaCount: 20
+  triggers:
+    - type: redis
+      metadata:
+        address: redis:6379
+        listName: archive-zip
+        listLength: "5"
