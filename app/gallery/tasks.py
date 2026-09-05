@@ -28,9 +28,15 @@ PILImage.MAX_IMAGE_PIXELS = int(
     getattr(settings, "PHOTO_MAX_IMAGE_PIXELS", 89_478_485)
 )
 
-from core.quota import release_workspace_bytes
-from gallery.filename_utils import sanitize_gallery_filename
-from gallery.models import GalleryArchiveJob, GalleryArchiveType, Photo, VisibilityChoices
+# Late imports after pixel cap: archive/web tasks open untrusted images.
+from core.quota import release_workspace_bytes  # noqa: E402
+from gallery.filename_utils import sanitize_gallery_filename  # noqa: E402
+from gallery.models import (  # noqa: E402
+    GalleryArchiveJob,
+    GalleryArchiveType,
+    Photo,
+    VisibilityChoices,
+)
 
 logger = logging.getLogger(__name__)
 

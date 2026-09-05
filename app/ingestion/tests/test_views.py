@@ -128,3 +128,30 @@ class IngestionDatabaseIntegrityTests(TestCase):
 
         # The ultimate proof: The transaction rolled back. Zero records created.
         self.assertEqual(MediaAsset.objects.count(), 0, "FATAL: Partial database save detected!")
+
+    @patch('gallery.storage.infer_content_type', return_value='video/mp4')
+    @patch('ingestion.views.generate_r2_presigned_post')
+    def test_rejects_filename_content_type_mismatch(self, mock_boto, _mock_infer):
+        """
+        Defense in depth: IMAGE tickets must not mint with a video Content-Type.
+        Blocks ticket minting when extension policy and MIME inference disagree.
+        """
+        mock_boto.return_value = {
+            "upload_url": "https://r2.cloudflare.com/bucket",
+            "post_url": "https://r2.cloudflare.com/bucket",
+            "post_fields": {},
+        }
+        payload = {
+            "scene_id": str(self.scene.id),
+            "files": [
+                {
+                    "filename": "photo.jpg",
+                    "file_size": 1000,
+                    "client_reference_id": "mismatch_1",
+                }
+            ],
+        }
+        response = self.client.post(self.url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(MediaAsset.objects.count(), 0)
+        mock_boto.assert_not_called()

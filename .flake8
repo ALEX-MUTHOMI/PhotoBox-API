@@ -1,6 +1,11 @@
-# Compatibility shim for Compose runs whose cwd is /app.
-# Authoritative policy lives at repository root: /.flake8
 [flake8]
+# PhotoBox Flake8 Configuration (repo root — used by host CI and local runs)
+#
+# Historical spacing / wrapping debt is ignored so flake8 stays focused on
+# correctness (unused imports, undefined names) and egregious line length.
+# Do not raise max-line-length or re-enable ignored codes to “greenwash” CI;
+# fix real F/E402 issues in the modules that introduce them.
+
 max-line-length = 140
 
 exclude =
@@ -18,6 +23,9 @@ exclude =
     fixtures,
     htmlcov,
     .pytest_cache,
+    photobox-docs-site,
+    node_modules,
+    artifacts,
     manage.py
 
 per-file-ignores =
@@ -25,6 +33,7 @@ per-file-ignores =
     */settings.py: F401, F403
     */__init__.py: F401
     */gallery/management/commands/seed_db.py: F541
+    app/settings.py: F401, F403
 
 extend-ignore =
     E111,

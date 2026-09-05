@@ -19,7 +19,6 @@ from gallery.client_auth import (
     GalleryCookieJWTAuthentication,
     clear_gallery_access_cookie,
     clear_gallery_access_session_cookie,
-    get_gallery_access_session_id,
     hash_magic_link_token,
     issue_gallery_access_token,
     normalize_gallery_email,

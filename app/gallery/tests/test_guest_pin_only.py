@@ -10,10 +10,6 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import Workspace
-from gallery.client_auth import (
-    encode_gallery_access_session_cookie,
-    issue_gallery_access_token,
-)
 from gallery.models import Event, GalleryAccessRole, GalleryAccessSession, Scene, VisibilityChoices
 
 

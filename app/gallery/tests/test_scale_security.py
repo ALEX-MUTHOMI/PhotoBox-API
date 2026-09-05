@@ -2,14 +2,13 @@
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, TestCase, override_settings
-from django.urls import reverse
 from rest_framework.test import APIRequestFactory
 
 from gallery.db_batch import iter_pk_batches
 from gallery.models import Event, Photo, Scene
 from gallery.tasks import build_gallery_archive
 from gallery.throttles import FavoriteSelectionThrottle, MagicLinkConsumeThrottle
-from gallery.zip_lease import ZipLease, acquire_zip_lease, release_zip_lease
+from gallery.zip_lease import acquire_zip_lease, release_zip_lease
 
 
 class ArchiveQueueBindingTests(SimpleTestCase):

@@ -47,11 +47,7 @@ from gallery.storage import (
 )
 from gallery.tasks import compute_photo_phash, generate_photo_web_derivative
 from gallery.throttles import HeavyLaneTicketThrottle
-from .serializers import (
-    MAX_IMAGE_SIZE_BYTES,
-    MAX_VIDEO_SIZE_BYTES,
-    BulkManifestSerializer,
-)
+from .serializers import BulkManifestSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -192,9 +188,20 @@ def _phase1_prepare_assets(
             )
 
         max_bytes = file_size
-        mime_prefix = "image/" if media_type == "IMAGE" else "video/"
         from gallery.storage import infer_content_type
         content_type = infer_content_type(sanitized_name)
+        mime_prefix = "image/" if media_type == "IMAGE" else "video/"
+        if not str(content_type).startswith(mime_prefix):
+            logger.warning(
+                "Rejecting heavy-lane ticket: media_type=%s content_type=%r filename=%r",
+                media_type,
+                content_type,
+                sanitized_name,
+            )
+            return None, Response(
+                {"detail": "Filename media type does not match manifest media_type."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Pure HMAC computation — no network call, safe outside DB transaction
         presigned = generate_r2_presigned_post(

@@ -1,6 +1,3 @@
-from pathlib import Path
-
-
 def test_promo_and_fortress_workflows_exist(repo_root):
     workflows = repo_root / ".github" / "workflows"
     names = {path.name for path in workflows.glob("*.yml")}
@@ -98,6 +95,10 @@ def test_ci_helpers_and_coverage_gate(scripts_root, repo_root):
     ).read_text(encoding="utf-8")
     assert "::add-mask::" in mask
     assert "inputs:" in mask
+    assert (repo_root / ".flake8").is_file()
+    host = (scripts_root / "ci" / "lint_security_host.sh").read_text(encoding="utf-8")
+    assert "--config=.flake8" in host
+    assert "--max-line-length=100" not in host
 
 
 def test_scale_readme_documents_envelopes_and_elastic(repo_root):

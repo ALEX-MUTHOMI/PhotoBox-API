@@ -14,6 +14,8 @@ from datetime import timedelta
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
+from core.cors_allowlist import assert_cors_origins_safe
+
 
 # ============================================================
 # 0. PATH RESOLUTION
@@ -497,8 +499,6 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 # Reject wildcard / substring preview origins in production.
-from core.cors_allowlist import assert_cors_origins_safe
-
 assert_cors_origins_safe(CORS_ALLOWED_ORIGINS, debug=DEBUG)
 
 CSRF_TRUSTED_ORIGINS = [

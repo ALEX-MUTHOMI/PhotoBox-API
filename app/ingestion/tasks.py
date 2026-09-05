@@ -1,27 +1,26 @@
 """Celery maintenance tasks for abandoned heavy-lane uploads."""
 
 import logging
-from typing import Dict, Any
+from datetime import timedelta
+from typing import Any, Dict
+
 from celery import shared_task
 from django.db import DatabaseError, transaction
-from django.db.models import F
-from django.db.models.functions import Greatest
 from django.utils import timezone
-from datetime import timedelta
 
 logger = logging.getLogger(__name__)
+
 
 @shared_task(bind=True, name="ingestion.tasks.reap_abandoned_uploads", max_retries=5)
 def reap_abandoned_uploads(self) -> Dict[str, Any]:
     """
     THE FIX: The Reaper Task with Phantom Upload Defense.
     Finds PENDING assets older than 24 hours.
-    CRITICALLY: Verifies via Cloudflare R2 if the file actually exists 
+    CRITICALLY: Verifies via Cloudflare R2 if the file actually exists
     before refunding the workspace quota. Uses exponential backoff on outages.
     """
     # Local imports prevent circular dependencies at Django boot time
-    from gallery.models import Photo  
-    from core.models import Workspace
+    from gallery.models import Photo
     from gallery.storage import r2_object_exists
 
     # 1. Look for abandoned tickets

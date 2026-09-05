@@ -1,10 +1,10 @@
 """
 Automated Threat Model Security Test Suite for PhotoBox-API.
 """
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+from core.security import verify_webhook_timestamp
 from core.turnstile import verify_turnstile_token
-from core.security import verify_webhook_signature, verify_webhook_timestamp
 
 
 class TestTurnstileBotDefense:

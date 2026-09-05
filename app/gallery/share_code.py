@@ -31,7 +31,6 @@ def is_valid_share_code_format(value: str) -> bool:
 
 def mint_unique_share_code(*, model_cls, field: str = "share_code") -> str:
     """Allocate a unique share_code with a hard retry cap (plan R2.7)."""
-    last_error: Exception | None = None
     for _ in range(SHARE_CODE_MINT_MAX_ATTEMPTS):
         code = generate_share_code()
         if model_cls.objects.filter(**{field: code}).exists():
