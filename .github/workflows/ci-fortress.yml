@@ -23,7 +23,7 @@ on:
         required: false
         default: "true"
       git_sha:
-        description: "Optional CI image SHA to pull (default: this ref SHA)"
+        description: "Optional CI image SHA (full or abbreviated; default: this ref SHA). Must match a Secure PhotoBox CI build that already pushed :ci-<sha>."
         required: false
         default: ""
 
@@ -45,19 +45,28 @@ jobs:
       git_sha: ${{ steps.tag.outputs.git_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Resolve abbreviated workflow_dispatch SHAs to full objects.
+          fetch-depth: 0
       - name: Resolve image tag
         id: tag
         run: |
+          set -euo pipefail
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           REPO="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
-          SHA="${{ inputs.git_sha }}"
-          if [ -z "$SHA" ]; then
-            SHA="${{ github.sha }}"
+          RAW_SHA="${{ inputs.git_sha }}"
+          if [ -z "$RAW_SHA" ]; then
+            RAW_SHA="${{ github.sha }}"
+          fi
+          # Expand abbreviated SHAs so :ci-<full> matches Secure PhotoBox CI pushes.
+          if ! SHA="$(git rev-parse --verify "${RAW_SHA}^{commit}" 2>/dev/null)"; then
+            echo "::error::Cannot resolve git_sha='${RAW_SHA}' on this ref. Pass a full SHA from a green Secure PhotoBox CI run."
+            exit 1
           fi
           TAG="ghcr.io/${OWNER}/${REPO}/photobox-api-app:ci-${SHA}"
           echo "ci_image_tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "git_sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "Using ${TAG}"
+          echo "Using ${TAG} (resolved from '${RAW_SHA}')"
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -70,7 +79,12 @@ jobs:
         env:
           CI_IMAGE_TAG: ${{ steps.tag.outputs.ci_image_tag }}
           GITHUB_SHA: ${{ steps.tag.outputs.git_sha }}
-        run: bash scripts/ci/pull_ci_images.sh
+        run: |
+          set -euo pipefail
+          if ! bash scripts/ci/pull_ci_images.sh; then
+            echo "::error::GHCR image ${CI_IMAGE_TAG} is missing. Fortress reuses the Secure PhotoBox CI image; wait for promotion-gate green on that SHA, then re-dispatch."
+            exit 1
+          fi
 
   zap-passive:
     name: zap-passive
