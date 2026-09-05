@@ -1,5 +1,3 @@
-from uuid import uuid4
-
 from django.apps import apps
 from django.test import TestCase
 from django.urls import resolve, reverse
@@ -9,7 +7,7 @@ class ApiConventionTests(TestCase):
     def test_photographer_and_client_prefixes_remain_distinct(self):
         photographer = resolve(reverse('gallery:event-list'))
         client_gallery = resolve(
-            reverse('gallery_public:detail', kwargs={'gallery_id': uuid4()})
+            reverse('gallery_public:detail', kwargs={'share_code': 'Ab3Cd4Ef5G'})
         )
         self.assertNotEqual(
             photographer.func.cls.__name__,

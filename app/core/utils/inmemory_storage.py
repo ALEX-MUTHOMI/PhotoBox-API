@@ -2,11 +2,11 @@
 Minimal in-memory storage backend for Django test runs.
 
 Why this exists:
-  - The project currently pins Django < 4.1, so the built-in
-    django.core.files.storage.InMemoryStorage is unavailable.
-  - CI should not depend on writable project directories under /app.
+  - CI must not depend on a writable /app bind mount (django-user often cannot
+    create media_root on the host-mounted tree).
   - Tests need a deterministic, disposable storage backend that never touches
     the repository filesystem.
+  - Wired via STORAGES["default"] under Django 5.2 test overrides.
 """
 from __future__ import annotations
 
@@ -42,12 +42,9 @@ class InMemoryTestStorage(Storage):
 
     def _save(self, name, content):
         normalized_name = self._normalize_name(name)
-        if hasattr(content, "seek"):
-            content.seek(0)
         payload = content.read()
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
-
         with self._lock:
             self._files[normalized_name] = payload
         return normalized_name
@@ -62,13 +59,27 @@ class InMemoryTestStorage(Storage):
         with self._lock:
             return normalized_name in self._files
 
+    def listdir(self, path):
+        prefix = self._normalize_name(path)
+        if prefix and not prefix.endswith("/"):
+            prefix = f"{prefix}/"
+        dirs: set[str] = set()
+        files: list[str] = []
+        with self._lock:
+            for name in self._files:
+                if prefix and not name.startswith(prefix):
+                    continue
+                remainder = name[len(prefix):] if prefix else name
+                if "/" in remainder:
+                    dirs.add(remainder.split("/", 1)[0])
+                elif remainder:
+                    files.append(remainder)
+        return sorted(dirs), sorted(files)
+
     def size(self, name):
         normalized_name = self._normalize_name(name)
         with self._lock:
             return len(self._files[normalized_name])
 
     def url(self, name):
-        base_url = settings.MEDIA_URL
-        if not base_url.endswith("/"):
-            base_url = f"{base_url}/"
-        return f"{base_url}{filepath_to_uri(self._normalize_name(name))}"
+        return f"{settings.MEDIA_URL}{filepath_to_uri(self._normalize_name(name))}"

@@ -9,6 +9,7 @@ with clearly labeled overrides at the bottom.
 import os
 import sys
 import mimetypes
+import tempfile
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -818,9 +819,17 @@ if _IS_TEST:
     CELERY_TASK_STORE_EAGER_RESULT = False
 
     # Keep test uploads entirely off the repository filesystem.
-    # Django<4.1 has no built-in InMemoryStorage, so we wire in a tiny
-    # process-local backend for FileField/ImageField saves during tests.
-    DEFAULT_FILE_STORAGE = 'core.utils.inmemory_storage.InMemoryTestStorage'
+    # Django 5.2 reads STORAGES["default"]; DEFAULT_FILE_STORAGE alone is ignored.
+    STORAGES = {
+        "default": {
+            "BACKEND": "core.utils.inmemory_storage.InMemoryTestStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    DEFAULT_FILE_STORAGE = "core.utils.inmemory_storage.InMemoryTestStorage"
+    MEDIA_ROOT = Path(tempfile.gettempdir()) / "photobox-test-media"
 
     # Accepted test uploads stay in RAM instead of spilling to temp files.
     FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
