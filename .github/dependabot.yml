@@ -1,0 +1,117 @@
+version: 2
+# Security updates stay repo-level (GitHub UI). Version bumps: weekly onto
+# development, grouped so one ecosystem cannot dump many unrelated PRs.
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    target-branch: "development"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Nairobi"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    insecure-external-code-execution: deny
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "Django"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "djangorestframework"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "npm"
+    directory: "/photobox-docs-site"
+    target-branch: "development"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Nairobi"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    insecure-external-code-execution: deny
+    groups:
+      docs-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "development"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Nairobi"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      actions-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "actions/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "docker/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "github/codeql-action"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    target-branch: "development"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Nairobi"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      docker-root-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "python"
+        versions:
+          - "3.14-slim"
+          - "3.14"
+          - "3.15-slim"

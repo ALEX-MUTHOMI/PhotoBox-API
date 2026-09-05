@@ -1,0 +1,11 @@
+name: python
+
+queries:
+  - uses: security-extended
+
+paths-ignore:
+  - "photobox-docs-site/**"
+  - "artifacts/**"
+  - "**/node_modules/**"
+  - "**/migrations/**"
+  - "htmlcov/**"

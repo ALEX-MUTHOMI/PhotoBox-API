@@ -1,0 +1,16 @@
+# Default owners for sensitive paths. Require review before merge when
+# branch protection + required reviews are enabled.
+
+* @ALEX-MUTHOMI
+
+/.github/workflows/ @ALEX-MUTHOMI
+/.github/actions/ @ALEX-MUTHOMI
+/.github/dependabot.yml @ALEX-MUTHOMI
+/.github/CODEOWNERS @ALEX-MUTHOMI
+
+/app/billing/ @ALEX-MUTHOMI
+/app/gallery/client_auth.py @ALEX-MUTHOMI
+/app/gallery/pin_gate.py @ALEX-MUTHOMI
+/app/gallery/zip_lease.py @ALEX-MUTHOMI
+/scripts/ci/ @ALEX-MUTHOMI
+/scripts/zap/ @ALEX-MUTHOMI
