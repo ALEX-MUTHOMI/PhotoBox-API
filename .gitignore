@@ -152,5 +152,5 @@ static/
 artifacts/
 app/test_media/
 
-"app/test_media/" 
-.github/workflows/docs-site.yml 
+"app/test_media/"
+

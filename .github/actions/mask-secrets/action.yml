@@ -1,0 +1,65 @@
+name: Mask repository secrets
+description: Register known secret values as log masks (no-op when empty).
+inputs:
+  secret_key:
+    required: false
+    default: ""
+  db_pass:
+    required: false
+    default: ""
+  cloudflare_access_key_id:
+    required: false
+    default: ""
+  cloudflare_secret_access_key:
+    required: false
+    default: ""
+  cloudflare_webhook_secret:
+    required: false
+    default: ""
+  lemon_squeezy_api_key:
+    required: false
+    default: ""
+  lemon_squeezy_webhook_secret_primary:
+    required: false
+    default: ""
+  lemon_squeezy_webhook_secret_secondary:
+    required: false
+    default: ""
+  turnstile_secret_key:
+    required: false
+    default: ""
+  ip_hash_salt:
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Register secret masks
+      shell: bash
+      env:
+        SECRET_KEY_MASK: ${{ inputs.secret_key }}
+        DB_PASS_MASK: ${{ inputs.db_pass }}
+        CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ inputs.cloudflare_access_key_id }}
+        CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ inputs.cloudflare_secret_access_key }}
+        CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ inputs.cloudflare_webhook_secret }}
+        LEMON_SQUEEZY_API_KEY_MASK: ${{ inputs.lemon_squeezy_api_key }}
+        LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ inputs.lemon_squeezy_webhook_secret_primary }}
+        LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ inputs.lemon_squeezy_webhook_secret_secondary }}
+        TURNSTILE_SECRET_KEY_MASK: ${{ inputs.turnstile_secret_key }}
+        IP_HASH_SALT_MASK: ${{ inputs.ip_hash_salt }}
+      run: |
+        for secret_value in \
+          "$SECRET_KEY_MASK" \
+          "$DB_PASS_MASK" \
+          "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
+          "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
+          "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
+          "$LEMON_SQUEEZY_API_KEY_MASK" \
+          "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
+          "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
+          "$TURNSTILE_SECRET_KEY_MASK" \
+          "$IP_HASH_SALT_MASK"; do
+          if [ -n "$secret_value" ]; then
+            echo "::add-mask::$secret_value"
+          fi
+        done

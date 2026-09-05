@@ -1,0 +1,49 @@
+name: Docs Site
+
+on:
+  push:
+    branches: ["main", "staging", "development"]
+    paths:
+      - "photobox-docs-site/**"
+      - ".github/workflows/docs-site.yml"
+  pull_request:
+    branches: ["main", "staging", "development"]
+    paths:
+      - "photobox-docs-site/**"
+      - ".github/workflows/docs-site.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-build:
+    name: Validate and Build Docs
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: photobox-docs-site
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: photobox-docs-site/.nvmrc
+          cache: npm
+          cache-dependency-path: photobox-docs-site/package-lock.json
+
+      - name: Install Docs Dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Validate and Build Docs
+        run: npm run validate
+        env:
+          ASTRO_TELEMETRY_DISABLED: "1"
+          DOCS_SITE_URL: https://docs.photobox.app
