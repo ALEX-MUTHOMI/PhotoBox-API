@@ -1,397 +1,486 @@
-name: PhotoBox Base Engineering CI
+name: Secure PhotoBox CI
+
+# Promotion lane only. Fortress soak lives in ci-fortress.yml so a red PR
+# linter cannot cascade-skip nightly ZAP/load, and fortress never cancels
+# in-flight runs (separate concurrency group with cancel-in-progress: false).
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ci-promo-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   push:
-    branches: ["main", "staging", "development"]
+    branches: ["development"]
   pull_request:
-    branches: ["main", "staging", "development"]
+    branches: ["development", "staging", "main"]
+
+env:
+  COMPOSE_SAFE_ENV_FILE: .env.example
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   validate:
     name: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Install Poetry
+        run: pipx install poetry
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
       - name: Validate repository and config
         run: bash scripts/ci/validate.sh
 
-  lint:
-    name: lint
+  lint-security:
+    name: lint-security
     runs-on: ubuntu-latest
-    needs: validate
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
-      - name: Generate CI env
-        run: bash .github/workflows/ci_env.sh
-      - name: Lint
-        run: bash scripts/ci/lint.sh
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Install Poetry
+        run: pipx install poetry
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
+      - name: Install lint + security groups
+        run: poetry install --with lint,security,test,dev --no-root
+      - name: Install pip-audit for host audit
+        run: pip install "pip-audit>=2.7.3,<3"
+      - name: Lint and security (fail-closed)
+        run: bash scripts/ci/lint_security_host.sh
 
-  security:
-    name: security
+  build-images:
+    name: build-images
     runs-on: ubuntu-latest
-    needs: validate
+    timeout-minutes: 30
+    needs: [validate]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ci_image_tag: ${{ steps.tag.outputs.ci_image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve lowercase image coordinates
+        id: image
         run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
-      - name: Generate CI env
-        run: bash .github/workflows/ci_env.sh
-      - name: Security
-        run: bash scripts/ci/security.sh
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ci_tag=ghcr.io/${OWNER}/${REPO}/photobox-api-app:ci-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Build and push CI image once
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            DEV=true
+            APP_UID=1000
+            APP_GID=1000
+          tags: ${{ steps.image.outputs.ci_tag }}
+          cache-from: |
+            type=gha,scope=${{ github.ref_name }}-app
+            type=gha,scope=development-app
+          cache-to: type=gha,mode=max,scope=${{ github.ref_name }}-app
+      - name: Record image tag
+        id: tag
+        run: |
+          TAG="${{ steps.image.outputs.ci_tag }}"
+          echo "ci_image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          mkdir -p reports/ci
+          echo "image_ci_tag=${TAG}" > reports/ci/ci-image.txt
+          echo "git_sha=${{ github.sha }}" >> reports/ci/ci-image.txt
+      - name: Upload image coordinates
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-image-coords
+          path: reports/ci/ci-image.txt
 
   django-smoke:
     name: django-smoke
     runs-on: ubuntu-latest
-    needs: [lint, security]
+    timeout-minutes: 20
+    needs: [build-images, lint-security]
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
       - name: Django smoke
         run: bash scripts/ci/django_smoke.sh
 
-  unit:
-    name: unit
+  gallery-kenya:
+    name: gallery-kenya
     runs-on: ubuntu-latest
-    needs: django-smoke
+    timeout-minutes: 30
+    needs: [django-smoke, build-images]
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
-      - name: Unit tests
-        run: bash scripts/ci/unit.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: Kenya gallery + security suite
+        run: bash scripts/ci/gallery_kenya.sh
 
-  coverage:
-    name: coverage
+  billing-webhooks:
+    name: billing-webhooks
     runs-on: ubuntu-latest
-    needs: django-smoke
+    timeout-minutes: 20
+    needs: [django-smoke, build-images]
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
-      - name: Coverage gate
-        run: bash scripts/ci/coverage.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: Billing webhook + Daraja unit contracts
+        run: bash scripts/ci/billing_webhooks.sh
+
+  invariants-lite:
+    name: invariants-lite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [django-smoke, build-images]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: DSA invariants
+        run: bash scripts/ci/invariants_lite.sh
 
   celery:
     name: celery
     runs-on: ubuntu-latest
-    needs: django-smoke
+    timeout-minutes: 25
+    needs: [django-smoke, build-images]
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
       - name: Celery verification
         run: bash scripts/ci/celery.sh
 
-  integration:
-    name: integration
+  coverage:
+    name: coverage
     runs-on: ubuntu-latest
-    needs: [unit, celery, coverage]
+    timeout-minutes: 40
+    needs: [django-smoke, build-images]
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
-      - name: Integration tests
-        run: bash scripts/ci/integration.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: Coverage gate
+        run: bash scripts/ci/coverage.sh
 
-  toxiproxy:
-    name: toxiproxy
+  newman-kenya:
+    name: newman-kenya
     runs-on: ubuntu-latest
-    needs: integration
+    timeout-minutes: 25
+    needs: [gallery-kenya, billing-webhooks, build-images]
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
-        run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CI env
         run: bash .github/workflows/ci_env.sh
-      - name: Toxiproxy smoke
-        run: bash scripts/ci/toxiproxy_smoke.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.build-images.outputs.ci_image_tag }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: Newman Kenya contracts (no Daraja)
+        run: bash scripts/ci/newman.sh
 
   docker-build:
     name: docker-build
     runs-on: ubuntu-latest
-    needs: toxiproxy
+    timeout-minutes: 25
+    needs: [newman-kenya]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Register secret masks
-        env:
-          SECRET_KEY_MASK: ${{ secrets.SECRET_KEY }}
-          DB_PASS_MASK: ${{ secrets.DB_PASS }}
-          CLOUDFLARE_ACCESS_KEY_ID_MASK: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
-          CLOUDFLARE_SECRET_ACCESS_KEY_MASK: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_WEBHOOK_SECRET_MASK: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
-          LEMON_SQUEEZY_API_KEY_MASK: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
-          LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
-          TURNSTILE_SECRET_KEY_MASK: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          IP_HASH_SALT_MASK: ${{ secrets.IP_HASH_SALT }}
+      - uses: ./.github/actions/mask-secrets
+        with:
+          secret_key: ${{ secrets.SECRET_KEY }}
+          db_pass: ${{ secrets.DB_PASS }}
+          cloudflare_access_key_id: ${{ secrets.CLOUDFLARE_ACCESS_KEY_ID }}
+          cloudflare_secret_access_key: ${{ secrets.CLOUDFLARE_SECRET_ACCESS_KEY }}
+          cloudflare_webhook_secret: ${{ secrets.CLOUDFLARE_WEBHOOK_SECRET }}
+          lemon_squeezy_api_key: ${{ secrets.LEMON_SQUEEZY_API_KEY }}
+          lemon_squeezy_webhook_secret_primary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY }}
+          lemon_squeezy_webhook_secret_secondary: ${{ secrets.LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY }}
+          turnstile_secret_key: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          ip_hash_salt: ${{ secrets.IP_HASH_SALT }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve lowercase prod image tags
+        id: prod_image
         run: |
-          for secret_value in \
-            "$SECRET_KEY_MASK" \
-            "$DB_PASS_MASK" \
-            "$CLOUDFLARE_ACCESS_KEY_ID_MASK" \
-            "$CLOUDFLARE_SECRET_ACCESS_KEY_MASK" \
-            "$CLOUDFLARE_WEBHOOK_SECRET_MASK" \
-            "$LEMON_SQUEEZY_API_KEY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_PRIMARY_MASK" \
-            "$LEMON_SQUEEZY_WEBHOOK_SECRET_SECONDARY_MASK" \
-            "$TURNSTILE_SECRET_KEY_MASK" \
-            "$IP_HASH_SALT_MASK"; do
-            if [ -n "$secret_value" ]; then
-              echo "::add-mask::$secret_value"
-            fi
-          done
-      - name: Generate CI env
-        run: bash .github/workflows/ci_env.sh
-      - name: Docker build
-        run: bash scripts/ci/docker_build.sh
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          BASE="ghcr.io/${OWNER}/${REPO}/photobox-api-app"
+          echo "tag_sha=${BASE}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha_prefix=${BASE}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Build production-shaped image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            DEV=false
+            INSTALL_DEPLOY=true
+          tags: |
+            ${{ steps.prod_image.outputs.tag_sha }}
+            ${{ steps.prod_image.outputs.tag_sha_prefix }}
+          cache-from: |
+            type=gha,scope=${{ github.ref_name }}-app-prod
+            type=gha,scope=development-app-prod
+          cache-to: type=gha,mode=max,scope=${{ github.ref_name }}-app-prod
+      - name: Record digest
+        run: |
+          TAG="${{ steps.prod_image.outputs.tag_sha }}"
+          mkdir -p reports/ci
+          echo "image_tag=${TAG}" > reports/ci/prod-image.txt
+          echo "git_sha=${{ github.sha }}" >> reports/ci/prod-image.txt
+          docker pull "${TAG}"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${TAG}" || true)"
+          echo "image_digest=${DIGEST}" >> reports/ci/prod-image.txt
+      - name: Upload prod image record
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-image-coords
+          path: reports/ci/prod-image.txt
+
+  promotion-gate:
+    name: promotion-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - validate
+      - lint-security
+      - build-images
+      - django-smoke
+      - gallery-kenya
+      - billing-webhooks
+      - invariants-lite
+      - celery
+      - coverage
+      - newman-kenya
+      - docker-build
+    if: always()
+    steps:
+      - name: Evaluate upstream results
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Job results: $results"
+          if echo "$results" | grep -E -q 'failure|cancelled'; then
+            echo "Promotion gate blocked by upstream failure."
+            exit 1
+          fi
+          echo "All promotion gates passed."
