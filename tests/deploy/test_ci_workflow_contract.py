@@ -27,6 +27,16 @@ def test_promotion_gate_evaluates_needs_results(repo_root):
     assert "needs: [build-images, lint-security]" in ci_text
 
 
+def test_fortress_resolves_image_sha_before_pull(repo_root):
+    fortress = (repo_root / ".github" / "workflows" / "ci-fortress.yml").read_text(
+        encoding="utf-8"
+    )
+    pull = (repo_root / "scripts" / "ci" / "pull_ci_images.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "git rev-parse --verify" in fortress
+    assert "fetch-depth: 0" in fortress
+    assert "CI image not found" in pull
 def test_fortress_never_cancels_in_progress(repo_root):
     fortress = (repo_root / ".github" / "workflows" / "ci-fortress.yml").read_text(
         encoding="utf-8"
