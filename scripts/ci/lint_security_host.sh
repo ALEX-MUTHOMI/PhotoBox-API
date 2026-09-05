@@ -11,7 +11,7 @@ poetry run flake8 --config=.flake8 --count --statistics app scripts tests
 
 poetry run bandit -r app -c pyproject.toml -ll -ii
 
-# Export for pip-audit without hashes; findings fail the job (no retry).
+# Audit runtime dependencies only (not lint/test tooling). Fail closed.
 poetry self add poetry-plugin-export >/dev/null 2>&1 || true
-poetry export --without-hashes --with security,lint,test,dev -o /tmp/photobox-requirements-audit.txt
+poetry export --without-hashes --only main -o /tmp/photobox-requirements-audit.txt
 pip-audit -r /tmp/photobox-requirements-audit.txt --desc

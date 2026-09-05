@@ -99,6 +99,7 @@ def test_ci_helpers_and_coverage_gate(scripts_root, repo_root):
     host = (scripts_root / "ci" / "lint_security_host.sh").read_text(encoding="utf-8")
     assert "--config=.flake8" in host
     assert "--max-line-length=100" not in host
+    assert "--only main" in host
 
 
 def test_scale_readme_documents_envelopes_and_elastic(repo_root):
