@@ -34,6 +34,7 @@ x-app-build: &app-build
     APP_GID: ${APP_GID:-1000}
 
 x-repo-mounts: &repo-mounts
+  - ./:/repo-root:ro
   - ./app:/app
   - ./tests:/repo-tests:ro
   - ./pyproject.toml:/repo-config/pyproject.toml:ro
@@ -179,6 +180,11 @@ services:
       <<: *app-environment
       PYTEST_ADDOPTS: --tb=short -v
       EMAIL_BACKEND: django.core.mail.backends.locmem.EmailBackend
+      PHOTOBOX_REPO_ROOT: /repo-root
+      PHOTOBOX_SCRIPTS_ROOT: /scripts
+      PHOTOBOX_APP_ROOT: /app
+      COVERAGE_FILE: /tmp/photobox.coverage
+      COVERAGE_RCFILE: /repo-config/pyproject.toml
     depends_on:
       db:
         condition: service_healthy

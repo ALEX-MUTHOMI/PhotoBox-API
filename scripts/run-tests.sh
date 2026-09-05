@@ -164,7 +164,7 @@ case "$SUITE" in
       /repo-tests/deploy \
       --cov=. \
       --cov-report=term-missing \
-      --cov-report=html:htmlcov \
+      --cov-report=html:/tmp/htmlcov \
       --cov-fail-under=70 \
       --timeout=120 -v --tb=short \
       --ignore=tests/test_cloudinary_integration.py \

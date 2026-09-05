@@ -47,6 +47,31 @@ WEB_DERIVATIVE_MAX_DIMENSION = int(getattr(settings, "PHOTO_WEB_MAX_DIMENSION", 
 WEB_DERIVATIVE_QUALITY = int(getattr(settings, "PHOTO_WEB_QUALITY", 86))
 WATERMARK_SCALE_RATIO = float(getattr(settings, "PHOTO_WATERMARK_SCALE_RATIO", 0.22))
 
+
+def _is_eager_execution(task) -> bool:
+    request = getattr(task, "request", None)
+    if request is None:
+        return False
+    return bool(
+        getattr(request, "is_eager", False) or getattr(request, "called_directly", False)
+    )
+
+
+def _retry_unless_eager(task, exc: Exception, *, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    """Retry in workers; never raise Retry into HTTP when Celery runs eager in tests."""
+    if _is_eager_execution(task):
+        logger.warning(
+            "[%s] Eager execution: not retrying after %s",
+            getattr(task, "name", task.__class__.__name__),
+            exc,
+        )
+        return fallback
+    try:
+        raise task.retry(exc=exc)
+    except MaxRetriesExceededError:
+        return fallback
+
+
 def _sanitise_filename(raw: Optional[str]) -> Optional[str]:
     safe_filename = sanitize_gallery_filename(raw)
     if safe_filename is None and raw:
@@ -364,10 +389,15 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
         return {"status": "completed", "photo_id": photo_id, "web_r2_object_key": web_key}
     except Exception as exc:
         logger.exception("[WEB DERIVATIVE] Failed for photo %s: %s", photo_id, exc)
-        try:
-            raise self.retry(exc=exc)
-        except MaxRetriesExceededError:
-            return {"status": "error", "photo_id": photo_id, "reason": "max_retries_exceeded"}
+        return _retry_unless_eager(
+            self,
+            exc,
+            fallback={
+                "status": "error",
+                "photo_id": photo_id,
+                "reason": "max_retries_exceeded",
+            },
+        )
     finally:
         for temp_path in (temp_source_path, temp_output_path):
             if temp_path and os.path.exists(temp_path):
@@ -454,14 +484,15 @@ def compute_photo_phash(self, photo_id: str) -> Dict[str, Any]:
         }
     except Exception as exc:
         logger.exception("[PHASH] Failed for photo %s: %s", normalized_photo_id, exc)
-        try:
-            raise self.retry(exc=exc)
-        except MaxRetriesExceededError:
-            return {
+        return _retry_unless_eager(
+            self,
+            exc,
+            fallback={
                 "status": "error",
                 "photo_id": normalized_photo_id,
                 "reason": "max_retries_exceeded",
-            }
+            },
+        )
     finally:
         if temp_source_path and os.path.exists(temp_source_path):
             os.remove(temp_source_path)
@@ -549,10 +580,11 @@ def cluster_scene_bursts(self, scene_id: str) -> Dict[str, Any]:
         }
     except Exception as exc:
         logger.exception("[BURST] Clustering failed for scene %s: %s", scene_id, exc)
-        try:
-            raise self.retry(exc=exc)
-        except MaxRetriesExceededError:
-            return {"status": "error", "scene_id": str(scene_uuid)}
+        return _retry_unless_eager(
+            self,
+            exc,
+            fallback={"status": "error", "scene_id": str(scene_uuid)},
+        )
 
 
 def _handle_abandoned_upload(
@@ -737,6 +769,12 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             archive_job_id,
             lease_decision.reason,
         )
+        if _is_eager_execution(self):
+            return {
+                "status": "lease_unavailable",
+                "archive_job_id": archive_job_id,
+                "reason": lease_decision.reason,
+            }
         raise self.retry(countdown=30, exc=RuntimeError(lease_decision.reason))
 
     lease = lease_decision.lease
@@ -826,14 +864,15 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
         GalleryArchiveJob.objects.filter(id=job.id).update(
             status=GalleryArchiveJob.Status.FAILED
         )
-        try:
-            raise self.retry(exc=exc)
-        except MaxRetriesExceededError:
-            return {
+        return _retry_unless_eager(
+            self,
+            exc,
+            fallback={
                 "status": "error",
                 "reason": "max_retries_exceeded",
                 "archive_job_id": archive_job_id,
-            }
+            },
+        )
     finally:
         if lease is not None:
             release_zip_lease(lease)
