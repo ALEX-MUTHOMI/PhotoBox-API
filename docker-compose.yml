@@ -167,6 +167,7 @@ services:
   test:
     profiles: ["test"]
     build: *app-build
+    image: photobox-api-app:dev
     working_dir: /app
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes: *repo-mounts
