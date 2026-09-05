@@ -1,0 +1,202 @@
+name: PhotoBox Fortress Soak
+
+# Nightly / dispatch soak. Separate from Secure PhotoBox CI so:
+# - cancel-in-progress is false (never kill in-flight ZAP/load)
+# - a red PR linter cannot cascade-skip fortress
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ci-fortress
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # Weeknights 02:00 UTC
+    - cron: "0 2 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      run_full_fortress:
+        description: "Run full fortress (ZAP + toxiproxy + dsa-load)"
+        required: false
+        default: "true"
+      git_sha:
+        description: "Optional CI image SHA to pull (default: this ref SHA)"
+        required: false
+        default: ""
+
+env:
+  COMPOSE_SAFE_ENV_FILE: .env.example
+  PHOTBOX_SCALE_ENVELOPE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fortress-prepare:
+    name: fortress-prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      ci_image_tag: ${{ steps.tag.outputs.ci_image_tag }}
+      git_sha: ${{ steps.tag.outputs.git_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image tag
+        id: tag
+        run: |
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          SHA="${{ inputs.git_sha }}"
+          if [ -z "$SHA" ]; then
+            SHA="${{ github.sha }}"
+          fi
+          TAG="ghcr.io/${OWNER}/${REPO}/photobox-api-app:ci-${SHA}"
+          echo "ci_image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "git_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Using ${TAG}"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ steps.tag.outputs.ci_image_tag }}
+          GITHUB_SHA: ${{ steps.tag.outputs.git_sha }}
+        run: bash scripts/ci/pull_ci_images.sh
+
+  zap-passive:
+    name: zap-passive
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [fortress-prepare]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.fortress-prepare.outputs.ci_image_tag }}
+          GITHUB_SHA: ${{ needs.fortress-prepare.outputs.git_sha }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: OWASP ZAP passive (no Daraja)
+        run: bash scripts/ci/zap_passive.sh
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-passive-reports
+          path: artifacts/zap/
+          if-no-files-found: warn
+
+  toxiproxy:
+    name: toxiproxy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [fortress-prepare]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.fortress-prepare.outputs.ci_image_tag }}
+          GITHUB_SHA: ${{ needs.fortress-prepare.outputs.git_sha }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: Toxiproxy resilience
+        run: bash scripts/ci/toxiproxy_smoke.sh
+
+  dsa-load:
+    name: dsa-load
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [fortress-prepare]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate CI env
+        run: bash .github/workflows/ci_env.sh
+      - name: Pull CI image
+        env:
+          CI_IMAGE_TAG: ${{ needs.fortress-prepare.outputs.ci_image_tag }}
+          GITHUB_SHA: ${{ needs.fortress-prepare.outputs.git_sha }}
+        run: bash scripts/ci/pull_ci_images.sh
+      - name: Envelope-aware load levels
+        id: levels
+        run: |
+          case "${PHOTBOX_SCALE_ENVELOPE:-1}" in
+            2) echo "levels=500,1000" >> "$GITHUB_OUTPUT" ;;
+            3) echo "levels=skip" >> "$GITHUB_OUTPUT" ;;
+            *) echo "levels=100,500" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: DSA load harness (429 counted separately)
+        if: ${{ steps.levels.outputs.levels != 'skip' }}
+        run: |
+          echo "Envelope ${PHOTBOX_SCALE_ENVELOPE}: levels ${{ steps.levels.outputs.levels }}"
+          # Harness requires a live gallery + cookies; document as staging soak when
+          # DSA_LOAD_BASE_URL / cookie secrets are configured. Without them, verify
+          # the script imports and --help (fail closed only when explicitly enabled).
+          if [ -n "${{ secrets.DSA_LOAD_BASE_URL }}" ] && [ -n "${{ secrets.DSA_LOAD_COOKIE_FILE }}" ]; then
+            echo "${{ secrets.DSA_LOAD_COOKIE_FILE }}" > /tmp/dsa-cookies.txt
+            python scripts/scale/dsa_load.py \
+              --base-url "${{ secrets.DSA_LOAD_BASE_URL }}" \
+              --gallery-id "${{ secrets.DSA_LOAD_GALLERY_ID }}" \
+              --cookie-file /tmp/dsa-cookies.txt \
+              --levels "${{ steps.levels.outputs.levels }}"
+          else
+            python scripts/scale/dsa_load.py --help
+            echo "DSA_LOAD_* secrets not set — syntax check only (staging soak for full load)."
+          fi
+
+  fortress-gate:
+    name: fortress-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [fortress-prepare, zap-passive, toxiproxy, dsa-load]
+    if: always()
+    steps:
+      - name: Evaluate upstream results
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Job results: $results"
+          if echo "$results" | grep -E -q 'failure|cancelled'; then
+            echo "Fortress gate blocked by upstream failure."
+            exit 1
+          fi
+          echo "All fortress gates passed."
+      - name: Write freshness marker
+        if: success()
+        run: |
+          mkdir -p reports/ci
+          date -u +%Y-%m-%dT%H:%M:%SZ > reports/ci/fortress-freshness.txt
+          echo "git_sha=${{ needs.fortress-prepare.outputs.git_sha }}" >> reports/ci/fortress-freshness.txt
+      - name: Upload freshness marker
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortress-freshness
+          path: reports/ci/fortress-freshness.txt
