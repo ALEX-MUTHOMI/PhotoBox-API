@@ -171,7 +171,9 @@ services:
     working_dir: /app
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes: *repo-mounts
-    entrypoint: ["/scripts/run-tests.sh"]
+    # Invoke via sh so CI works when the bind-mounted script lacks +x
+    # (common on Windows checkouts / Git without core.fileMode).
+    entrypoint: ["/bin/sh", "/scripts/run-tests.sh"]
     command: ["unit"]
     environment:
       <<: *app-environment
