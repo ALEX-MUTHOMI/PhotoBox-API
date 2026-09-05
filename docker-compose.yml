@@ -183,8 +183,10 @@ services:
       PHOTOBOX_REPO_ROOT: /repo-root
       PHOTOBOX_SCRIPTS_ROOT: /scripts
       PHOTOBOX_APP_ROOT: /app
-      COVERAGE_FILE: /tmp/photobox.coverage
-      COVERAGE_RCFILE: /repo-config/pyproject.toml
+      # Writable for non-root django-user (container /tmp is not always usable).
+      COVERAGE_FILE: /home/django-user/.coverage
+      TMPDIR: /home/django-user
+      HOME: /home/django-user
     depends_on:
       db:
         condition: service_healthy
