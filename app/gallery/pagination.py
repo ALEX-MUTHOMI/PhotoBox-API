@@ -57,18 +57,11 @@ def decode_photo_keyset_cursor(raw: str) -> tuple[datetime, UUID]:
 def apply_desc_keyset(queryset: QuerySet, uploaded_at: datetime, photo_id) -> QuerySet:
     """Rows strictly older than (uploaded_at, id) for DESC keyset pages.
 
-    Uses a PostgreSQL row comparison so the planner can walk
-    ``(scene, uploaded_at, id)`` as an ordered Index Scan instead of OR+Sort.
-    SQLite falls back to equivalent Q filters.
+    Uses parameterized ORM predicates equivalent to the PostgreSQL row
+    comparison ``(uploaded_at, id) < (cursor)``. Avoids ``QuerySet.extra``
+    (SQL-injection surface) while remaining index-friendly on
+    ``(scene, uploaded_at, id)``.
     """
-    from django.db import connection
-
-    if connection.vendor == "postgresql":
-        table = queryset.model._meta.db_table
-        return queryset.extra(
-            where=[f"({table}.uploaded_at, {table}.id) < (%s, %s)"],
-            params=[uploaded_at, str(photo_id)],
-        )
     return queryset.filter(
         Q(uploaded_at__lt=uploaded_at)
         | Q(uploaded_at=uploaded_at, id__lt=photo_id)
@@ -77,14 +70,6 @@ def apply_desc_keyset(queryset: QuerySet, uploaded_at: datetime, photo_id) -> Qu
 
 def apply_asc_keyset(queryset: QuerySet, uploaded_at: datetime, photo_id) -> QuerySet:
     """Rows strictly newer than (uploaded_at, id) for ASC client scene pages."""
-    from django.db import connection
-
-    if connection.vendor == "postgresql":
-        table = queryset.model._meta.db_table
-        return queryset.extra(
-            where=[f"({table}.uploaded_at, {table}.id) > (%s, %s)"],
-            params=[uploaded_at, str(photo_id)],
-        )
     return queryset.filter(
         Q(uploaded_at__gt=uploaded_at)
         | Q(uploaded_at=uploaded_at, id__gt=photo_id)
