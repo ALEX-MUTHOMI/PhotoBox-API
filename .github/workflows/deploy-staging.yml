@@ -1,0 +1,118 @@
+name: Deploy Staging
+
+# Promote a GHCR image digest built by Secure PhotoBox CI to staging and smoke it.
+# Requires GitHub Environment `staging` (reviewers recommended) and repository variables:
+#   STAGING_BASE_URL — public staging origin that serves /api/health-check/
+# Optional secrets:
+#   STAGING_DEPLOY_HOOK_URL — HTTPS webhook that accepts IMAGE_DIGEST / IMAGE_TAG JSON
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR image tag (default: ghcr.io/<owner>/<repo>/photobox-api-app:<sha>)"
+        required: false
+        default: ""
+      git_sha:
+        description: "Git SHA used by Secure PhotoBox CI docker-build"
+        required: false
+        default: ""
+      skip_fortress_freshness:
+        description: "Skip fortress freshness gate (emergency only)"
+        required: false
+        default: "false"
+
+jobs:
+  deploy-staging:
+    name: deploy-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging
+    env:
+      STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+      STAGING_DEPLOY_HOOK_URL: ${{ secrets.STAGING_DEPLOY_HOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fortress freshness gate
+        if: ${{ inputs.skip_fortress_freshness != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORTRESS_MAX_AGE_DAYS: "7"
+        run: bash scripts/ci/check_fortress_freshness.sh "${{ github.repository }}"
+
+      - name: Resolve image coordinates
+        id: image
+        run: |
+          set -euo pipefail
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          SHA="${{ inputs.git_sha }}"
+          if [[ -z "${SHA}" ]]; then
+            SHA="${{ github.sha }}"
+          fi
+          TAG="${{ inputs.image_tag }}"
+          if [[ -z "${TAG}" ]]; then
+            TAG="ghcr.io/${OWNER}/${REPO}/photobox-api-app:${SHA}"
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${SHA}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved image tag ${TAG}"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull promoted image
+        run: |
+          set -euo pipefail
+          docker pull "${{ steps.image.outputs.tag }}"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${{ steps.image.outputs.tag }}")"
+          echo "Pulled ${DIGEST}"
+          mkdir -p reports/ci
+          echo "image_tag=${{ steps.image.outputs.tag }}" > reports/ci/staging-promote.txt
+          echo "image_digest=${DIGEST}" >> reports/ci/staging-promote.txt
+          echo "git_sha=${{ steps.image.outputs.sha }}" >> reports/ci/staging-promote.txt
+
+      - name: Invoke staging deploy hook (when configured)
+        if: ${{ env.STAGING_DEPLOY_HOOK_URL != '' }}
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_TAG}")"
+          curl -fsS --max-time 60 \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -d "{\"image_tag\":\"${IMAGE_TAG}\",\"image_digest\":\"${DIGEST}\",\"git_sha\":\"${{ steps.image.outputs.sha }}\"}" \
+            "${STAGING_DEPLOY_HOOK_URL}"
+          echo "Deploy hook accepted"
+
+      - name: Require staging base URL for smoke
+        run: |
+          if [[ -z "${STAGING_BASE_URL}" ]]; then
+            echo "::error::Set repository variable STAGING_BASE_URL for Environment staging before promote smoke can run."
+            exit 1
+          fi
+
+      - name: Staging health + gallery JSON smoke
+        run: bash scripts/ci/staging_smoke.sh "${STAGING_BASE_URL}"
+
+      - name: Upload promote record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-promote-record
+          path: reports/ci/staging-promote.txt
+          if-no-files-found: warn
