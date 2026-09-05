@@ -1,0 +1,31 @@
+name: GHCR CI Image Cleanup
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-images-cleanup
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # Sunday 05:00 UTC — prune stale :ci-* tags
+    - cron: "0 5 * * 0"
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: cleanup-ci-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prune :ci-* images older than 14 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETENTION_DAYS: "14"
+          CUTOFF_EPOCH: ""
+        run: |
+          export CUTOFF_EPOCH="$(date -u -d '14 days ago' +%s)"
+          bash scripts/ci/cleanup_ci_images.sh
