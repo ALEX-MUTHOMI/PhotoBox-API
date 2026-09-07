@@ -58,7 +58,11 @@ from gallery.pin_gate import clear_pin_failures, pin_gate_precheck, record_pin_f
 from gallery.response_headers import GallerySecurityHeadersMixin, apply_gallery_security_headers
 from gallery.share_code import is_valid_share_code_format
 from gallery.storage import generate_r2_presigned_get_url
-from gallery.tasks import _enqueue_archive_job, send_gallery_magic_link_email
+from gallery.tasks import (
+    _enqueue_archive_job,
+    _maybe_resume_stale_archive_job,
+    send_gallery_magic_link_email,
+)
 from gallery.throttles import (
     FavoriteSelectionThrottle,
     GallerySessionReadThrottle,
@@ -80,6 +84,7 @@ class PublishedGalleryMixin:
         gallery = Event.objects.filter(
             share_code=code,
             is_published=True,
+            workspace__is_deleted=False,
         ).first()
         if not gallery:
             raise NotFound("Gallery not found.")
@@ -176,7 +181,7 @@ class GalleryMagicLinkConsumeView(GallerySecurityHeadersMixin, APIView):
             magic_link = (
                 GalleryMagicLink.objects
                 .select_for_update()
-                .select_related("gallery")
+                .select_related("gallery__workspace")
                 .filter(token_hash=token_hash)
                 .first()
             )
@@ -198,7 +203,7 @@ class GalleryMagicLinkConsumeView(GallerySecurityHeadersMixin, APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            if not gallery.is_published:
+            if not gallery.is_published or gallery.workspace.is_deleted:
                 magic_link.delete()
                 return Response(
                     {"detail": "Invalid or already-used magic link."},
@@ -400,6 +405,7 @@ class PublicGalleryDetailView(GallerySecurityHeadersMixin, PublishedGalleryMixin
         photo_queryset = (
             Photo.objects
             .filter(
+                scene__event=gallery,
                 status="READY",
                 visibility__in=allowed_visibility,
             )
@@ -576,6 +582,8 @@ class GalleryArchiveRequestView(GallerySecurityHeadersMixin, PublishedGalleryMix
             .filter(archive_type=GalleryArchiveType.FULL)
             .first()
         )
+        if existing:
+            existing = _maybe_resume_stale_archive_job(existing)
         if existing and existing.status in (
             GalleryArchiveJob.Status.PENDING,
             GalleryArchiveJob.Status.PROCESSING,
@@ -674,6 +682,8 @@ class GalleryFavoritesArchiveRequestView(GallerySecurityHeadersMixin, PublishedG
             )
             .first()
         )
+        if existing:
+            existing = _maybe_resume_stale_archive_job(existing)
         if existing and existing.status in (
             GalleryArchiveJob.Status.PENDING,
             GalleryArchiveJob.Status.PROCESSING,
