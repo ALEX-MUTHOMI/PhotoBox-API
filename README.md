@@ -19,7 +19,7 @@ Architecture, security, and operations docs: [`photobox-docs-site/`](photobox-do
 
 | Layer | Choice |
 | --- | --- |
-| API | Python 3.12, Django 4, Django REST Framework |
+| API | Python 3.12, Django 5.2 LTS, Django REST Framework |
 | Jobs | Celery + Redis |
 | Data | PostgreSQL |
 | Vault | Cloudflare R2 |
@@ -37,7 +37,7 @@ docker compose run --rm app python manage.py migrate
 docker compose up app celery
 ```
 
-The API listens on `http://localhost:8001` by default (`APP_PORT`). Health: `GET /api/health-check/`.
+The API listens on `http://localhost:8001` by default (`APP_PORT`). Liveness: `GET /health/`. Readiness: `GET /api/health-check/`.
 
 ## Tests
 

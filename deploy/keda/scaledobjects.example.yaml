@@ -2,6 +2,11 @@
 # These are design templates — wire to your orchestrator after leaving
 # single-VM Compose. Scale-out MUST pull an immutable GHCR digest.
 #
+# HONESTY: PhotoBox does not currently emit Prometheus HTTP histograms
+# (photobox_http_request_duration_p99). The API ScaledObject trigger below
+# is aspirational until metrics are wired. Prefer Redis queue-depth triggers
+# for Celery workers today.
+#
 # Hard rules:
 # - Separate ScaledObjects for image-processing vs archive-zip (bulkheads).
 # - maxReplicaCount must respect PgBouncer pool size and ZIP lease RAM caps.

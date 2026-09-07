@@ -5,8 +5,14 @@ set -e
 # 1. Boot sequence
 echo "[INFO] Waiting for database..."
 python manage.py wait_for_db
-echo "[INFO] Applying migrations..."
-python manage.py migrate
+# Production compose runs migrations in a one-shot `migrate` service.
+# Opt in here only when RUN_MIGRATIONS=1 (e.g. single-container boots).
+if [ "${RUN_MIGRATIONS:-0}" = "1" ]; then
+  echo "[INFO] Applying migrations (RUN_MIGRATIONS=1)..."
+  python manage.py migrate --noinput
+else
+  echo "[INFO] Skipping migrations (RUN_MIGRATIONS!=1; expect compose migrate job)."
+fi
 echo "[INFO] Collecting static files..."
 python manage.py collectstatic --noinput
 

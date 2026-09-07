@@ -79,6 +79,16 @@ def health_check(request):
 
 
 @require_GET
+def liveness_probe(request):
+    """Zero-dependency liveness for container orchestrators (no DB/cache)."""
+    from django.http import HttpResponse
+
+    return apply_api_security_headers(
+        HttpResponse("ok", content_type="text/plain", status=200)
+    )
+
+
+@require_GET
 def resolve_domain(request):
     """Edge tenant resolution for cloudflare-workers/domain-router.js."""
     expected = getattr(settings, 'CLOUDFLARE_WORKER_SHARED_SECRET', '')

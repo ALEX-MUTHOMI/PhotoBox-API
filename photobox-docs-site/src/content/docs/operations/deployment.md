@@ -26,9 +26,14 @@ CodeQL runs in a separate workflow (`python` + `actions`). Do not make CodeQL a 
 - Use a dedicated `CLOUDFLARE_WEBHOOK_SECRET`.
 - Configure production email credentials.
 - Set `SENTRY_DSN` and `SENTRY_ENVIRONMENT=production`.
-- Run `python manage.py migrate` as a **one-shot job** — not on every HPA replica.
+- Run `python manage.py migrate` as a **one-shot job** (`wait_for_db && migrate --noinput`) — not on every HPA/app replica (`RUN_MIGRATIONS=0`).
 - Run `python manage.py collectstatic`.
-- Start Celery workers for image-processing **and** the dedicated `archive-zip` queue; start Celery Beat.
+- Start Celery workers for image-processing **and** the dedicated `archive-zip` queue (`celery-archive`, prefetch=1, stop_grace_period ≥ soft time limit); start Celery Beat.
+- Redis: `maxmemory-policy noeviction` with AOF on; set `CELERY_RESULT_EXPIRES` / `ignore_result` on media tasks.
+- Liveness `GET /health/` (no DB); readiness `GET /api/health-check/`.
+- Require `IP_HASH_SALT` (≥16 chars) when `DEBUG=False`.
+- Apply R2 AbortIncompleteMultipartUpload lifecycle (`deploy/r2/`).
+- After Cloudflare notification rules point at `/api/v1/ingestion/webhook/`, set `ENABLE_LEGACY_R2_WEBHOOK=0`.
 - Enforce `client_max_body_size 5m` in Nginx.
 - Enable HTTPS.
 - Scale-out must pull an **immutable image digest** from GHCR (the digest `promotion-gate` certified), never `:latest`.

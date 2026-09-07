@@ -6,6 +6,9 @@ rules. All logic lives in ingestion.views.R2WebhookView.
 """
 import logging
 
+from django.conf import settings
+from django.http import JsonResponse
+
 from ingestion.views import R2WebhookView
 
 logger = logging.getLogger(__name__)
@@ -15,6 +18,11 @@ class CloudflareWebhookView(R2WebhookView):
     """Deprecation shim: one implementation, two URL names."""
 
     def dispatch(self, request, *args, **kwargs):
+        if not getattr(settings, "ENABLE_LEGACY_R2_WEBHOOK", True):
+            return JsonResponse(
+                {"detail": "Legacy R2 webhook disabled."},
+                status=410,
+            )
         logger.warning(
             "[DEPRECATED-ROUTE] POST /api/v1/webhooks/cloudflare/r2/ — "
             "repoint the Cloudflare notification rule to /api/v1/ingestion/webhook/"
