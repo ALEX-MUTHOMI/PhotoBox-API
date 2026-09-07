@@ -639,10 +639,39 @@ class PhotoFastLaneViewSet(
 
     def perform_destroy(self, instance):
         """
-        SECURITY (Atomic Reversal): 
-        When an image is deleted from the Fast Lane, safely refund the Workspace Quota.
+        SECURITY (Atomic Reversal):
+        Refund workspace quota when still charged, delete the row, then purge
+        R2 + Cloudinary fetch assets after commit (never on the HTTP thread).
+
+        Lock the row before deciding refund so a concurrent poison-pill FAILED
+        path cannot double-release the same reserved bytes.
         """
-        file_size = instance.file_size_bytes
-        workspace = instance.scene.event.workspace
-        release_workspace_bytes(workspace.id, file_size)
-        instance.delete()
+        from gallery.asset_purge import enqueue_purge_photo_assets
+        from gallery.cloudinary_delivery import build_r2_public_url
+        from gallery.photo_failure import should_refund_on_destroy
+
+        with transaction.atomic():
+            locked = (
+                Photo.objects.select_for_update()
+                .select_related("scene__event")
+                .filter(pk=instance.pk)
+                .first()
+            )
+            if locked is None:
+                return
+
+            r2_key = locked.r2_object_key or None
+            web_key = locked.web_r2_object_key or None
+            r2_public_url = build_r2_public_url(web_key) if web_key else None
+            file_size = locked.file_size_bytes or 0
+            workspace_id = locked.scene.event.workspace_id
+            refund = should_refund_on_destroy(locked.status)
+
+            if refund:
+                release_workspace_bytes(workspace_id, file_size)
+            locked.delete()
+            enqueue_purge_photo_assets(
+                r2_object_key=r2_key,
+                web_r2_object_key=web_key,
+                r2_public_url=r2_public_url,
+            )

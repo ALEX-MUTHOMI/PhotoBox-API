@@ -98,9 +98,11 @@ def purge_expired_archives() -> Dict[str, Any]:
 def hard_delete_expired_galleries() -> Dict[str, Any]:
     """Irreversible step: remove bytes for galleries past the grace period."""
     from core.quota import release_workspace_bytes
+    from gallery.asset_purge import enqueue_purge_photo_assets
+    from gallery.cloudinary_delivery import build_r2_public_url
     from gallery.db_batch import iter_pk_batches
     from gallery.models import Event, Photo
-    from gallery.storage import delete_r2_objects
+    from django.db import transaction
 
     grace_days = int(getattr(settings, "GALLERY_HARD_DELETE_GRACE_DAYS", 30))
     cutoff = timezone.now() - timedelta(days=grace_days)
@@ -122,24 +124,33 @@ def hard_delete_expired_galleries() -> Dict[str, Any]:
         if not photos:
             continue
 
-        keys = [
-            key
+        purge_specs = [
+            {
+                "r2_object_key": photo["r2_object_key"],
+                "web_r2_object_key": photo["web_r2_object_key"],
+                "r2_public_url": (
+                    build_r2_public_url(photo["web_r2_object_key"])
+                    if photo["web_r2_object_key"]
+                    else None
+                ),
+            }
             for photo in photos
-            for key in (photo["r2_object_key"], photo["web_r2_object_key"])
-            if key
         ]
+        refund = sum(photo["file_size_bytes"] or 0 for photo in photos)
 
-        if keys and not delete_r2_objects(keys):
+        try:
+            with transaction.atomic():
+                Photo.objects.filter(id__in=[photo["id"] for photo in photos]).delete()
+                release_workspace_bytes(event.workspace_id, refund)
+                for spec in purge_specs:
+                    enqueue_purge_photo_assets(**spec)
+        except Exception:
             galleries_failed += 1
-            logger.error(
-                "[RETENTION] R2 delete failed for gallery %s. Rows and quota retained.",
+            logger.exception(
+                "[RETENTION] Hard-delete failed for gallery %s. Rows and quota retained.",
                 event.id,
             )
             continue
-
-        refund = sum(photo["file_size_bytes"] or 0 for photo in photos)
-        Photo.objects.filter(id__in=[photo["id"] for photo in photos]).delete()
-        release_workspace_bytes(event.workspace_id, refund)
 
         photos_deleted += len(photos)
         bytes_reclaimed += refund
