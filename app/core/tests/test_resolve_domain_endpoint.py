@@ -79,9 +79,17 @@ class ResolveDomainEndpointTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_soft_deleted_workspace_does_not_resolve(self):
+        # Warm the domain cache first — soft-delete must invalidate without
+        # relying on a test-only cache.clear().
+        warm = self.client.get(
+            "/api/v1/core/resolve-domain/",
+            {"domain": "photos.studio.example"},
+            HTTP_X_WORKER_SECRET=WORKER_SECRET,
+        )
+        self.assertEqual(warm.json()["workspace_id"], str(self.workspace.id))
+
         self.workspace.is_deleted = True
         self.workspace.save(update_fields=["is_deleted"])
-        cache.clear()
 
         response = self.client.get(
             "/api/v1/core/resolve-domain/",

@@ -178,22 +178,32 @@ class Workspace(SoftDeleteModel):
 
     def save(self, *args, **kwargs):
         previous_domain = None
+        previous_deleted = False
         # UUID PKs are assigned before INSERT, so `self.pk` is not a reliable
         # "this row already exists" check. `_state.adding` is.
         if not self._state.adding:
-            previous_domain = (
+            previous = (
                 type(self).all_objects.filter(pk=self.pk)
-                .values_list("custom_domain", flat=True)
+                .values_list("custom_domain", "is_deleted")
                 .first()
             )
+            if previous is not None:
+                previous_domain, previous_deleted = previous
+
         super().save(*args, **kwargs)
 
         old_host = (previous_domain or "").strip()
         new_host = (self.custom_domain or "").strip()
-        if old_host.lower() == new_host.lower():
-            return
+        deleted_flipped = previous_deleted != bool(self.is_deleted)
 
         from core.domain_index import invalidate_domain_cache
+
+        # Soft-delete must drop domain cache even when custom_domain is unchanged;
+        # otherwise resolve-domain keeps serving the tenant until TTL.
+        if old_host.lower() == new_host.lower():
+            if deleted_flipped and new_host:
+                invalidate_domain_cache(new_host)
+            return
 
         if old_host:
             invalidate_domain_cache(old_host)
