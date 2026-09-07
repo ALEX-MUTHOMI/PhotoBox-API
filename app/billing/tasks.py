@@ -4,7 +4,6 @@ import logging
 import json
 import hashlib
 from celery import shared_task
-from celery.exceptions import MaxRetriesExceededError
 from django.db import transaction, OperationalError
 from django.contrib.auth import get_user_model
 from checkout.models import CheckoutSession, PricingPlan
@@ -240,11 +239,13 @@ def process_lemon_squeezy_webhook(self, payload_data, event_id, payload_hash=Non
     except OperationalError as exc:
         # DB is locked by another transaction. Wait and retry safely.
         logger.warning(f"Database locked on {event_id}. Retrying {self.request.retries}/3...")
-        try:
-            raise self.retry(exc=exc)
-        except MaxRetriesExceededError:
+        from core.celery_retry import retry_or_call  # noqa: PLC0415
+
+        def _dlq_locked():
             logger.error(f"Max retries exhausted for webhook {event_id}. Routing to DLQ.")
             safe_create_dlq(event_id, payload_data, "Max retries exceeded (Database locked)")
+
+        return retry_or_call(self, exc, on_exhausted=_dlq_locked)
 
     except (User.DoesNotExist, Subscription.DoesNotExist):
         logger.error(f"User not found for webhook {event_id}.")

@@ -49,14 +49,19 @@ def reap_abandoned_uploads(self) -> Dict[str, Any]:
             # (used by tests and local debugging) we stop quietly instead of
             # propagating Celery's Retry exception into the caller.
             logger.warning("[REAPER] R2 unreachable for Asset %s: %s. Backing off.", asset.id, exc)
-            if getattr(self.request, 'called_directly', False) or getattr(self.request, 'is_eager', False):
-                return {
+            from core.celery_retry import retry_or_return  # noqa: PLC0415
+
+            return retry_or_return(
+                self,
+                exc,
+                countdown=60 * (2 ** self.request.retries),
+                fallback={
                     "status": "deferred",
                     "message": "R2 unavailable; reaper aborted without mutating asset state.",
                     "reaped_count": reaped_count,
                     "phantom_count": phantom_count,
-                }
-            raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+                },
+            )
 
         with transaction.atomic():
             if file_physically_exists:

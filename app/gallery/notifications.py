@@ -21,6 +21,8 @@ from django.utils.html import strip_tags
 from django.utils import timezone
 from datetime import timedelta
 
+from core.celery_retry import retry_or_return
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,4 +114,12 @@ def send_gallery_ready_email(self, event_id: str):
             f"[NOTIFY] ❌ Email send failed for Event {event_id} "
             f"(attempt {self.request.retries + 1}): {exc}"
         )
-        raise self.retry(exc=exc)
+        return retry_or_return(
+            self,
+            exc,
+            fallback={
+                "status": "error",
+                "event_id": event_id,
+                "reason": "email_send_failed",
+            },
+        )

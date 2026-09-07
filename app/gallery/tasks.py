@@ -14,7 +14,6 @@ from uuid import UUID
 
 from botocore.exceptions import BotoCoreError, ClientError
 from celery import shared_task
-from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
 from django.db import OperationalError, transaction
 from django.db.models import Sum
@@ -23,6 +22,8 @@ from django.utils.text import slugify
 from PIL import Image as PILImage
 from PIL import ImageOps
 from PIL import UnidentifiedImageError
+
+from core.celery_retry import is_eager_execution, retry_or_call, retry_or_return
 
 PILImage.MAX_IMAGE_PIXELS = int(
     getattr(settings, "PHOTO_MAX_IMAGE_PIXELS", 89_478_485)
@@ -49,27 +50,12 @@ WATERMARK_SCALE_RATIO = float(getattr(settings, "PHOTO_WATERMARK_SCALE_RATIO", 0
 
 
 def _is_eager_execution(task) -> bool:
-    request = getattr(task, "request", None)
-    if request is None:
-        return False
-    return bool(
-        getattr(request, "is_eager", False) or getattr(request, "called_directly", False)
-    )
+    return is_eager_execution(task)
 
 
 def _retry_unless_eager(task, exc: Exception, *, fallback: Dict[str, Any]) -> Dict[str, Any]:
     """Retry in workers; never raise Retry into HTTP when Celery runs eager in tests."""
-    if _is_eager_execution(task):
-        logger.warning(
-            "[%s] Eager execution: not retrying after %s",
-            getattr(task, "name", task.__class__.__name__),
-            exc,
-        )
-        return fallback
-    try:
-        raise task.retry(exc=exc)
-    except MaxRetriesExceededError:
-        return fallback
+    return retry_or_return(task, exc, fallback=fallback)
 
 
 def _sanitise_filename(raw: Optional[str]) -> Optional[str]:
@@ -165,6 +151,7 @@ def _apply_workspace_watermark(base_image: PILImage.Image, workspace) -> PILImag
     acks_late=True,
     reject_on_worker_lost=True,
     queue="image-processing",
+    ignore_result=True,
 )
 def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
     from gallery.models import Photo  # noqa: PLC0415
@@ -220,7 +207,9 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
             "[FAST LANE MONITOR] Cannot determine R2 key for photo %s. Marking FAILED.",
             normalized_photo_id,
         )
-        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
+        from gallery.photo_failure import mark_photo_failed_and_release_quota
+
+        mark_photo_failed_and_release_quota(normalized_photo_id)
         return {"status": "error", "reason": "no_safe_r2_key", "photo_id": normalized_photo_id}
 
     try:
@@ -250,7 +239,9 @@ def process_fast_lane_asset(self, photo_id: str) -> Dict[str, Any]:
             normalized_photo_id,
             exc,
         )
-        Photo.objects.filter(id=normalized_photo_id, status="PENDING").update(status="FAILED")
+        from gallery.photo_failure import mark_photo_failed_and_release_quota
+
+        mark_photo_failed_and_release_quota(normalized_photo_id)
         return {"status": "error", "reason": "unexpected", "photo_id": normalized_photo_id}
 
     return _handle_self_heal(normalized_photo_id, probe_key)
@@ -294,6 +285,7 @@ def _handle_self_heal(photo_id: str, confirmed_key: str) -> Dict[str, Any]:
     name="gallery.tasks.generate_photo_web_derivative",
     acks_late=True,
     reject_on_worker_lost=True,
+    ignore_result=True,
 )
 def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
     from gallery.models import Photo  # noqa: PLC0415
@@ -387,6 +379,20 @@ def generate_photo_web_derivative(self, photo_id: str) -> Dict[str, Any]:
             update_fields["blurhash"] = blurhash_value
         Photo.objects.filter(id=photo.id).update(**update_fields)
         return {"status": "completed", "photo_id": photo_id, "web_r2_object_key": web_key}
+    except (PILImage.DecompressionBombError, UnidentifiedImageError) as exc:
+        logger.warning(
+            "[WEB DERIVATIVE] Unrecoverable image for photo %s: %s",
+            photo_id,
+            exc,
+        )
+        from gallery.photo_failure import mark_photo_failed_and_release_quota
+
+        mark_photo_failed_and_release_quota(photo_id)
+        return {
+            "status": "failed",
+            "photo_id": photo_id,
+            "reason": "unrecoverable_image",
+        }
     except Exception as exc:
         logger.exception("[WEB DERIVATIVE] Failed for photo %s: %s", photo_id, exc)
         return _retry_unless_eager(
@@ -426,6 +432,7 @@ def _schedule_scene_burst_cluster(scene_id: str) -> None:
     acks_late=True,
     reject_on_worker_lost=True,
     queue="image-processing",
+    ignore_result=True,
 )
 def compute_photo_phash(self, photo_id: str) -> Dict[str, Any]:
     """Compute 64-bit pHash from the original R2 object after READY."""
@@ -637,19 +644,21 @@ def _retry_or_fail(
 ) -> Dict[str, Any]:
     from gallery.models import Photo  # noqa: PLC0415
 
-    try:
-        raise task_instance.retry(exc=exc)
-    except MaxRetriesExceededError:
+    def _mark_failed() -> Dict[str, Any]:
         logger.error(
-            "[FAST LANE MONITOR] Max retries exceeded for photo %s. Marking FAILED.",
+            "[FAST LANE MONITOR] Retries exhausted (or eager) for photo %s. Marking FAILED.",
             photo_id,
         )
-        Photo.objects.filter(id=photo_id, status="PENDING").update(status="FAILED")
+        from gallery.photo_failure import mark_photo_failed_and_release_quota
+
+        mark_photo_failed_and_release_quota(photo_id)
         return {
             "status": "error",
             "reason": "max_retries_exceeded",
             "photo_id": photo_id,
         }
+
+    return retry_or_call(task_instance, exc, on_exhausted=_mark_failed)
 
 
 def _safe_archive_component(value: Optional[str], fallback: str) -> str:
@@ -717,6 +726,27 @@ def _get_archive_photos_queryset(job: GalleryArchiveJob):
     return _archive_photos_queryset(job).order_by("pk")
 
 
+def _maybe_resume_stale_archive_job(job: GalleryArchiveJob) -> GalleryArchiveJob:
+    """Reset stuck PROCESSING jobs after the ZIP lease TTL window."""
+    if job.status != GalleryArchiveJob.Status.PROCESSING:
+        return job
+    lease_ttl = int(getattr(settings, "ARCHIVE_ZIP_LEASE_TTL_SECONDS", 60))
+    stale_after = timedelta(seconds=max(lease_ttl * 2, 120))
+    if timezone.now() - job.updated_at <= stale_after:
+        return job
+    updated = GalleryArchiveJob.objects.filter(
+        id=job.id,
+        status=GalleryArchiveJob.Status.PROCESSING,
+    ).update(status=GalleryArchiveJob.Status.PENDING)
+    if updated:
+        logger.warning(
+            "[ARCHIVE] Reset stale PROCESSING job %s to PENDING (lease TTL window exceeded).",
+            job.id,
+        )
+        job.refresh_from_db()
+    return job
+
+
 def _enqueue_archive_job(job_id) -> None:
     queue = getattr(settings, "ARCHIVE_ZIP_QUEUE", "archive-zip")
     build_gallery_archive.apply_async(args=[str(job_id)], queue=queue)
@@ -730,6 +760,7 @@ def _enqueue_archive_job(job_id) -> None:
     queue="archive-zip",
     acks_late=True,
     reject_on_worker_lost=True,
+    ignore_result=True,
 )
 def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
     import time
@@ -758,6 +789,8 @@ def build_gallery_archive(self, archive_job_id: str) -> Dict[str, Any]:
             "archive_job_id": archive_job_id,
             "r2_zip_key": job.r2_zip_key,
         }
+
+    job = _maybe_resume_stale_archive_job(job)
 
     if job.status == GalleryArchiveJob.Status.PROCESSING:
         return {"status": "processing", "archive_job_id": archive_job_id}
