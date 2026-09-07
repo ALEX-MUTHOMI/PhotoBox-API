@@ -95,10 +95,13 @@ Do **not** CDN-cache `/api/galleries/` (PIN / `Vary: Cookie` / `no-store`). Edge
 
 ## Production notes (Phase E)
 
-- Celery workers must consume the **`archive-zip`** queue for ZIP builds (separate from image-processing).
+- Celery workers must consume the **`archive-zip`** queue for ZIP builds (separate from image-processing). Deploy compose runs a dedicated `celery-archive` service with `--prefetch-multiplier=1` and `stop_grace_period: 10m`.
+- Redis deploy policy is **`noeviction`** (keep AOF). Do not use `allkeys-lru` on the shared PIN/ZIP/broker instance. Size `maxmemory` with AOF rewrite headroom.
+- Apply R2 `AbortIncompleteMultipartUpload` lifecycle (`deploy/r2/`).
 - PgBouncer: app DB user **least-privilege** (DML only — no CREATEDB / no SUPERUSER).
-- `CONN_MAX_AGE=0` + `DISABLE_SERVER_SIDE_CURSORS` stay required behind transaction pooling.
+- `CONN_MAX_AGE=0` + `DISABLE_SERVER_SIDE_CURSORS` stay required behind transaction pooling. Runtime `statement_timeout=5s` is skipped for `migrate` / `RUN_MIGRATIONS=1`.
 - ZIP lease **fail-closed** when `DEBUG=False` and Redis is unavailable.
 - CORS: exact photographer/client origins only — never `*.vercel.app` / wildcard previews with credentials.
 - Enable `TRUST_CLOUDFLARE_CLIENT_IP` only behind Cloudflare that strips client-supplied CF-Connecting-IP.
 - Idempotency: LS/R2/Daraja webhooks and guest-access session reuse already; archive-zip **enqueue** must stay single-active-job per gallery under retries.
+- KEDA examples are templates; HTTP p99 Prometheus metrics are **not** emitted yet — use Redis queue depth for workers.

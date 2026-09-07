@@ -158,6 +158,12 @@ FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 IP_HASH_SALT = os.environ.get('IP_HASH_SALT', '')
 LOG_SCRUBBER_SALT = os.environ.get('LOG_SCRUBBER_SALT', '')
 
+if not DEBUG and not _IS_TEST and not _PHOTBOX_DAST:
+    if not IP_HASH_SALT or len(IP_HASH_SALT) < 16:
+        raise ImproperlyConfigured(
+            "IP_HASH_SALT must be set to at least 16 characters when DEBUG=False."
+        )
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL    = 'core.User'
 SITE_ID            = 1
@@ -288,6 +294,13 @@ TEMPLATES = [
 # PgBouncer transaction pooling: hold no server-side cursors and recycle
 # connections every request (CONN_MAX_AGE=0). Direct Postgres can raise
 # DB_CONN_MAX_AGE if desired; never reintroduce .iterator() for archives.
+# Migrate / one-shot jobs must not inherit the 5s runtime statement_timeout.
+_is_migration_process = (
+    "migrate" in sys.argv
+    or os.environ.get("RUN_MIGRATIONS", "").strip() == "1"
+)
+_statement_timeout_ms = 0 if _is_migration_process else 5000
+
 DATABASES = {
     'default': {
         'ENGINE':   'django.db.backends.postgresql',
@@ -300,6 +313,10 @@ DATABASES = {
         'DISABLE_SERVER_SIDE_CURSORS': _env_flag(
             'DISABLE_SERVER_SIDE_CURSORS', default=True
         ),
+        'OPTIONS': {
+            'connect_timeout': 5,
+            'options': f'-c statement_timeout={_statement_timeout_ms}',
+        },
     }
 }
 
@@ -536,6 +553,8 @@ CLOUDFLARE_WORKER_SHARED_SECRET = os.environ.get('CLOUDFLARE_WORKER_SHARED_SECRE
 CLOUDFLARE_ACCESS_KEY_ID        = os.environ.get('CLOUDFLARE_ACCESS_KEY_ID', '')
 CLOUDFLARE_SECRET_ACCESS_KEY    = os.environ.get('CLOUDFLARE_SECRET_ACCESS_KEY', '')
 CLOUDFLARE_WEBHOOK_SECRET       = os.environ.get('CLOUDFLARE_WEBHOOK_SECRET', '')
+# Legacy /api/v1/webhooks/cloudflare/r2/ — set 0 after Cloudflare rules point at ingestion.
+ENABLE_LEGACY_R2_WEBHOOK = _env_flag('ENABLE_LEGACY_R2_WEBHOOK', default=True)
 TURNSTILE_SECRET_KEY = (
     os.environ.get('TURNSTILE_SECRET_KEY')
     or os.environ.get('CLOUDFLARE_TURNSTILE_SECRET_KEY', '')
@@ -601,6 +620,8 @@ CELERY_ACCEPT_CONTENT    = ['json']
 CELERY_TASK_SERIALIZER   = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE          = 'UTC'
+# Bound Redis result growth under maxmemory-policy noeviction.
+CELERY_RESULT_EXPIRES    = int(os.environ.get('CELERY_RESULT_EXPIRES', 3600))
 CELERY_WORKER_MAX_TASKS_PER_CHILD = int(
     os.environ.get('CELERY_WORKER_MAX_TASKS_PER_CHILD', 50)
 )
@@ -819,7 +840,7 @@ if _IS_TEST:
     CELERY_TASK_STORE_EAGER_RESULT = False
 
     # Keep test uploads entirely off the repository filesystem.
-    # Django 5.2 reads STORAGES["default"]; DEFAULT_FILE_STORAGE alone is ignored.
+    # Django 5.2 reads STORAGES["default"]; do not also set DEFAULT_FILE_STORAGE.
     STORAGES = {
         "default": {
             "BACKEND": "core.utils.inmemory_storage.InMemoryTestStorage",
@@ -828,7 +849,6 @@ if _IS_TEST:
             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
         },
     }
-    DEFAULT_FILE_STORAGE = "core.utils.inmemory_storage.InMemoryTestStorage"
     MEDIA_ROOT = Path(tempfile.gettempdir()) / "photobox-test-media"
 
     # Accepted test uploads stay in RAM instead of spilling to temp files.

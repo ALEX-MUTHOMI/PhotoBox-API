@@ -56,6 +56,7 @@ services:
       - SENTRY_DSN=${SENTRY_DSN}
       - SENTRY_ENVIRONMENT=production
       - DEBUG=0
+      - RUN_MIGRATIONS=0
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
       - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
@@ -64,8 +65,10 @@ services:
       - IP_HASH_SALT=${IP_HASH_SALT}
       - LOG_SCRUBBER_SALT=${LOG_SCRUBBER_SALT}
     depends_on:
-      - db
-      - redis
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     networks:
       - photobox_internal
     deploy:
@@ -80,11 +83,43 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health-check/', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 90s
+
+  # ── One-shot migrations (must finish before app/workers) ────────────────────
+  migrate:
+    build:
+      context: .
+      args:
+        - DEV=false
+    restart: "no"
+    command: >
+      sh -c "python manage.py wait_for_db && python manage.py migrate --noinput"
+    environment:
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - RUN_MIGRATIONS=1
+      - DEBUG=0
+      # Required by fail-fast when DEBUG=0 (migrate process still loads settings).
+      - IP_HASH_SALT=${IP_HASH_SALT}
+      - ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
+      - TURNSTILE_SECRET_KEY=${TURNSTILE_SECRET_KEY}
+      - FRONTEND_URL=${FRONTEND_URL}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - photobox_internal
+    security_opt:
+      - no-new-privileges:true
 
   # ── PostgreSQL Database ─────────────────────────────────────────────────────
   db:
@@ -125,7 +160,7 @@ services:
       --appendonly yes
       --requirepass ${REDIS_PASSWORD}
       --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
       --protected-mode yes
     networks:
       - photobox_internal
@@ -141,7 +176,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Celery Worker ───────────────────────────────────────────────────────────
+  # ── Celery Worker (image-processing + default; never archive-zip) ───────────
   celery:
     build:
       context: .
@@ -149,14 +184,14 @@ services:
         - DEV=false
     command: [
       "celery", "-A", "app", "worker",
-      "--loglevel=warning",          # Less verbose in production
+      "--loglevel=warning",
       "--queues=image-processing,default",
       "--concurrency=4",
-      "--time-limit=600",            # Hard kill after 10 minutes
-      "--soft-time-limit=540",       # Graceful SIGTERM at 9 minutes
-      "--without-gossip",            # Reduce Celery cluster chatter (smaller attack surface)
-      "--without-mingle",            # Skip worker state sync on startup
-      "--without-heartbeat",         # Disable heartbeat to reduce Redis traffic
+      "--time-limit=600",
+      "--soft-time-limit=540",
+      "--without-gossip",
+      "--without-mingle",
+      "--without-heartbeat",
     ]
     restart: always
     environment:
@@ -165,6 +200,7 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASS=${DB_PASS}
       - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - RUN_MIGRATIONS=0
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CLOUDFLARE_R2_ENDPOINT=${CLOUDFLARE_R2_ENDPOINT}
@@ -175,8 +211,65 @@ services:
       - SENTRY_DSN=${SENTRY_DSN}
       - SENTRY_ENVIRONMENT=production
     depends_on:
-      - db
-      - redis
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - photobox_internal
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Celery Archive Worker (archive-zip bulkhead) ────────────────────────────
+  celery-archive:
+    build:
+      context: .
+      args:
+        - DEV=false
+    command: [
+      "celery", "-A", "app", "worker",
+      "--loglevel=warning",
+      "--queues=archive-zip",
+      "--concurrency=1",
+      "--prefetch-multiplier=1",
+      "-Ofair",
+      "--time-limit=600",
+      "--soft-time-limit=540",
+      "--without-gossip",
+      "--without-mingle",
+      "--without-heartbeat",
+      "-n", "archive_worker@%h",
+    ]
+    stop_grace_period: 10m
+    restart: always
+    environment:
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - RUN_MIGRATIONS=0
+      - WORKER_ROLE=archive
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CLOUDFLARE_R2_ENDPOINT=${CLOUDFLARE_R2_ENDPOINT}
+      - CLOUDFLARE_R2_BUCKET_NAME=${CLOUDFLARE_R2_BUCKET_NAME}
+      - CLOUDFLARE_ACCESS_KEY_ID=${CLOUDFLARE_ACCESS_KEY_ID}
+      - CLOUDFLARE_SECRET_ACCESS_KEY=${CLOUDFLARE_SECRET_ACCESS_KEY}
+      - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - SENTRY_ENVIRONMENT=production
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     networks:
       - photobox_internal
     deploy:
@@ -205,12 +298,16 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASS=${DB_PASS}
       - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - RUN_MIGRATIONS=0
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
-      - db
-      - redis
-      - celery
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      celery:
+        condition: service_started
     networks:
       - photobox_internal
     deploy:
